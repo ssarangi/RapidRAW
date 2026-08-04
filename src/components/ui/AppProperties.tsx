@@ -383,6 +383,7 @@ export interface CullingSettings {
   blurThreshold: number;
   groupSimilar: boolean;
   filterBlurry: boolean;
+  useSubjectDetection: boolean;
 }
 
 export interface ImageAnalysisResult {
@@ -390,6 +391,7 @@ export interface ImageAnalysisResult {
   qualityScore: number;
   sharpnessMetric: number;
   centerFocusMetric: number;
+  subjectFocusMetric: number | null;
   exposureMetric: number;
   width: number;
   height: number;

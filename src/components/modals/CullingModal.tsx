@@ -80,6 +80,7 @@ export default function CullingModal({
     similarityThreshold: 28,
     filterBlurry: true,
     blurThreshold: 100.0,
+    useSubjectDetection: false,
   });
 
   const [selectedRejects, setSelectedRejects] = useState<Set<string>>(new Set());
@@ -220,6 +221,16 @@ export default function CullingModal({
               </Text>
             </div>
           )}
+        </div>
+        <div>
+          <Switch
+            label={t('modals.culling.useSubjectDetection')}
+            checked={settings.useSubjectDetection}
+            onChange={(v) => setSettings((s) => ({ ...s, useSubjectDetection: v }))}
+          />
+          <Text variant={TextVariants.small} className="mt-1">
+            {t('modals.culling.useSubjectDetectionDesc')}
+          </Text>
         </div>
       </div>
       <div className="flex justify-end gap-3 mt-8">
