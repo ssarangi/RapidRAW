@@ -312,14 +312,8 @@ fn denoise_image(
     let _ = app_handle.emit("denoise-progress", "Loading image...");
 
     let file_bytes = fs::read(path).map_err(|e| e.to_string())?;
-    let mut dynamic_img =
-        load_base_image_from_bytes(&file_bytes, &path_str, false, &settings, None)
-            .map_err(|e| e.to_string())?;
-
-    if is_raw {
-        let _ = app_handle.emit("denoise-progress", "Preparing RAW data...");
-        apply_cpu_default_raw_processing(&mut dynamic_img);
-    }
+    let dynamic_img = load_base_image_from_bytes(&file_bytes, &path_str, false, &settings, None)
+        .map_err(|e| e.to_string())?;
 
     let rgb_img_for_denoiser = dynamic_img.to_rgb32f();
 
@@ -339,25 +333,31 @@ fn denoise_image(
     let _ = app_handle.emit("denoise-progress", "Finalizing data...");
     let _ = app_handle.emit("denoise-progress", "Generating previews...");
 
-    let (w, h) = out_dynamic.dimensions();
-    let (new_w, new_h) = if w > h {
-        if w > 4000 {
-            (4000, (4000.0 * h as f32 / w as f32).round() as u32)
+    let (width, height) = out_dynamic.dimensions();
+    let (new_width, new_height) = if width > height {
+        if width > 4000 {
+            (4000, (4000.0 * height as f32 / width as f32).round() as u32)
         } else {
-            (w, h)
+            (width, height)
         }
     } else {
-        if h > 4000 {
-            ((4000.0 * w as f32 / h as f32).round() as u32, 4000)
+        if height > 4000 {
+            ((4000.0 * width as f32 / height as f32).round() as u32, 4000)
         } else {
-            (w, h)
+            (width, height)
         }
     };
 
-    let denoised_preview = if new_w != w {
-        out_dynamic.resize(new_w, new_h, image::imageops::FilterType::Lanczos3)
+    let mut denoised_preview_source = out_dynamic.clone();
+
+    if is_raw {
+        apply_cpu_default_raw_processing(&mut denoised_preview_source);
+    }
+
+    let denoised_preview = if new_width != width {
+        denoised_preview_source.resize(new_width, new_height, image::imageops::FilterType::Lanczos3)
     } else {
-        out_dynamic.clone()
+        denoised_preview_source
     };
 
     let mut buf_denoised = Cursor::new(Vec::new());
@@ -368,9 +368,13 @@ fn denoise_image(
     let base64_str_denoised = general_purpose::STANDARD.encode(buf_denoised.get_ref());
     let data_url_denoised = format!("data:image/png;base64,{}", base64_str_denoised);
 
-    let original_dynamic = DynamicImage::ImageRgb32F(rgb_img_for_denoiser);
-    let original_preview = if new_w != w {
-        original_dynamic.resize(new_w, new_h, image::imageops::FilterType::Lanczos3)
+    let mut original_dynamic = DynamicImage::ImageRgb32F(rgb_img_for_denoiser);
+
+    if is_raw {
+        apply_cpu_default_raw_processing(&mut original_dynamic);
+    }
+    let original_preview = if new_width != width {
+        original_dynamic.resize(new_width, new_height, image::imageops::FilterType::Lanczos3)
     } else {
         original_dynamic
     };

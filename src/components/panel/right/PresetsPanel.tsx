@@ -11,7 +11,7 @@ import {
   useSensors,
 } from '@dnd-kit/core';
 import { useTranslation } from 'react-i18next';
-import { PresetListType, usePresets, UserPreset } from '../../../hooks/usePresets';
+import { PresetImportFailure, PresetListType, usePresets, UserPreset } from '../../../hooks/usePresets';
 import { useContextMenu } from '../../../context/ContextMenuContext';
 import {
   CopyPlus,
@@ -560,8 +560,7 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
     deleteItem,
     duplicatePreset,
     exportPresetsToFile,
-    importPresetsFromFile,
-    importLegacyPresetsFromFile,
+    importPresetsFromFiles,
     isLoading,
     movePreset,
     overwritePreset,
@@ -687,13 +686,8 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
     isProcessingQueue.current = true;
     setIsGeneratingPreviews(true);
 
-    const pathAtStart = currentImagePathRef.current;
-
     while (previewQueue.current.length > 0) {
-      if (pathAtStart !== currentImagePathRef.current) {
-        previewQueue.current = [];
-        break;
-      }
+      const itemPath = currentImagePathRef.current;
 
       const item = previewQueue.current.shift();
       if (!item) break;
@@ -713,9 +707,8 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
           jsAdjustments: fullPresetAdjustments,
         });
 
-        if (pathAtStart !== currentImagePathRef.current) {
-          previewQueue.current = [];
-          break;
+        if (itemPath !== currentImagePathRef.current) {
+          continue;
         }
 
         const blob = new Blob([new Uint8Array(imageData)], { type: 'image/jpeg' });
@@ -730,12 +723,15 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
       } catch (error) {
         const errStr = String(error);
         if (errStr.includes('No original image loaded') || errStr.includes('cancelled')) {
+          if (itemPath !== currentImagePathRef.current) {
+            continue;
+          }
           previewQueue.current = [];
           break;
         }
 
         console.error(`Failed to generate preview for preset ${preset.name}:`, error);
-        if (pathAtStart === currentImagePathRef.current) {
+        if (itemPath === currentImagePathRef.current) {
           setPreviews((prev: Record<string, string | null>) => ({ ...prev, [preset.id]: null }));
         }
       }
@@ -1037,29 +1033,33 @@ export default function PresetsPanel({ onNavigateToCommunity }: PresetsPanelProp
 
   const handleImportPresets = async () => {
     try {
-      const selectedPath = await openDialog({
+      const selectedPaths = await openDialog({
         filters: [
           { name: t('editor.presets.dialog.allPresetFiles'), extensions: ['rrpreset', 'xmp', 'lrtemplate'] },
           { name: t('editor.presets.dialog.rapidRawPreset'), extensions: ['rrpreset'] },
           { name: t('editor.presets.dialog.legacyPreset'), extensions: ['xmp', 'lrtemplate'] },
         ],
-        multiple: false,
+        multiple: true,
         title: t('editor.presets.dialog.importPresetsTitle'),
       });
 
-      if (typeof selectedPath === 'string') {
-        const isLegacy =
-          selectedPath.toLowerCase().endsWith('.xmp') || selectedPath.toLowerCase().endsWith('.lrtemplate');
-
-        if (isLegacy) {
-          await importLegacyPresetsFromFile(selectedPath);
-        } else {
-          await importPresetsFromFile(selectedPath);
-        }
-
-        setFolderPreviewsGenerated(new Set<string>());
-        setPreviews({});
+      if (!selectedPaths) {
+        return;
       }
+
+      const paths = Array.isArray(selectedPaths) ? selectedPaths : [selectedPaths];
+      if (paths.length === 0) {
+        return;
+      }
+
+      const { failures } = await importPresetsFromFiles(paths);
+
+      setFolderPreviewsGenerated(new Set<string>());
+      setPreviews({});
+
+      failures.forEach((failure: PresetImportFailure) =>
+        console.error(`Failed to import ${failure.fileName}: ${failure.error}`),
+      );
     } catch (error) {
       console.error('Failed to import presets:', error);
     }

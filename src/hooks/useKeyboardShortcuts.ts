@@ -14,6 +14,7 @@ interface KeyboardShortcutsProps {
   sortedImageList: Array<ImageFile>;
   handleBackToLibrary(): void;
   handleDeleteSelected(): void;
+  handleGoHome(): void;
   handleImageSelect(path: string, openInEditor?: boolean): void;
   handlePasteFiles(str: string): void;
   handleToggleFullScreen(): void;
@@ -24,6 +25,7 @@ export const useKeyboardShortcuts = ({
   sortedImageList,
   handleBackToLibrary,
   handleDeleteSelected,
+  handleGoHome,
   handleImageSelect,
   handlePasteFiles,
   handleToggleFullScreen,
@@ -309,42 +311,49 @@ export const useKeyboardShortcuts = ({
         shouldFire: () => true,
         execute: (e: any, s: any) => {
           e.preventDefault();
-          s.ui.setRightPanel(Panel.Adjustments);
+          s.ui.setPanel(Panel.Adjustments);
         },
       },
       toggle_crop_panel: {
         shouldFire: () => true,
         execute: (e: any, s: any) => {
           e.preventDefault();
-          s.ui.setRightPanel(Panel.Crop);
+          s.ui.setPanel(Panel.Crop);
         },
       },
       toggle_masks: {
         shouldFire: () => true,
         execute: (e: any, s: any) => {
           e.preventDefault();
-          s.ui.setRightPanel(Panel.Masks);
+          s.ui.setPanel(Panel.Masks);
         },
       },
       toggle_ai: {
         shouldFire: () => true,
         execute: (e: any, s: any) => {
           e.preventDefault();
-          s.ui.setRightPanel(Panel.Ai);
+          s.ui.setPanel(Panel.Ai);
         },
       },
       toggle_presets: {
         shouldFire: () => true,
         execute: (e: any, s: any) => {
           e.preventDefault();
-          s.ui.setRightPanel(Panel.Presets);
+          s.ui.setPanel(Panel.Presets);
         },
       },
       toggle_metadata: {
         shouldFire: () => true,
         execute: (e: any, s: any) => {
           e.preventDefault();
-          s.ui.setRightPanel(Panel.Metadata);
+          s.ui.setPanel(Panel.Metadata);
+        },
+      },
+      toggle_folder_tree: {
+        shouldFire: () => true,
+        execute: (e: any, s: any) => {
+          e.preventDefault();
+          s.ui.setPanel(Panel.FolderTree);
         },
       },
       toggle_analytics: {
@@ -358,7 +367,38 @@ export const useKeyboardShortcuts = ({
         shouldFire: () => true,
         execute: (e: any, s: any) => {
           e.preventDefault();
-          s.ui.setRightPanel(Panel.Export);
+          s.ui.setPanel(Panel.Export);
+        },
+      },
+      toggle_left_panel: {
+        shouldFire: () => true,
+        execute: (e: any, s: any) => {
+          e.preventDefault();
+          const isOpening = !s.ui.uiVisibility.leftPanel;
+          s.ui.setUI((state: any) => ({
+            uiVisibility: { ...state.uiVisibility, leftPanel: isOpening },
+            leftPanelWidth: isOpening && state.leftPanelWidth < 250 ? 350 : state.leftPanelWidth,
+          }));
+        },
+      },
+      toggle_right_panel: {
+        shouldFire: () => true,
+        execute: (e: any, s: any) => {
+          e.preventDefault();
+          const isOpening = !s.ui.uiVisibility.rightPanel;
+          s.ui.setUI((state: any) => ({
+            uiVisibility: { ...state.uiVisibility, rightPanel: isOpening },
+            rightPanelWidth: isOpening && state.rightPanelWidth < 250 ? 350 : state.rightPanelWidth,
+          }));
+        },
+      },
+      toggle_bottom_panel: {
+        shouldFire: (s: any) => s.ui.activeView !== 'library',
+        execute: (e: any, s: any) => {
+          e.preventDefault();
+          s.ui.setUI((state: any) => ({
+            uiVisibility: { ...state.uiVisibility, filmstrip: !state.uiVisibility.filmstrip },
+          }));
         },
       },
       toggle_library_exif: {
@@ -392,10 +432,10 @@ export const useKeyboardShortcuts = ({
         shouldFire: (s: any) => s.ui.activeView === 'editor' && !!s.editor.selectedImage,
         execute: (e: any, s: any) => {
           e.preventDefault();
-          if (s.ui.activeRightPanel === Panel.Crop) {
+          if (s.ui.activePanel === Panel.Crop) {
             s.editor.setEditor({ isStraightenActive: !s.editor.isStraightenActive });
           } else {
-            s.ui.setRightPanel(Panel.Crop);
+            s.ui.setPanel(Panel.Crop);
             s.editor.setEditor({ isStraightenActive: true });
           }
         },
@@ -489,7 +529,7 @@ export const useKeyboardShortcuts = ({
           s.ui.activeView === 'editor' &&
           !!s.editor.selectedImage &&
           !!s.editor.brushSettings &&
-          s.ui.activeRightPanel === Panel.Masks,
+          s.ui.activePanel === Panel.Masks,
         execute: (e: any, s: any) => {
           e.preventDefault();
           const newSize = Math.min((s.editor.brushSettings.size || 50) + 10, 200);
@@ -501,7 +541,7 @@ export const useKeyboardShortcuts = ({
           s.ui.activeView === 'editor' &&
           !!s.editor.selectedImage &&
           !!s.editor.brushSettings &&
-          s.ui.activeRightPanel === Panel.Masks,
+          s.ui.activePanel === Panel.Masks,
         execute: (e: any, s: any) => {
           e.preventDefault();
           const newSize = Math.max((s.editor.brushSettings.size || 50) - 10, 1);
@@ -521,9 +561,10 @@ export const useKeyboardShortcuts = ({
           else if (s.editor.activeAiPatchContainerId) s.editor.setEditor({ activeAiPatchContainerId: null });
           else if (s.editor.activeMaskId) s.editor.setEditor({ activeMaskId: null });
           else if (s.editor.activeMaskContainerId) s.editor.setEditor({ activeMaskContainerId: null });
-          else if (s.ui.activeRightPanel === Panel.Crop) s.ui.setRightPanel(Panel.Adjustments);
+          else if (s.ui.activePanel === Panel.Crop) s.ui.setPanel(Panel.Adjustments);
           else if (s.ui.isFullScreen) handleToggleFullScreen();
           else if (s.ui.activeView === 'editor') handleBackToLibrary();
+          else if (s.ui.activeView === 'library' && s.library.rootPaths?.length > 0) handleGoHome();
         },
       },
       {
@@ -632,6 +673,7 @@ export const useKeyboardShortcuts = ({
   }, [
     handleBackToLibrary,
     handleDeleteSelected,
+    handleGoHome,
     handleImageSelect,
     handlePasteFiles,
     handleToggleFullScreen,

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Star, Copy, ClipboardPaste, ChevronUp, ChevronDown, Check, Settings, Filter } from 'lucide-react';
+import { Star, Copy, ClipboardPaste, Check, Settings, Filter, PanelLeft, PanelBottom, PanelRight } from 'lucide-react';
 import clsx from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useShallow } from 'zustand/react/shallow';
@@ -10,12 +10,14 @@ import { GLOBAL_KEYS, ImageFile, SelectedImage, ThumbnailAspectRatio } from '../
 import Text from '../ui/Text';
 import { useEditorStore } from '../../store/useEditorStore';
 import { useLibraryStore } from '../../store/useLibraryStore';
+import { useUIStore } from '../../store/useUIStore';
 import { COLOR_LABELS } from '../../utils/adjustments';
 
 interface BottomBarProps {
   filmstripHeight?: number;
   imageList?: Array<ImageFile>;
   imageRatings?: Record<string, number> | null;
+  isAndroid?: boolean;
   isCopied: boolean;
   isCopyDisabled: boolean;
   isExportDisabled?: boolean;
@@ -30,6 +32,7 @@ interface BottomBarProps {
   multiSelectedPaths?: Array<string>;
   onClearSelection?(): void;
   onContextMenu?(event: any, path: string): void;
+  onEmptyAreaContextMenu?(event: any): void;
   onCopy(): void;
   onExportClick?(): void;
   onImageSelect?(path: string, event: any): void;
@@ -91,32 +94,53 @@ const StarRating = ({ rating, onRate, disabled }: StarRatingProps) => {
   );
 };
 
+interface PanelToggleButtonProps {
+  onClick: () => void;
+  Icon: React.ElementType;
+  tooltip: string;
+  disabled?: boolean;
+}
+
+const PanelToggleButton = ({ onClick, Icon, tooltip, disabled = false }: PanelToggleButtonProps) => (
+  <button
+    className={clsx(
+      'p-1.5 rounded-md transition-colors',
+      disabled
+        ? 'text-text-secondary opacity-40 cursor-not-allowed'
+        : 'text-text-secondary hover:bg-surface hover:text-text-primary',
+    )}
+    onClick={() => !disabled && onClick()}
+    disabled={disabled}
+    data-tooltip={tooltip}
+  >
+    <Icon size={18} />
+  </button>
+);
+
 export default function BottomBar({
   filmstripHeight,
   imageList = [],
   imageRatings,
+  isAndroid,
   isCopied,
   isCopyDisabled,
-  isExportDisabled,
   isFilmstripVisible,
   isLibraryView = false,
   isLoading = false,
   isPasted,
   isPasteDisabled,
   isRatingDisabled = false,
-  isResetDisabled = false,
   isResizing,
   multiSelectedPaths = [],
   onClearSelection,
   onContextMenu,
+  onEmptyAreaContextMenu,
   onCopy,
-  onExportClick,
   onImageSelect,
   onOpenCopyPasteSettings,
   onRequestThumbnails,
   onPaste,
   onRate,
-  onReset,
   onZoomChange = () => {},
   rating,
   selectedImage,
@@ -127,6 +151,42 @@ export default function BottomBar({
   totalImages,
 }: BottomBarProps) {
   const { t } = useTranslation();
+
+  const { isInstantTransition, uiVisibility, setUI } = useUIStore(
+    useShallow((state) => ({
+      isInstantTransition: state.isInstantTransition,
+      uiVisibility: state.uiVisibility,
+      setUI: state.setUI,
+    })),
+  );
+
+  const isLeftOpen = uiVisibility.leftPanel;
+  const isRightOpen = uiVisibility.rightPanel;
+  const isBottomOpen = uiVisibility.filmstrip;
+
+  const toggleLeft = () =>
+    setUI((s) => {
+      const isOpening = !s.uiVisibility.leftPanel;
+      return {
+        uiVisibility: { ...s.uiVisibility, leftPanel: isOpening },
+        leftPanelWidth: isOpening && s.leftPanelWidth < 250 ? 350 : s.leftPanelWidth,
+      };
+    });
+
+  const toggleRight = () =>
+    setUI((s) => {
+      const isOpening = !s.uiVisibility.rightPanel;
+      return {
+        uiVisibility: { ...s.uiVisibility, rightPanel: isOpening },
+        rightPanelWidth: isOpening && s.rightPanelWidth < 250 ? 350 : s.rightPanelWidth,
+      };
+    });
+
+  const toggleBottom = () =>
+    setUI((s) => ({
+      uiVisibility: { ...s.uiVisibility, filmstrip: !s.uiVisibility.filmstrip },
+    }));
+
   const { displaySize, originalSize } = useEditorStore(
     useShallow((state) => ({
       displaySize: state.displaySize,
@@ -163,6 +223,10 @@ export default function BottomBar({
   );
 
   const allColors = [...COLOR_LABELS, { name: 'none', color: '#9ca3af' }];
+  const currentHeight = filmstripHeight ?? 120;
+  const isCollapsed = !isFilmstripVisible;
+  const effectiveHeight = isFilmstripVisible ? currentHeight : 0;
+  const shouldAnimate = !isInstantTransition && (!isResizing || isCollapsed);
 
   useEffect(() => {
     if (isZoomReady && !isDraggingSlider.current) {
@@ -261,10 +325,20 @@ export default function BottomBar({
     <div className="shrink-0 bg-bg-secondary rounded-lg flex flex-col">
       {!isLibraryView && showFilmstrip && (
         <div
-          className={clsx('overflow-hidden', !isResizing && 'transition-all duration-300 ease-in-out')}
-          style={{ height: isFilmstripVisible ? `${filmstripHeight}px` : '0px' }}
+          className={clsx(
+            'overflow-hidden shrink-0 relative',
+            shouldAnimate && 'transition-all duration-300 ease-in-out',
+          )}
+          style={{ height: `${effectiveHeight}px` }}
         >
-          <div className="w-full p-2" style={{ height: `${filmstripHeight}px` }}>
+          <div
+            className={clsx(
+              'w-full p-2 duration-300 ease-in-out',
+              shouldAnimate ? 'transition-all' : 'transition-opacity',
+              isCollapsed ? 'opacity-0 pointer-events-none' : 'opacity-100 pointer-events-auto',
+            )}
+            style={{ height: `${currentHeight}px` }}
+          >
             <Filmstrip
               imageList={imageList}
               imageRatings={imageRatings}
@@ -272,6 +346,7 @@ export default function BottomBar({
               multiSelectedPaths={multiSelectedPaths}
               onClearSelection={onClearSelection}
               onContextMenu={onContextMenu}
+              onEmptyAreaContextMenu={onEmptyAreaContextMenu}
               onImageSelect={onImageSelect}
               onRequestThumbnails={onRequestThumbnails}
               selectedImage={selectedImage}
@@ -284,7 +359,7 @@ export default function BottomBar({
       <div
         className={clsx(
           'shrink-0 h-12 flex items-center justify-between px-3',
-          !isLibraryView && 'border-t',
+          !isLibraryView && 'border-t transition-colors duration-300',
           !isLibraryView && showFilmstrip && isFilmstripVisible ? 'border-surface' : 'border-transparent',
         )}
       >
@@ -470,84 +545,107 @@ export default function BottomBar({
             </Text>
           </div>
         </div>
+
         <div className="grow" />
-        {!isLibraryView && showZoomControls && (
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-2 w-56">
-              <div
-                className="relative w-12 h-full flex items-center justify-end cursor-pointer"
-                onClick={handleResetZoom}
-                onMouseEnter={() => setIsZoomLabelHovered(true)}
-                onMouseLeave={() => setIsZoomLabelHovered(false)}
-                data-tooltip={t('ui.bottomBar.tooltips.resetZoom')}
-              >
-                <span className="absolute right-0 text-xs text-text-secondary select-none text-right w-max transition-colors hover:text-text-primary">
-                  {isZoomLabelHovered ? t('ui.bottomBar.zoomLabelReset') : t('ui.bottomBar.zoomLabel')}
-                </span>
-              </div>
 
-              <div className="relative flex-1 h-5">
-                <div className="absolute top-1/2 left-0 w-full h-1.5 -translate-y-1/2 bg-surface rounded-full pointer-events-none" />
-                <input
-                  type="range"
-                  min={0.1}
-                  max={2.0}
-                  step="0.05"
-                  value={latchedSliderValue}
-                  onChange={handleSliderChange}
-                  onKeyDown={handleZoomKeyDown}
-                  onMouseDown={handleMouseDown}
-                  onMouseUp={handleMouseUp}
-                  onTouchStart={handleMouseDown}
-                  onTouchEnd={handleMouseUp}
-                  onDoubleClick={handleResetZoom}
-                  className={`absolute top-1/2 left-0 w-full h-1.5 mt-[-1.5px] appearance-none bg-transparent cursor-pointer p-0 slider-input z-10 ${
-                    isZoomActive ? 'slider-thumb-active' : ''
-                  }`}
-                />
-              </div>
-
-              <div className="relative text-xs text-text-secondary w-6 text-right flex items-center justify-end h-5 gap-1">
-                {isEditingPercent ? (
-                  <input
-                    ref={percentInputRef}
-                    type="text"
-                    value={percentInputValue}
-                    onChange={(e) => setPercentInputValue(e.target.value)}
-                    onKeyDown={handlePercentKeyDown}
-                    onBlur={handlePercentSubmit}
-                    className="w-full text-xs text-text-primary bg-bg-primary border border-border-color rounded-sm px-1 text-right"
-                    style={{ fontSize: '12px', height: '18px' }}
-                  />
-                ) : (
-                  <span
-                    onClick={handlePercentClick}
-                    className="cursor-pointer hover:text-text-primary transition-colors select-none"
-                    data-tooltip={t('ui.bottomBar.tooltips.customZoom')}
-                  >
-                    {latchedDisplayPercent}%
-                  </span>
-                )}
-              </div>
-            </div>
-            {showFilmstrip && (
-              <>
-                <div className="h-5 w-px bg-surface"></div>
-                <button
-                  className="p-1.5 rounded-md text-text-secondary hover:bg-surface hover:text-text-primary transition-colors"
-                  onClick={() => setIsFilmstripVisible?.(!isFilmstripVisible)}
-                  data-tooltip={
-                    isFilmstripVisible
-                      ? t('ui.bottomBar.tooltips.collapseFilmstrip')
-                      : t('ui.bottomBar.tooltips.expandFilmstrip')
-                  }
+        <div className="flex items-center gap-4">
+          {!isLibraryView && showZoomControls && (
+            <>
+              <div className="flex items-center gap-2 w-56">
+                <div
+                  className="relative w-12 h-full flex items-center justify-end cursor-pointer"
+                  onClick={handleResetZoom}
+                  onMouseEnter={() => setIsZoomLabelHovered(true)}
+                  onMouseLeave={() => setIsZoomLabelHovered(false)}
+                  data-tooltip={t('ui.bottomBar.tooltips.resetZoom')}
                 >
-                  {isFilmstripVisible ? <ChevronDown size={18} /> : <ChevronUp size={18} />}
-                </button>
+                  <span className="absolute right-0 text-xs text-text-secondary select-none text-right w-max transition-colors hover:text-text-primary">
+                    {isZoomLabelHovered ? t('ui.bottomBar.zoomLabelReset') : t('ui.bottomBar.zoomLabel')}
+                  </span>
+                </div>
+
+                <div className="relative flex-1 h-5">
+                  <div className="absolute top-1/2 left-0 w-full h-1.5 -translate-y-1/2 bg-surface rounded-full pointer-events-none" />
+                  <input
+                    type="range"
+                    min={0.1}
+                    max={2.0}
+                    step="0.05"
+                    value={latchedSliderValue}
+                    onChange={handleSliderChange}
+                    onKeyDown={handleZoomKeyDown}
+                    onMouseDown={handleMouseDown}
+                    onMouseUp={handleMouseUp}
+                    onTouchStart={handleMouseDown}
+                    onTouchEnd={handleMouseUp}
+                    onDoubleClick={handleResetZoom}
+                    className={`absolute top-1/2 left-0 w-full h-1.5 mt-[-1.5px] appearance-none bg-transparent cursor-pointer p-0 slider-input z-10 ${
+                      isZoomActive ? 'slider-thumb-active' : ''
+                    }`}
+                  />
+                </div>
+
+                <div className="relative text-xs text-text-secondary w-6 text-right flex items-center justify-end h-5 gap-1">
+                  {isEditingPercent ? (
+                    <input
+                      ref={percentInputRef}
+                      type="text"
+                      value={percentInputValue}
+                      onChange={(e) => setPercentInputValue(e.target.value)}
+                      onKeyDown={handlePercentKeyDown}
+                      onBlur={handlePercentSubmit}
+                      className="w-full text-xs text-text-primary bg-bg-primary border border-border-color rounded-sm px-1 text-right"
+                      style={{ fontSize: '12px', height: '18px' }}
+                    />
+                  ) : (
+                    <span
+                      onClick={handlePercentClick}
+                      className="cursor-pointer hover:text-text-primary transition-colors select-none"
+                      data-tooltip={t('ui.bottomBar.tooltips.customZoom')}
+                    >
+                      {latchedDisplayPercent}%
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="h-5 w-px bg-surface"></div>
+            </>
+          )}
+
+          <div className="flex items-center gap-1">
+            {!isAndroid && (
+              <>
+                <PanelToggleButton
+                  onClick={toggleLeft}
+                  Icon={PanelLeft}
+                  tooltip={isLeftOpen ? t('ui.bottomBar.tooltips.collapseLeft') : t('ui.bottomBar.tooltips.expandLeft')}
+                />
+
+                {showFilmstrip && (
+                  <PanelToggleButton
+                    onClick={toggleBottom}
+                    Icon={PanelBottom}
+                    tooltip={
+                      isBottomOpen
+                        ? t('ui.bottomBar.tooltips.collapseFilmstrip')
+                        : t('ui.bottomBar.tooltips.expandFilmstrip')
+                    }
+                    disabled={isLibraryView}
+                  />
+                )}
+
+                <PanelToggleButton
+                  onClick={toggleRight}
+                  Icon={PanelRight}
+                  tooltip={
+                    isRightOpen ? t('ui.bottomBar.tooltips.collapseRight') : t('ui.bottomBar.tooltips.expandRight')
+                  }
+                />
               </>
             )}
           </div>
-        )}
+        </div>
       </div>
     </div>
   );

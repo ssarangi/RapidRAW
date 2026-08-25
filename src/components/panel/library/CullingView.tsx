@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
-import { List } from 'react-window';
+import { List, useListCallbackRef } from 'react-window';
 import {
   Loader2,
   Star as StarIcon,
@@ -24,9 +24,11 @@ import { Thumbnail } from './LibraryItems';
 import Text from '../../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { useProcessStore } from '../../../store/useProcessStore';
+import { useLibraryStore } from '../../../store/useLibraryStore';
 import { useSettingsStore } from '../../../store/useSettingsStore';
 import { useLibraryActions } from '../../../hooks/useLibraryActions';
 import { COLOR_LABELS, Color } from '../../../utils/adjustments';
+import { expandGroupedPaths } from '../../../utils/imageGrouping';
 import { IconAperture, IconFocalLength, IconIso, IconShutter } from '../editor/ExifIcons';
 
 interface SyncViewport {
@@ -92,6 +94,12 @@ function CullingPreview({
   const [fitScale, setFitScale] = useState<number | null>(null);
   const { handleRate, handleSetColorLabel, handleTagsChanged } = useLibraryActions();
   const USER_TAG_PREFIX = 'user:';
+  const getPathsToUpdate = () =>
+    expandGroupedPaths(
+      useLibraryStore.getState().imageList,
+      [image.path],
+      useSettingsStore.getState().appSettings?.grouping ?? 'off',
+    );
 
   const currentColor = useMemo(() => {
     return image.tags?.find((t) => t.startsWith('color:'))?.substring(6) || null;
@@ -161,7 +169,8 @@ function CullingPreview({
     if (newTagValue && !currentTags.some((t) => t.tag === newTagValue)) {
       try {
         const prefixedTag = `${USER_TAG_PREFIX}${newTagValue}`;
-        await invoke(Invokes.AddTagForPaths, { paths: [image.path], tag: prefixedTag });
+        const pathsToUpdate = getPathsToUpdate();
+        await invoke(Invokes.AddTagForPaths, { paths: pathsToUpdate, tag: prefixedTag });
         const newTags = [...currentTags, { tag: newTagValue, isUser: true }];
         handleTagsChanged([image.path], newTags);
         setTagInputValue('');
@@ -174,7 +183,8 @@ function CullingPreview({
   const handleRemoveTag = async (tagToRemove: { tag: string; isUser: boolean }) => {
     try {
       const prefixedTag = tagToRemove.isUser ? `${USER_TAG_PREFIX}${tagToRemove.tag}` : tagToRemove.tag;
-      await invoke(Invokes.RemoveTagForPaths, { paths: [image.path], tag: prefixedTag });
+      const pathsToUpdate = getPathsToUpdate();
+      await invoke(Invokes.RemoveTagForPaths, { paths: pathsToUpdate, tag: prefixedTag });
       const newTags = currentTags.filter((t) => t.tag !== tagToRemove.tag);
       handleTagsChanged([image.path], newTags);
     } catch (err) {
@@ -1016,6 +1026,51 @@ export default function CullingView(props: any) {
   const [showRateBar, setShowRateBar] = useState(false);
   const [showInfoBar, setShowInfoBar] = useState(false);
 
+  const [listHandle, setListHandle] = useListCallbackRef();
+  const prevActivePath = useRef<string | null>(null);
+  const prevListElement = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!listHandle?.element || imageList.length === 0 || !activePath) return;
+
+    const element = listHandle.element as HTMLElement;
+    const isPathChanged = activePath !== prevActivePath.current;
+    const isElementChanged = element !== prevListElement.current;
+
+    if (isPathChanged || isElementChanged) {
+      const isInitial = prevActivePath.current === null || isElementChanged;
+      prevActivePath.current = activePath;
+      prevListElement.current = element;
+
+      const index = imageList.findIndex((img: ImageFile) => img.path === activePath);
+      if (index !== -1) {
+        const rowHeight = sidebarWidth - 16;
+        const targetTop = index * rowHeight;
+        const clientHeight = element.clientHeight;
+        const scrollTop = element.scrollTop;
+        const itemBottom = targetTop + rowHeight;
+        const SCROLL_OFFSET = 40;
+
+        if (isInitial) {
+          element.scrollTo({
+            top: Math.max(0, targetTop - clientHeight / 2 + rowHeight / 2),
+            behavior: 'instant',
+          });
+        } else if (itemBottom > scrollTop + clientHeight) {
+          element.scrollTo({
+            top: itemBottom - clientHeight + SCROLL_OFFSET,
+            behavior: 'smooth',
+          });
+        } else if (targetTop < scrollTop) {
+          element.scrollTo({
+            top: Math.max(0, targetTop - SCROLL_OFFSET),
+            behavior: 'smooth',
+          });
+        }
+      }
+    }
+  }, [activePath, listHandle, imageList, sidebarWidth]);
+
   const queueThumbnailRequest = useCallback(
     (path: string) => {
       if (!onRequestThumbnails) return;
@@ -1185,6 +1240,7 @@ export default function CullingView(props: any) {
         />
         <div key={`${sidebarWidth}-${thumbnailAspectRatio}`} style={{ height: listHeight, width: '100%' }}>
           <List
+            listRef={setListHandle}
             rowCount={imageList.length}
             rowHeight={sidebarWidth - 16}
             rowComponent={Row}

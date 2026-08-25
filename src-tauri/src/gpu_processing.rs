@@ -130,7 +130,7 @@ impl WgpuDisplay {
                 }
             }
             queue.submit(Some(encoder.finish()));
-            queue.present(output);
+            output.present();
         }
     }
 }
@@ -278,7 +278,6 @@ pub fn get_or_init_gpu_context(
             width: size.width.max(1),
             height: size.height.max(1),
             format: swapchain_format,
-            color_space: wgpu::SurfaceColorSpace::Srgb,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             present_mode: wgpu::PresentMode::Fifo,
             alpha_mode,
@@ -468,10 +467,7 @@ fn read_texture_data_roi(
         .map_err(|e| format!("Failed receiving GPU map result: {}", e))?;
     map_result.map_err(|e| e.to_string())?;
 
-    let padded_data = buffer_slice
-        .get_mapped_range()
-        .map_err(|e| format!("Failed to get mapped GPU buffer range: {}", e))?
-        .to_vec();
+    let padded_data = buffer_slice.get_mapped_range().to_vec();
     output_buffer.unmap();
 
     if padded_bytes_per_row == unpadded_bytes_per_row {
@@ -951,7 +947,19 @@ impl GpuProcessor {
         let dummy_lut_view = dummy_lut_texture.create_view(&Default::default());
         let dummy_lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
 
-        let max_tile_size = wgpu::Extent3d {
+        const TILE_SIZE: u32 = 2048;
+        const TILE_OVERLAP: u32 = 128;
+
+        let clamped_tile_width = max_width.min(TILE_SIZE + TILE_OVERLAP * 2);
+        let clamped_tile_height = max_height.min(TILE_SIZE + TILE_OVERLAP * 2);
+
+        let clamped_tile_size = wgpu::Extent3d {
+            width: clamped_tile_width,
+            height: clamped_tile_height,
+            depth_or_array_layers: 1,
+        };
+
+        let full_image_size = wgpu::Extent3d {
             width: max_width,
             height: max_height,
             depth_or_array_layers: 1,
@@ -959,7 +967,7 @@ impl GpuProcessor {
 
         let reusable_texture_desc = wgpu::TextureDescriptor {
             label: None,
-            size: max_tile_size,
+            size: clamped_tile_size,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -1000,7 +1008,7 @@ impl GpuProcessor {
 
         let tile_output_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Tile Output Texture"),
-            size: max_tile_size,
+            size: clamped_tile_size,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -1014,7 +1022,7 @@ impl GpuProcessor {
 
         let working_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Working Output Texture"),
-            size: max_tile_size,
+            size: full_image_size,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -1029,7 +1037,7 @@ impl GpuProcessor {
 
         let output_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Full Output Texture"),
-            size: max_tile_size,
+            size: full_image_size,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -1141,7 +1149,7 @@ impl GpuProcessor {
             let lut_data = &lut_arc.data;
             let size = lut_arc.size;
             let mut rgba_lut_data_f16 = Vec::with_capacity(lut_data.len() / 3 * 4);
-            for chunk in lut_data.chunks_exact(3) {
+            for chunk in lut_data.as_chunks::<3>().0 {
                 rgba_lut_data_f16.push(f16::from_f32(chunk[0]));
                 rgba_lut_data_f16.push(f16::from_f32(chunk[1]));
                 rgba_lut_data_f16.push(f16::from_f32(chunk[2]));
@@ -1868,13 +1876,7 @@ fn process_and_get_dynamic_image_inner(
                 }
 
                 if let Ok(Ok(())) = rx.recv() {
-                    let padded_data = match buffer_slice.get_mapped_range() {
-                        Ok(range) => range.to_vec(),
-                        Err(e) => {
-                            log::error!("Failed to get mapped GPU buffer range: {}", e);
-                            return;
-                        }
-                    };
+                    let padded_data = buffer_slice.get_mapped_range().to_vec();
                     output_buffer.unmap();
 
                     let mut unpadded_data =
