@@ -104,6 +104,12 @@ pub async fn start_catalog_ai_tagging(
                     None,
                     None,
                 );
+                worker_app_handle
+                    .state::<AppState>()
+                    .background_job_cancellations
+                    .lock()
+                    .unwrap()
+                    .remove(&worker_job_id);
                 return;
             }
             let current = index as i64 + 1;
@@ -174,6 +180,12 @@ pub async fn start_catalog_ai_tagging(
             None,
             None,
         );
+        worker_app_handle
+            .state::<AppState>()
+            .background_job_cancellations
+            .lock()
+            .unwrap()
+            .remove(&worker_job_id);
     });
     let _ = app_handle.emit(
         "catalog-ai-tagging-started",
