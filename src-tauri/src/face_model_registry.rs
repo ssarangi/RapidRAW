@@ -1,4 +1,13 @@
+use std::collections::HashSet;
+use std::fs;
+use std::io::{Cursor, Read, Write};
+use std::path::{Path, PathBuf};
+
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use tauri::{AppHandle, Emitter, Manager};
+use zip::ZipArchive;
 
 /// The artifact can be fetched and prepared by RapidRAW without a conversion
 /// step. Conversion-required models stay visible for evaluation, but are never
@@ -43,6 +52,41 @@ pub struct FaceModelPack {
     pub license_url: String,
     pub license_acknowledgement_required: bool,
     pub model_source_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledFaceModelArtifact {
+    pub file_name: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledFaceModelPack {
+    pub pack_id: String,
+    pub installed_at: i64,
+    pub artifacts: Vec<InstalledFaceModelArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceModelPackStatus {
+    #[serde(flatten)]
+    pub pack: FaceModelPack,
+    pub installed: bool,
+    pub install_path: String,
+    pub installed_artifacts: Vec<InstalledFaceModelArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FaceModelDownloadProgress {
+    pack_id: String,
+    display_name: String,
+    current: usize,
+    total: usize,
+    stage: String,
 }
 
 fn artifact(file_name: &str, format: ModelArtifactFormat, source_url: &str) -> FaceModelArtifact {
@@ -213,10 +257,260 @@ pub fn list_face_model_packs() -> Vec<FaceModelPack> {
     face_model_packs()
 }
 
+fn face_models_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
+    let path = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("models")
+        .join("face");
+    fs::create_dir_all(&path).map_err(|error| error.to_string())?;
+    Ok(path)
+}
+
+fn pack_dir(app_handle: &AppHandle, pack_id: &str) -> Result<PathBuf, String> {
+    Ok(face_models_dir(app_handle)?.join(pack_id))
+}
+
+fn installed_manifest_path(pack_dir: &Path) -> PathBuf {
+    pack_dir.join("rapidraw-face-model.json")
+}
+
+fn read_installed_manifest(pack_dir: &Path) -> Result<Option<InstalledFaceModelPack>, String> {
+    let path = installed_manifest_path(pack_dir);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    serde_json::from_str(&content)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let bytes = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if bytes == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Cannot determine parent directory for {}", path.display()))?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("Invalid model filename {}", path.display()))?;
+    let temporary = parent.join(format!(".{file_name}.download"));
+    {
+        let mut file = fs::File::create(&temporary).map_err(|error| error.to_string())?;
+        file.write_all(bytes).map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+    }
+    fs::rename(&temporary, path)
+        .or_else(|rename_error| {
+            if path.exists() {
+                fs::remove_file(path)?;
+                fs::rename(&temporary, path)
+            } else {
+                Err(rename_error)
+            }
+        })
+        .map_err(|error| error.to_string())
+}
+
+fn verify_expected_hash(path: &Path, expected: Option<&str>) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let actual = sha256_file(path)?;
+    if actual.eq_ignore_ascii_case(expected) {
+        Ok(())
+    } else {
+        Err(format!("Hash mismatch for {}", path.display()))
+    }
+}
+
+fn extract_onnx_archive(destination: &Path, archive: &[u8]) -> Result<Vec<PathBuf>, String> {
+    let mut archive = ZipArchive::new(Cursor::new(archive)).map_err(|error| error.to_string())?;
+    let mut installed = Vec::new();
+    let mut names = HashSet::new();
+
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|error| error.to_string())?;
+        if entry.is_dir() || !entry.name().to_ascii_lowercase().ends_with(".onnx") {
+            continue;
+        }
+        let enclosed = entry
+            .enclosed_name()
+            .ok_or_else(|| format!("Unsafe archive path {}", entry.name()))?;
+        let file_name = enclosed
+            .file_name()
+            .ok_or_else(|| format!("Invalid archive filename {}", entry.name()))?;
+        let file_name = file_name
+            .to_str()
+            .ok_or_else(|| format!("Non-UTF8 archive filename {}", entry.name()))?;
+        if !names.insert(file_name.to_string()) {
+            return Err(format!(
+                "Archive contains duplicate model filename {file_name}"
+            ));
+        }
+
+        let mut bytes = Vec::new();
+        entry
+            .read_to_end(&mut bytes)
+            .map_err(|error| error.to_string())?;
+        let output = destination.join(file_name);
+        write_atomically(&output, &bytes)?;
+        installed.push(output);
+    }
+
+    if installed.is_empty() {
+        return Err("Downloaded model archive contains no ONNX files".to_string());
+    }
+    Ok(installed)
+}
+
+fn find_pack(pack_id: &str) -> Result<FaceModelPack, String> {
+    face_model_packs()
+        .into_iter()
+        .find(|pack| pack.id == pack_id)
+        .ok_or_else(|| format!("Unknown face model pack: {pack_id}"))
+}
+
+#[tauri::command]
+pub fn list_face_model_pack_statuses(
+    app_handle: AppHandle,
+) -> Result<Vec<FaceModelPackStatus>, String> {
+    face_model_packs()
+        .into_iter()
+        .map(|pack| {
+            let path = pack_dir(&app_handle, &pack.id)?;
+            let manifest = read_installed_manifest(&path)?;
+            Ok(FaceModelPackStatus {
+                install_path: path.to_string_lossy().into_owned(),
+                installed: manifest.is_some(),
+                installed_artifacts: manifest.map(|item| item.artifacts).unwrap_or_default(),
+                pack,
+            })
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub async fn download_face_model_pack(
+    pack_id: String,
+    accept_restricted_license: bool,
+    app_handle: AppHandle,
+) -> Result<FaceModelPackStatus, String> {
+    let pack = find_pack(&pack_id)?;
+    if pack.availability != ModelAvailability::DirectDownload {
+        return Err(format!(
+            "{} requires a pinned ONNX conversion before RapidRAW can install it",
+            pack.display_name
+        ));
+    }
+    if pack.license_acknowledgement_required && !accept_restricted_license {
+        return Err(format!(
+            "{} requires license acknowledgement before download",
+            pack.display_name
+        ));
+    }
+
+    let destination = pack_dir(&app_handle, &pack.id)?;
+    fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
+    let total = pack.artifacts.len();
+    let mut installed_paths = Vec::new();
+
+    for (index, artifact) in pack.artifacts.iter().enumerate() {
+        let _ = app_handle.emit(
+            "face-model-download-progress",
+            FaceModelDownloadProgress {
+                pack_id: pack.id.clone(),
+                display_name: pack.display_name.clone(),
+                current: index,
+                total,
+                stage: format!("Downloading {}", artifact.file_name),
+            },
+        );
+        let response = reqwest::get(&artifact.source_url)
+            .await
+            .map_err(|error| error.to_string())?
+            .error_for_status()
+            .map_err(|error| error.to_string())?;
+        let bytes = response.bytes().await.map_err(|error| error.to_string())?;
+
+        match artifact.format {
+            ModelArtifactFormat::Onnx => {
+                let target = destination.join(&artifact.file_name);
+                write_atomically(&target, &bytes)?;
+                verify_expected_hash(&target, artifact.sha256.as_deref())?;
+                installed_paths.push(target);
+            }
+            ModelArtifactFormat::Zip => {
+                installed_paths.extend(extract_onnx_archive(&destination, &bytes)?);
+            }
+            ModelArtifactFormat::Checkpoint => {
+                return Err(format!(
+                    "{} is not directly usable by ONNX Runtime",
+                    artifact.file_name
+                ));
+            }
+        }
+    }
+
+    let installed = InstalledFaceModelPack {
+        pack_id: pack.id.clone(),
+        installed_at: Utc::now().timestamp(),
+        artifacts: installed_paths
+            .iter()
+            .map(|path| {
+                Ok(InstalledFaceModelArtifact {
+                    file_name: path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .ok_or_else(|| format!("Invalid model path {}", path.display()))?
+                        .to_string(),
+                    sha256: sha256_file(path)?,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?,
+    };
+    let manifest = serde_json::to_vec_pretty(&installed).map_err(|error| error.to_string())?;
+    write_atomically(&installed_manifest_path(&destination), &manifest)?;
+
+    let _ = app_handle.emit(
+        "face-model-download-complete",
+        FaceModelDownloadProgress {
+            pack_id: pack.id.clone(),
+            display_name: pack.display_name.clone(),
+            current: total,
+            total,
+            stage: "Ready".to_string(),
+        },
+    );
+
+    Ok(FaceModelPackStatus {
+        pack,
+        installed: true,
+        install_path: destination.to_string_lossy().into_owned(),
+        installed_artifacts: installed.artifacts,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use tempfile::tempdir;
 
     #[test]
     fn pack_ids_are_unique_and_non_empty() {
@@ -251,5 +545,40 @@ mod tests {
                 .iter()
                 .all(|pack| pack.detector_landmarks >= 5)
         );
+    }
+
+    #[test]
+    fn installed_manifest_round_trips() {
+        let directory = tempdir().unwrap();
+        let manifest = InstalledFaceModelPack {
+            pack_id: "opencv-yunet-sface".to_string(),
+            installed_at: 1,
+            artifacts: vec![InstalledFaceModelArtifact {
+                file_name: "model.onnx".to_string(),
+                sha256: "abc".to_string(),
+            }],
+        };
+        write_atomically(
+            &installed_manifest_path(directory.path()),
+            &serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let restored = read_installed_manifest(directory.path()).unwrap().unwrap();
+        assert_eq!(restored.pack_id, manifest.pack_id);
+        assert_eq!(restored.artifacts[0].file_name, "model.onnx");
+    }
+
+    #[test]
+    fn archive_extraction_rejects_empty_archives() {
+        let directory = tempdir().unwrap();
+        let mut bytes = Cursor::new(Vec::new());
+        {
+            let writer = zip::ZipWriter::new(&mut bytes);
+            writer.finish().unwrap();
+        }
+
+        let error = extract_onnx_archive(directory.path(), bytes.get_ref()).unwrap_err();
+        assert!(error.contains("no ONNX files"));
     }
 }

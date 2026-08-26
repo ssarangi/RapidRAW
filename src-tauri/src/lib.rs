@@ -2343,6 +2343,8 @@ pub fn run() {
             app_settings::save_settings,
             app_settings::is_tethering_supported,
             face_model_registry::list_face_model_packs,
+            face_model_registry::list_face_model_pack_statuses,
+            face_model_registry::download_face_model_pack,
             ai_commands::generate_ai_subject_mask,
             ai_commands::precompute_ai_subject_mask,
             ai_commands::generate_ai_foreground_mask,

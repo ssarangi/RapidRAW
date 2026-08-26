@@ -110,6 +110,8 @@ export enum Invokes {
   UpdateExifFields = 'update_exif_fields',
   FetchCommunityPresets = 'fetch_community_presets',
   ListFaceModelPacks = 'list_face_model_packs',
+  ListFaceModelPackStatuses = 'list_face_model_pack_statuses',
+  DownloadFaceModelPack = 'download_face_model_pack',
   GenerateAllCommunityPreviews = 'generate_all_community_previews',
   SaveCommunityPreset = 'save_community_preset',
   SaveTempFile = 'save_temp_file',
