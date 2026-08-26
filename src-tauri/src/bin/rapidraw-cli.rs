@@ -16,10 +16,11 @@ fn main() {
     let arguments: Vec<String> = env::args().skip(1).collect();
     let result = match arguments.first().map(String::as_str) {
         Some("library") if arguments.get(1).map(String::as_str) == Some("inspect") => inspect(&arguments),
+        Some("library") if arguments.get(1).map(String::as_str) == Some("roots") => list_roots(&arguments),
         Some("jobs") if arguments.get(1).map(String::as_str) == Some("list") => list_jobs(&arguments),
         Some("faces") if arguments.get(1).map(String::as_str) == Some("status") => face_status(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("status") => tag_status(&arguments),
-        _ => Err("Usage: rapidraw-cli library inspect --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli faces status --database <catalog.db> | rapidraw-cli tags status --database <catalog.db>".to_string()),
+        _ => Err("Usage: rapidraw-cli library inspect|roots --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli faces status --database <catalog.db> | rapidraw-cli tags status --database <catalog.db>".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -44,6 +45,16 @@ fn inspect(arguments: &[String]) -> Result<serde_json::Value, String> {
         )
         .map_err(|error| error.to_string())?;
     Ok(json!({ "name": name, "images": images }))
+}
+
+fn list_roots(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let connection =
+        Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare("SELECT id, label, absolute_path, last_scan_at FROM collection_roots ORDER BY id")
+        .map_err(|error| error.to_string())?;
+    let roots = statement.query_map([], |row| Ok(json!({ "id": row.get::<_, i64>(0)?, "label": row.get::<_, Option<String>>(1)?, "path": row.get::<_, String>(2)?, "lastScanAt": row.get::<_, Option<i64>>(3)? }))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    Ok(json!(roots))
 }
 
 fn list_jobs(arguments: &[String]) -> Result<serde_json::Value, String> {
