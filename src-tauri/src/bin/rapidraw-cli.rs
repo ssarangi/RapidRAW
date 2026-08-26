@@ -20,6 +20,7 @@ fn main() {
         Some("library") if arguments.get(1).map(String::as_str) == Some("metrics") => metrics(&arguments),
         Some("jobs") if arguments.get(1).map(String::as_str) == Some("list") => list_jobs(&arguments),
         Some("faces") if arguments.get(1).map(String::as_str) == Some("status") => face_status(&arguments),
+        Some("faces") if arguments.get(1).map(String::as_str) == Some("clusters") => face_clusters(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("status") => tag_status(&arguments),
         _ => Err("Usage: rapidraw-cli library inspect|roots --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli faces status --database <catalog.db> | rapidraw-cli tags status --database <catalog.db>".to_string()),
     };
@@ -122,6 +123,20 @@ fn face_status(arguments: &[String]) -> Result<serde_json::Value, String> {
     Ok(
         json!({ "detected": detected, "embedded": embedded, "confirmed": confirmed, "unknownClusters": clusters }),
     )
+}
+
+fn face_clusters(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let connection =
+        Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let mut statement = connection.prepare("SELECT c.id, COUNT(m.face_id) FROM face_clusters c JOIN face_cluster_members m ON m.cluster_id = c.id WHERE c.state = 'unreviewed' GROUP BY c.id ORDER BY COUNT(m.face_id) DESC").map_err(|error| error.to_string())?;
+    let clusters = statement
+        .query_map([], |row| {
+            Ok(json!({ "id": row.get::<_, i64>(0)?, "faces": row.get::<_, i64>(1)? }))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(json!(clusters))
 }
 
 fn tag_status(arguments: &[String]) -> Result<serde_json::Value, String> {
