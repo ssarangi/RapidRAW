@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -92,12 +92,59 @@ pub struct ThumbnailProgressTracker {
     pub completed: usize,
 }
 
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThumbnailJob {
+    pub path: String,
+    pub modified: Option<u64>,
+}
+
 pub struct ThumbnailManager {
-    pub queue: Mutex<VecDeque<String>>,
+    pub queue: Mutex<VecDeque<ThumbnailJob>>,
     pub cvar: Condvar,
     pub processing_now: Mutex<HashSet<String>>,
     pub rotational_disk: AtomicBool,
     pub io_gate: Mutex<()>,
+}
+
+pub struct CatalogScanControl {
+    pub active_root_id: Mutex<Option<i64>>,
+    pub paused: Mutex<bool>,
+    pub cancelled: AtomicBool,
+    pub cvar: Condvar,
+}
+
+impl CatalogScanControl {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            active_root_id: Mutex::new(None),
+            paused: Mutex::new(false),
+            cancelled: AtomicBool::new(false),
+            cvar: Condvar::new(),
+        })
+    }
+
+    pub fn begin(&self, root_id: i64) -> Result<(), String> {
+        let mut active_root_id = self.active_root_id.lock().unwrap();
+        if active_root_id.is_some() {
+            return Err("A catalog scan is already running".to_string());
+        }
+        *active_root_id = Some(root_id);
+        *self.paused.lock().unwrap() = false;
+        self.cancelled.store(false, Ordering::SeqCst);
+        self.cvar.notify_all();
+        Ok(())
+    }
+
+    pub fn finish(&self, root_id: i64) {
+        let mut active_root_id = self.active_root_id.lock().unwrap();
+        if *active_root_id == Some(root_id) {
+            *active_root_id = None;
+            *self.paused.lock().unwrap() = false;
+            self.cancelled.store(false, Ordering::SeqCst);
+            self.cvar.notify_all();
+        }
+    }
 }
 
 impl ThumbnailManager {
@@ -170,7 +217,9 @@ pub struct AppState {
     pub decoded_image_cache: Mutex<DecodedImageCache>,
     pub thumbnail_manager: Arc<ThumbnailManager>,
     pub metadata_manager: Arc<MetadataManager>,
+    pub catalog_scan_control: Arc<CatalogScanControl>,
     pub disks_cache: Mutex<Option<Disks>>,
     pub disks_cache_refreshing: AtomicBool,
     pub camera_session: Mutex<CameraSession>,
+    pub active_library_path: Mutex<Option<PathBuf>>,
 }

@@ -2,21 +2,21 @@ import { useRef, useCallback, useMemo, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import debounce from 'lodash.debounce';
 
+export interface ThumbnailRequest {
+  path: string;
+  modified?: number | null;
+}
+
 export function useThumbnails() {
   const generatedRef = useRef<Set<string>>(new Set());
-  const pendingQueueRef = useRef<Set<string>>(new Set());
+  const pendingQueueRef = useRef<Map<string, ThumbnailRequest>>(new Map());
 
   const flushQueueToBackend = useMemo(
     () =>
       debounce(
         () => {
-          const pathsToSend = Array.from(pendingQueueRef.current);
+          const pathsToSend = Array.from(pendingQueueRef.current.values());
           if (pathsToSend.length === 0) return;
-
-          for (let i = pathsToSend.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [pathsToSend[i], pathsToSend[j]] = [pathsToSend[j], pathsToSend[i]];
-          }
 
           invoke('update_thumbnail_queue', { paths: pathsToSend }).catch((err) => {
             console.error('Failed to update thumbnail queue:', err);
@@ -31,12 +31,13 @@ export function useThumbnails() {
   );
 
   const requestThumbnails = useCallback(
-    (visiblePaths: string[]) => {
+    (visiblePaths: Array<string | ThumbnailRequest>) => {
       let addedToQueue = false;
 
-      visiblePaths.forEach((p) => {
-        if (!generatedRef.current.has(p) && !pendingQueueRef.current.has(p)) {
-          pendingQueueRef.current.add(p);
+      visiblePaths.forEach((item) => {
+        const request = typeof item === 'string' ? { path: item } : item;
+        if (!generatedRef.current.has(request.path) && !pendingQueueRef.current.has(request.path)) {
+          pendingQueueRef.current.set(request.path, request);
           addedToQueue = true;
         }
       });

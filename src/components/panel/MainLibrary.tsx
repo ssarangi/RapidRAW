@@ -20,6 +20,7 @@ import {
 import CullingView from './library/CullingView';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
+import { useShallow } from 'zustand/react/shallow';
 import Button from '../ui/Button';
 import { ThemeProps, THEMES, DEFAULT_THEME_ID } from '../../utils/themes';
 import {
@@ -42,7 +43,7 @@ import { useUIStore } from '../../store/useUIStore';
 import SettingsPanel from './SettingsPanel';
 
 import LibraryGrid from './library/LibraryGrid';
-import { SearchInput, ViewOptionsDropdown } from './library/LibraryHeader';
+import { CatalogSearchDropdown, SearchInput, ViewOptionsDropdown } from './library/LibraryHeader';
 
 export interface ColumnWidths {
   thumbnail: number;
@@ -190,7 +191,30 @@ export default function MainLibrary(props: MainLibraryProps) {
     }
   };
 
-  const searchCriteria = useLibraryStore((state) => state.searchCriteria);
+  const { searchCriteria, filterCriteria, catalogRoots } = useLibraryStore(
+    useShallow((state) => ({
+      searchCriteria: state.searchCriteria,
+      filterCriteria: state.filterCriteria,
+      catalogRoots: state.catalogRoots,
+    })),
+  );
+  const displayFolderPath = useMemo(() => {
+    const path = props.currentFolderPath;
+    if (!path?.startsWith('LibraryFolder:')) return path;
+    const match = /^LibraryFolder:(\d+):(.*)$/.exec(path);
+    if (!match) return 'Library';
+    const rootId = Number(match[1]);
+    const relativePath = match[2] || '.';
+    const root = catalogRoots.find((candidate) => candidate.id === rootId);
+    const rootLabel = root?.label || root?.absolutePath || 'Library';
+    return relativePath === '.' ? `Library: ${rootLabel}` : `Library: ${rootLabel}/${relativePath}`;
+  }, [props.currentFolderPath, catalogRoots]);
+  const isSearchActive = searchCriteria.tags.length > 0 || Boolean(searchCriteria.text);
+  const isFilterActive =
+    filterCriteria.rating !== 0 ||
+    filterCriteria.rawStatus !== RawStatus.All ||
+    (filterCriteria.editedStatus && filterCriteria.editedStatus !== EditedStatus.All) ||
+    (filterCriteria.colors && filterCriteria.colors.length > 0);
 
   const translatedRatingFilterOptions = useMemo(
     () => [
@@ -322,7 +346,17 @@ export default function MainLibrary(props: MainLibraryProps) {
 
   if (!props.rootPaths || props.rootPaths.length === 0) {
     if (!props.appSettings) {
-      return null;
+      return (
+        <div className="flex-1 flex h-full p-2 bg-transparent">
+          <div className="flex w-full h-full bg-bg-secondary rounded-lg border border-border-color/25 overflow-hidden">
+            <div className="w-full h-full flex items-center justify-center">
+              <Text variant={TextVariants.heading} color={TextColors.secondary}>
+                {t('library.folders.loading', 'Loading...')}
+              </Text>
+            </div>
+          </div>
+        </div>
+      );
     }
     const hasLastPath = !!props.appSettings.lastRootPath || !!props.appSettings.rootFolders?.length;
     const currentThemeId = props.theme || DEFAULT_THEME_ID;
@@ -518,8 +552,8 @@ export default function MainLibrary(props: MainLibraryProps) {
           <Text variant={TextVariants.headline}>{t('library.header.title')}</Text>
           {!props.isAndroid && (
             <div className="flex items-center gap-2">
-              {props.currentFolderPath ? (
-                <Text className="truncate">{props.currentFolderPath}</Text>
+              {displayFolderPath ? (
+                <Text className="truncate">{displayFolderPath}</Text>
               ) : (
                 <p className="text-sm invisible select-none pointer-events-none h-5 overflow-hidden"></p>
               )}
@@ -577,6 +611,7 @@ export default function MainLibrary(props: MainLibraryProps) {
 
           <div className="flex items-center bg-surface p-1 rounded-lg gap-1 border border-border-color/20">
             <SearchInput indexingProgress={props.indexingProgress} isIndexing={props.isIndexing} />
+            <CatalogSearchDropdown />
             <ViewOptionsDropdown
               libraryViewMode={props.libraryViewMode}
               onSelectSize={props.onThumbnailSizeChange}
@@ -644,7 +679,7 @@ export default function MainLibrary(props: MainLibraryProps) {
           </Text>
           <Text className="mt-2">{t('library.status.moment')}</Text>
         </div>
-      ) : searchCriteria.tags.length > 0 || searchCriteria.text ? (
+      ) : isSearchActive ? (
         <div
           className="flex-1 flex flex-col items-center justify-center text-text-secondary text-center"
           onContextMenu={props.onEmptyAreaContextMenu}
@@ -658,10 +693,23 @@ export default function MainLibrary(props: MainLibraryProps) {
             {!props.appSettings?.enableAiTagging && t('library.search.noResultsAiHint')}
           </Text>
         </div>
-      ) : (
+      ) : isFilterActive ? (
         <div className="flex-1 flex flex-col items-center justify-center" onContextMenu={props.onEmptyAreaContextMenu}>
           <SlidersHorizontal className="h-12 w-12 mb-4 text-text-secondary" />
           <Text>{t('library.filters.noMatch')}</Text>
+        </div>
+      ) : (
+        <div
+          className="flex-1 flex flex-col items-center justify-center text-text-secondary text-center"
+          onContextMenu={props.onEmptyAreaContextMenu}
+        >
+          <Folder className="h-12 w-12 mb-4 text-text-secondary" />
+          <Text variant={TextVariants.heading} color={TextColors.secondary}>
+            No images loaded
+          </Text>
+          <Text className="mt-2 max-w-sm">
+            Select a folder or catalog collection from Sources, or scan a library collection to populate it.
+          </Text>
         </div>
       )}
       {props.isAndroid && (

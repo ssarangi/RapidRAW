@@ -1,4 +1,6 @@
+use crate::ai_processing::{AiModels, get_or_init_ai_models, run_u2netp_model};
 use crate::app_settings::load_settings;
+use crate::app_state::AppState;
 use image::{GenericImageView, GrayImage, imageops};
 use image_hasher::{HashAlg, HasherConfig};
 use rayon::prelude::*;
@@ -18,6 +20,19 @@ pub struct CullingSettings {
     pub blur_threshold: f64,
     pub group_similar: bool,
     pub filter_blurry: bool,
+    pub use_subject_detection: bool,
+}
+
+impl Default for CullingSettings {
+    fn default() -> Self {
+        Self {
+            similarity_threshold: 28,
+            blur_threshold: 100.0,
+            group_similar: true,
+            filter_blurry: true,
+            use_subject_detection: false,
+        }
+    }
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -27,6 +42,7 @@ pub struct ImageAnalysisResult {
     pub quality_score: f64,
     pub sharpness_metric: f64,
     pub center_focus_metric: f64,
+    pub subject_focus_metric: Option<f64>,
     pub exposure_metric: f64,
     pub width: u32,
     pub height: u32,
@@ -54,14 +70,22 @@ struct CullingProgress {
     stage: String,
 }
 
-struct ImageAnalysisData {
-    hash: image_hasher::ImageHash,
-    result: ImageAnalysisResult,
+pub(crate) struct ImageAnalysisData {
+    pub(crate) hash: image_hasher::ImageHash,
+    pub(crate) result: ImageAnalysisResult,
 }
 
 const WEIGHT_SHARPNESS: f64 = 0.40;
 const WEIGHT_CENTER_FOCUS: f64 = 0.35;
 const WEIGHT_EXPOSURE: f64 = 0.25;
+
+// U-2-Netp outputs a min-max normalized 0-255 saliency mask; treat anything
+// above this as "subject" when computing subject-aware sharpness.
+const SUBJECT_MASK_THRESHOLD: u8 = 128;
+// Below this many qualifying pixels, the mask is too small/ambiguous to trust
+// (e.g. no clear foreground, or the subject is tiny) - fall back to the
+// center-crop metric instead of scoring noise.
+const MIN_SUBJECT_PIXELS: usize = 64;
 
 fn calculate_laplacian_variance(image: &GrayImage) -> f64 {
     let (width, height) = image.dimensions();
@@ -97,6 +121,52 @@ fn calculate_laplacian_variance(image: &GrayImage) -> f64 {
         / laplacian_values.len() as f64
 }
 
+/// Laplacian variance restricted to pixels the subject mask marks as
+/// foreground, rather than a fixed center crop. `mask` must have the same
+/// dimensions as `image` (caller runs the mask model on the same thumbnail
+/// used to build `image`). Returns `None` when too few pixels qualify, so
+/// callers can fall back to the center-crop metric instead of scoring an
+/// empty/ambiguous mask.
+fn calculate_masked_laplacian_variance(image: &GrayImage, mask: &GrayImage) -> Option<f64> {
+    let (width, height) = image.dimensions();
+    if width < 3 || height < 3 || mask.dimensions() != (width, height) {
+        return None;
+    }
+
+    let mut laplacian_values = Vec::new();
+    let mut sum = 0.0;
+
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            if mask.get_pixel(x, y)[0] < SUBJECT_MASK_THRESHOLD {
+                continue;
+            }
+
+            let p_center = image.get_pixel(x, y)[0] as i32;
+            let p_north = image.get_pixel(x, y - 1)[0] as i32;
+            let p_south = image.get_pixel(x, y + 1)[0] as i32;
+            let p_west = image.get_pixel(x - 1, y)[0] as i32;
+            let p_east = image.get_pixel(x + 1, y)[0] as i32;
+            let conv_val = (p_north + p_south + p_west + p_east - 4 * p_center) as f64;
+            laplacian_values.push(conv_val);
+            sum += conv_val;
+        }
+    }
+
+    if laplacian_values.len() < MIN_SUBJECT_PIXELS {
+        return None;
+    }
+    let mean = sum / laplacian_values.len() as f64;
+
+    Some(
+        laplacian_values
+            .iter()
+            .map(|v| (v - mean).powi(2))
+            .sum::<f64>()
+            / laplacian_values.len() as f64,
+    )
+}
+
 fn calculate_exposure_metric(image: &GrayImage) -> f64 {
     let histogram = imageproc::stats::histogram(image);
     let total_pixels = (image.width() * image.height()) as f64;
@@ -122,10 +192,16 @@ fn calculate_exposure_metric(image: &GrayImage) -> f64 {
     (1.0f64 - penalty).max(0.0)
 }
 
-fn analyze_image(
+pub(crate) fn analyze_image(
     path: &str,
     hasher: &image_hasher::Hasher,
     settings: &crate::app_settings::AppSettings,
+    ai_models: Option<&Arc<AiModels>>,
+    // Round-robins into ai_models.u2netp_pool so concurrent calls (this runs
+    // inside a rayon par_iter) don't all contend for a single shared model
+    // session. Caller just needs to pass a distinct-ish value per call, e.g.
+    // its item index - exact fairness doesn't matter, just avoiding one lock.
+    pool_slot: usize,
 ) -> Result<ImageAnalysisData, String> {
     const ANALYSIS_DIM: u32 = 720; // FIXME: How should we calculate good focus if it's downscaled?!?
 
@@ -156,11 +232,24 @@ fn analyze_image(
     .to_image();
     let center_focus_metric = calculate_laplacian_variance(&center_crop);
 
+    // Subject-aware focus: run the existing foreground-mask model on this
+    // same thumbnail and measure sharpness only where the subject actually
+    // is, instead of assuming it's centered. Falls back to the center-crop
+    // metric when detection is off, fails, or the mask is too small/empty.
+    let subject_focus_metric = ai_models.and_then(|models| {
+        let session = models
+            .u2netp_pool
+            .get(pool_slot % models.u2netp_pool.len().max(1))?;
+        let mask = run_u2netp_model(&thumbnail, session).ok()?;
+        calculate_masked_laplacian_variance(&gray_thumbnail, &mask)
+    });
+
     let normalized_sharpness = ((sharpness_metric + 1.0).log10() / 3.5).min(1.0);
-    let normalized_center_focus = ((center_focus_metric + 1.0).log10() / 3.5).min(1.0);
+    let focus_metric_for_score = subject_focus_metric.unwrap_or(center_focus_metric);
+    let normalized_focus = ((focus_metric_for_score + 1.0).log10() / 3.5).min(1.0);
 
     let quality_score = (normalized_sharpness * WEIGHT_SHARPNESS)
-        + (normalized_center_focus * WEIGHT_CENTER_FOCUS)
+        + (normalized_focus * WEIGHT_CENTER_FOCUS)
         + (exposure_metric * WEIGHT_EXPOSURE);
 
     let hash = hasher.hash_image(&thumbnail);
@@ -172,6 +261,7 @@ fn analyze_image(
             quality_score,
             sharpness_metric,
             center_focus_metric,
+            subject_focus_metric,
             exposure_metric,
             width,
             height,
@@ -179,65 +269,14 @@ fn analyze_image(
     })
 }
 
-#[tauri::command]
-pub async fn cull_images(
-    paths: Vec<String>,
-    settings: CullingSettings,
-    app_handle: AppHandle,
-) -> Result<CullingSuggestions, String> {
-    if paths.is_empty() {
-        return Ok(CullingSuggestions::default());
-    }
-
-    let app_settings = load_settings(app_handle.clone()).unwrap_or_default();
-
-    let total_count = paths.len();
-    let completed_count = Arc::new(AtomicUsize::new(0));
-    let _ = app_handle.emit("culling-start", total_count);
-
-    let hasher = HasherConfig::new()
-        .hash_alg(HashAlg::DoubleGradient)
-        .hash_size(16, 16)
-        .to_hasher();
-
-    let analysis_results: Vec<Result<ImageAnalysisData, (String, String)>> = paths
-        .par_iter()
-        .map(|path| {
-            let completed = completed_count.fetch_add(1, Ordering::Relaxed) + 1;
-            let _ = app_handle.emit(
-                "culling-progress",
-                CullingProgress {
-                    current: completed,
-                    total: total_count,
-                    stage: "Analyzing images...".to_string(),
-                },
-            );
-
-            analyze_image(path, &hasher, &app_settings).map_err(|e| (path.to_string(), e))
-        })
-        .collect();
-
-    let mut successful_analyses = Vec::new();
-    let mut failed_paths = Vec::new();
-    for res in analysis_results {
-        match res {
-            Ok(data) => successful_analyses.push(data),
-            Err((path, error)) => {
-                eprintln!("Failed to analyze image {}: {}", path, error);
-                failed_paths.push(path);
-            }
-        }
-    }
-
-    let _ = app_handle.emit(
-        "culling-progress",
-        CullingProgress {
-            current: total_count,
-            total: total_count,
-            stage: "Grouping similar images...".to_string(),
-        },
-    );
-
+/// Turns raw per-image analysis into grouped duplicate suggestions + a
+/// blurry-images list. Shared by the manual `cull_images` command and the
+/// unattended auto-cull planner so both use the exact same grouping logic.
+pub(crate) fn build_culling_suggestions(
+    successful_analyses: Vec<ImageAnalysisData>,
+    failed_paths: Vec<String>,
+    settings: &CullingSettings,
+) -> CullingSuggestions {
     let mut suggestions = CullingSuggestions {
         failed_paths,
         ..Default::default()
@@ -312,6 +351,90 @@ pub async fn cull_images(
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
     }
+
+    suggestions
+}
+
+#[tauri::command]
+pub async fn cull_images(
+    paths: Vec<String>,
+    settings: CullingSettings,
+    app_handle: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<CullingSuggestions, String> {
+    if paths.is_empty() {
+        return Ok(CullingSuggestions::default());
+    }
+
+    let app_settings = load_settings(app_handle.clone()).unwrap_or_default();
+
+    let total_count = paths.len();
+    let completed_count = Arc::new(AtomicUsize::new(0));
+    let _ = app_handle.emit("culling-start", total_count);
+
+    let ai_models = if settings.use_subject_detection {
+        let _ = app_handle.emit(
+            "culling-progress",
+            CullingProgress {
+                current: 0,
+                total: total_count,
+                stage: "Loading subject detection model...".to_string(),
+            },
+        );
+        Some(
+            get_or_init_ai_models(&app_handle, &state.ai_state, &state.ai_init_lock)
+                .await
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
+
+    let hasher = HasherConfig::new()
+        .hash_alg(HashAlg::DoubleGradient)
+        .hash_size(16, 16)
+        .to_hasher();
+
+    let analysis_results: Vec<Result<ImageAnalysisData, (String, String)>> = paths
+        .par_iter()
+        .map(|path| {
+            let completed = completed_count.fetch_add(1, Ordering::Relaxed) + 1;
+            let _ = app_handle.emit(
+                "culling-progress",
+                CullingProgress {
+                    current: completed,
+                    total: total_count,
+                    stage: "Analyzing images...".to_string(),
+                },
+            );
+
+            analyze_image(path, &hasher, &app_settings, ai_models.as_ref(), completed)
+                .map_err(|e| (path.to_string(), e))
+        })
+        .collect();
+
+    let mut successful_analyses = Vec::new();
+    let mut failed_paths = Vec::new();
+    for res in analysis_results {
+        match res {
+            Ok(data) => successful_analyses.push(data),
+            Err((path, error)) => {
+                eprintln!("Failed to analyze image {}: {}", path, error);
+                failed_paths.push(path);
+            }
+        }
+    }
+
+    let _ = app_handle.emit(
+        "culling-progress",
+        CullingProgress {
+            current: total_count,
+            total: total_count,
+            stage: "Grouping similar images...".to_string(),
+        },
+    );
+
+    let suggestions = build_culling_suggestions(successful_analyses, failed_paths, &settings);
 
     let _ = app_handle.emit("culling-complete", &suggestions);
     Ok(suggestions)

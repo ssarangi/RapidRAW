@@ -46,6 +46,9 @@ export enum Invokes {
   CreateFolder = 'create_folder',
   CreateVirtualCopy = 'create_virtual_copy',
   CullImages = 'cull_images',
+  PlanAutoCull = 'plan_auto_cull',
+  ApplyAutoCullPlan = 'apply_auto_cull_plan',
+  UndoAutoCull = 'undo_auto_cull',
   DeleteFolder = 'delete_folder',
   DuplicateFile = 'duplicate_file',
   EstimateExportSizes = 'estimate_export_sizes',
@@ -65,6 +68,7 @@ export enum Invokes {
   GetLogFilePath = 'get_log_file_path',
   GetOrCreateInternalLibraryRoot = 'get_or_create_internal_library_root',
   GetPinnedFolderTrees = 'get_pinned_folder_trees',
+  GetSystemBookmarks = 'get_system_bookmarks',
   GetSupportedFileTypes = 'get_supported_file_types',
   HandleExportPresetsToFile = 'handle_export_presets_to_file',
   HandleImportPresetsFromFile = 'handle_import_presets_from_file',
@@ -112,6 +116,23 @@ export enum Invokes {
   SaveAlbums = 'save_albums',
   AddToAlbum = 'add_to_album',
   GetAlbumImages = 'get_album_images',
+  CreateLibrary = 'create_library',
+  OpenLibrary = 'open_library',
+  CloseLibrary = 'close_library',
+  DeleteLibrary = 'delete_library',
+  GetActiveLibrary = 'get_active_library',
+  AddLibraryRoot = 'add_library_root',
+  ListLibraryRoots = 'list_library_roots',
+  ListCatalogFolderTree = 'list_catalog_folder_tree',
+  ScanLibraryRoot = 'scan_library_root',
+  StartCatalogScan = 'start_catalog_scan',
+  PauseCatalogScan = 'pause_catalog_scan',
+  ResumeCatalogScan = 'resume_catalog_scan',
+  CancelCatalogScan = 'cancel_catalog_scan',
+  ListCatalogImages = 'list_catalog_images',
+  SyncCatalogPaths = 'sync_catalog_paths',
+  SearchCatalogImages = 'search_catalog_images',
+  GetCatalogMetrics = 'get_catalog_metrics',
   TetherListCameras = 'tether_list_cameras',
   TetherConnect = 'tether_connect',
   TetherGetSettings = 'tether_get_settings',
@@ -248,6 +269,7 @@ export interface AppSettings {
   groupPreferredType?: GroupPreference; // legacy
   alwaysDecodeRawThumbnails?: boolean;
   workspace?: WorkspaceState;
+  activeLibraryDbPath?: string | null;
 }
 
 export interface BrushSettings {
@@ -295,6 +317,81 @@ export interface ImageFile {
   is_raw: boolean;
   group_id: string | null;
 }
+
+export interface LibraryInfo {
+  id: string;
+  name: string;
+  dbPath: string;
+  schemaVersion: number;
+}
+
+export interface CatalogRoot {
+  id: number;
+  label?: string | null;
+  absolutePath: string;
+  isAvailable: boolean;
+  lastScanAt?: number | null;
+  imageCount: number;
+}
+
+export interface CatalogFolderNode {
+  children: CatalogFolderNode[];
+  isDir: boolean;
+  name: string;
+  path: string;
+  imageCount: number;
+  hasSubdirs: boolean;
+  modified?: number | null;
+  created?: number | null;
+  rootId: number;
+  relativePath: string;
+}
+
+export interface ScanResult {
+  rootId: number;
+  scanned: number;
+  insertedOrUpdated: number;
+  missingMarked: number;
+}
+
+export interface CatalogFacetValue {
+  value: string;
+  count: number;
+}
+
+export interface CatalogMetrics {
+  totalImages: number;
+  editedImages: number;
+  ratedImages: number;
+  missingImages: number;
+  years: CatalogFacetValue[];
+  cameras: CatalogFacetValue[];
+  lenses: CatalogFacetValue[];
+  people: CatalogFacetValue[];
+  tags: CatalogFacetValue[];
+  ratings: CatalogFacetValue[];
+}
+
+export interface CatalogSearchQuery {
+  rootId?: number | null;
+  text?: string | null;
+  rating?: number | null;
+  minRating?: number | null;
+  tags?: string[] | null;
+  tagMode?: 'AND' | 'OR' | null;
+  year?: number | null;
+  camera?: string | null;
+  lens?: string | null;
+  person?: string | null;
+  color?: string | null;
+  isRaw?: boolean | null;
+  isEdited?: boolean | null;
+  limit?: number | null;
+}
+
+export type LibrarySource =
+  | { type: 'filesystem' }
+  | { type: 'catalog'; libraryId: string; dbPath: string; name: string };
 
 export interface Option {
   color?: string;
@@ -416,6 +513,40 @@ export interface CullingSuggestions {
   similarGroups: CullGroup[];
   blurryImages: ImageAnalysisResult[];
   failedPaths: string[];
+}
+
+export interface AutoCullPlanItem {
+  representativePath: string;
+  backingPaths: string[];
+  keep: boolean;
+  reason: string;
+  qualityScore: number;
+  hasConflict: boolean;
+}
+
+export interface AutoCullPlan {
+  folderPath: string;
+  includeSubfolders: boolean;
+  settings: CullingSettings;
+  rejectedFolderName: string;
+  deleteInsteadOfMove: boolean;
+  items: AutoCullPlanItem[];
+  totalCount: number;
+  rejectCount: number;
+  failedPaths: string[];
+}
+
+export interface AutoCullMove {
+  oldPath: string;
+  newPath: string;
+}
+
+export interface AutoCullResult {
+  rejectedFolderPath: string;
+  moved: AutoCullMove[];
+  labeledPaths: string[];
+  deleted: boolean;
+  skippedPaths: string[];
 }
 
 export interface KeybindHandler {

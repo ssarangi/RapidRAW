@@ -6,6 +6,8 @@ import {
   SortCriteria,
   SortDirection,
   AlbumItem,
+  CatalogRoot,
+  LibrarySource,
 } from '../components/ui/AppProperties';
 import { Adjustments, INITIAL_ADJUSTMENTS } from '../utils/adjustments';
 import { ColumnWidths } from '../components/panel/MainLibrary';
@@ -23,6 +25,9 @@ interface LibraryState {
   expandedFolders: Set<string>;
   folderTrees: any[];
   pinnedFolderTrees: any[];
+  librarySource: LibrarySource;
+  catalogRoots: CatalogRoot[];
+  activeCatalogRootId: number | null;
 
   // Albums
   albumTree: AlbumItem[];
@@ -44,6 +49,8 @@ interface LibraryState {
 
   // UI State specific to the Library View
   isTreeLoading: boolean;
+  isRootFoldersLoading: boolean;
+  isPinnedFoldersLoading: boolean;
   isViewLoading: boolean;
   libraryScrollTop: number;
   listColumnWidths: ColumnWidths;
@@ -62,6 +69,9 @@ export const useLibraryStore = create<LibraryState>((set) => ({
   expandedFolders: new Set<string>(),
   folderTrees: [],
   pinnedFolderTrees: [],
+  librarySource: { type: 'filesystem' },
+  catalogRoots: [],
+  activeCatalogRootId: null,
 
   albumTree: [],
   activeAlbumId: null,
@@ -79,6 +89,8 @@ export const useLibraryStore = create<LibraryState>((set) => ({
   searchCriteria: { tags: [], text: '', mode: 'OR' },
 
   isTreeLoading: false,
+  isRootFoldersLoading: false,
+  isPinnedFoldersLoading: false,
   isViewLoading: false,
   libraryScrollTop: 0,
   listColumnWidths: {

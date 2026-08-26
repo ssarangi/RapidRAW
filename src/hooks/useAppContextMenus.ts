@@ -27,6 +27,7 @@ import {
   Pin,
   PinOff,
   Users,
+  Wand2,
   Gauge,
   Layers,
   Grip,
@@ -903,6 +904,24 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
             ]
           : []),
         pinOption,
+        { type: OPTION_SEPARATOR },
+        {
+          icon: Wand2,
+          label: t('contextMenus.folders.autoCull'),
+          onClick: () => {
+            setUI({
+              autoCullModalState: {
+                isOpen: true,
+                folderPath: targetPath,
+                stage: 'rules',
+                progress: null,
+                plan: null,
+                result: null,
+                error: null,
+              },
+            });
+          },
+        },
         { type: OPTION_SEPARATOR },
         {
           icon: FolderPlus,

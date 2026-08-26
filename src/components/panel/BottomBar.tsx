@@ -1,17 +1,36 @@
 import { useState, useEffect, useRef } from 'react';
-import { Star, Copy, ClipboardPaste, Check, Settings, Filter, PanelLeft, PanelBottom, PanelRight } from 'lucide-react';
+import {
+  Star,
+  Copy,
+  ClipboardPaste,
+  Check,
+  Settings,
+  Filter,
+  PanelLeft,
+  PanelBottom,
+  PanelRight,
+  Loader2,
+  Database,
+  X,
+  Pause,
+  Play,
+  Square,
+} from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import clsx from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useShallow } from 'zustand/react/shallow';
 import { useTranslation } from 'react-i18next';
 
 import Filmstrip from './Filmstrip';
-import { GLOBAL_KEYS, ImageFile, SelectedImage, ThumbnailAspectRatio } from '../ui/AppProperties';
+import { GLOBAL_KEYS, ImageFile, Invokes, SelectedImage, ThumbnailAspectRatio } from '../ui/AppProperties';
 import Text from '../ui/Text';
+import { TextColors, TextVariants } from '../../types/typography';
 import { useEditorStore } from '../../store/useEditorStore';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import { useUIStore } from '../../store/useUIStore';
 import { COLOR_LABELS } from '../../utils/adjustments';
+import { useProcessStore } from '../../store/useProcessStore';
 
 interface BottomBarProps {
   filmstripHeight?: number;
@@ -215,6 +234,13 @@ export default function BottomBar({
   const showSelectionCounter = numSelected > 1;
 
   const [isFilterExpanded, setIsFilterExpanded] = useState(false);
+  const [isCatalogScanModalOpen, setIsCatalogScanModalOpen] = useState(false);
+  const { catalogScan, catalogScanThumbnail } = useProcessStore(
+    useShallow((state) => ({
+      catalogScan: state.catalogScan,
+      catalogScanThumbnail: state.catalogScan.currentPath ? state.thumbnails[state.catalogScan.currentPath] : undefined,
+    })),
+  );
   const { filterCriteria, setFilterCriteria } = useLibraryStore(
     useShallow((state) => ({
       filterCriteria: state.filterCriteria,
@@ -227,6 +253,42 @@ export default function BottomBar({
   const isCollapsed = !isFilmstripVisible;
   const effectiveHeight = isFilmstripVisible ? currentHeight : 0;
   const shouldAnimate = !isInstantTransition && (!isResizing || isCollapsed);
+  const catalogScanFileName = catalogScan.currentPath?.split(/[\\/]/).pop() || '';
+  const catalogScanPercent =
+    catalogScan.total > 0 ? Math.min(100, Math.round((catalogScan.current / catalogScan.total) * 100)) : null;
+
+  const handlePauseCatalogScan = async () => {
+    try {
+      await invoke(Invokes.PauseCatalogScan);
+      useProcessStore.getState().setProcess((state) => ({
+        catalogScan: { ...state.catalogScan, isPaused: true, message: 'Indexing paused' },
+      }));
+    } catch (err) {
+      console.error('Failed to pause catalog scan:', err);
+    }
+  };
+
+  const handleResumeCatalogScan = async () => {
+    try {
+      await invoke(Invokes.ResumeCatalogScan);
+      useProcessStore.getState().setProcess((state) => ({
+        catalogScan: { ...state.catalogScan, isPaused: false, message: 'Indexing image metadata' },
+      }));
+    } catch (err) {
+      console.error('Failed to resume catalog scan:', err);
+    }
+  };
+
+  const handleCancelCatalogScan = async () => {
+    try {
+      await invoke(Invokes.CancelCatalogScan);
+      useProcessStore.getState().setProcess((state) => ({
+        catalogScan: { ...state.catalogScan, isPaused: false, message: 'Cancelling indexing...' },
+      }));
+    } catch (err) {
+      console.error('Failed to cancel catalog scan:', err);
+    }
+  };
 
   useEffect(() => {
     if (isZoomReady && !isDraggingSlider.current) {
@@ -533,6 +595,41 @@ export default function BottomBar({
             </div>
           </div>
 
+          {(catalogScan.isActive || catalogScan.error) && (
+            <>
+              <div className="h-5 w-px bg-surface"></div>
+              <button
+                className="flex items-center gap-2 rounded-md px-2 py-1 text-text-secondary hover:bg-surface hover:text-text-primary transition-colors max-w-[440px]"
+                onClick={() => setIsCatalogScanModalOpen(true)}
+                data-tooltip="Indexing details"
+              >
+                {catalogScanThumbnail ? (
+                  <img
+                    src={catalogScanThumbnail}
+                    className="h-6 w-6 rounded object-cover border border-border-color shrink-0"
+                    alt=""
+                  />
+                ) : catalogScan.isActive ? (
+                  <Loader2 size={16} className="animate-spin text-accent shrink-0" />
+                ) : (
+                  <Database size={16} className="text-red-500 shrink-0" />
+                )}
+                <Text as="span" variant={TextVariants.small} className="truncate">
+                  {catalogScan.error
+                    ? 'Indexing failed'
+                    : catalogScan.isPaused
+                      ? `Indexing paused ${catalogScan.current}/${catalogScan.total || '?'}`
+                      : catalogScan.total > 0
+                        ? `Indexing collection ${catalogScan.current}/${catalogScan.total}${catalogScanFileName ? ` · ${catalogScanFileName}` : ''}`
+                        : 'Preparing collection indexing'}
+                </Text>
+                {catalogScanPercent !== null && (
+                  <span className="text-[11px] text-text-secondary tabular-nums shrink-0">{catalogScanPercent}%</span>
+                )}
+              </button>
+            </>
+          )}
+
           <div
             className={clsx(
               'flex items-center transition-all duration-300 ease-out overflow-hidden',
@@ -647,6 +744,142 @@ export default function BottomBar({
           </div>
         </div>
       </div>
+
+      <AnimatePresence>
+        {isCatalogScanModalOpen && (
+          <motion.div
+            className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/50 p-6"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setIsCatalogScanModalOpen(false)}
+          >
+            <motion.div
+              className="w-full max-w-2xl rounded-lg border border-border-color bg-bg-secondary shadow-2xl p-5"
+              initial={{ scale: 0.96, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.96, opacity: 0 }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="flex items-start justify-between gap-4 mb-4">
+                <div>
+                  <Text variant={TextVariants.heading}>Collection Indexing</Text>
+                  <Text variant={TextVariants.small} color={TextColors.secondary}>
+                    {catalogScan.rootPath || 'No active collection'}
+                  </Text>
+                </div>
+                <button
+                  className="p-2 rounded-md text-text-secondary hover:text-text-primary hover:bg-surface"
+                  onClick={() => setIsCatalogScanModalOpen(false)}
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="space-y-4">
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <Text variant={TextVariants.small}>
+                      {catalogScan.isPaused ? 'Indexing paused' : catalogScan.message || 'Indexing collection'}
+                    </Text>
+                    <Text variant={TextVariants.small} color={TextColors.secondary}>
+                      {catalogScan.total > 0 ? `${catalogScan.current}/${catalogScan.total}` : 'Preparing'}
+                    </Text>
+                  </div>
+                  <div className="h-2 rounded-full bg-surface overflow-hidden">
+                    <div
+                      className="h-full bg-accent transition-all"
+                      style={{
+                        width:
+                          catalogScan.total > 0
+                            ? `${Math.min(100, (catalogScan.current / catalogScan.total) * 100)}%`
+                            : '15%',
+                      }}
+                    />
+                  </div>
+                </div>
+
+                {catalogScan.isActive && (
+                  <div className="flex flex-wrap gap-2">
+                    {catalogScan.isPaused ? (
+                      <button
+                        className="inline-flex items-center gap-2 rounded-md bg-accent px-3 py-2 text-sm text-white hover:bg-accent-hover"
+                        onClick={handleResumeCatalogScan}
+                      >
+                        <Play size={16} />
+                        Resume
+                      </button>
+                    ) : (
+                      <button
+                        className="inline-flex items-center gap-2 rounded-md border border-border-color bg-bg-primary px-3 py-2 text-sm text-text-primary hover:bg-surface"
+                        onClick={handlePauseCatalogScan}
+                      >
+                        <Pause size={16} />
+                        Pause
+                      </button>
+                    )}
+                    <button
+                      className="inline-flex items-center gap-2 rounded-md border border-red-500/50 bg-red-500/10 px-3 py-2 text-sm text-red-300 hover:bg-red-500/20"
+                      onClick={handleCancelCatalogScan}
+                    >
+                      <Square size={16} />
+                      Cancel
+                    </button>
+                  </div>
+                )}
+
+                {catalogScan.error && (
+                  <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2">
+                    <Text variant={TextVariants.small}>{catalogScan.error}</Text>
+                  </div>
+                )}
+
+                <div className="rounded-md border border-border-color bg-bg-primary p-3">
+                  <div className="grid grid-cols-[96px_minmax(0,1fr)] gap-4">
+                    <div className="h-24 w-24 rounded-md border border-border-color bg-surface overflow-hidden flex items-center justify-center">
+                      {catalogScanThumbnail ? (
+                        <img src={catalogScanThumbnail} className="h-full w-full object-cover" alt="" />
+                      ) : catalogScan.isActive ? (
+                        <Loader2 size={22} className="animate-spin text-accent" />
+                      ) : (
+                        <Database size={22} className="text-text-secondary" />
+                      )}
+                    </div>
+                    <div className="min-w-0 space-y-3">
+                      <div>
+                        <Text variant={TextVariants.label}>Current Image</Text>
+                        <Text variant={TextVariants.small} className="break-all">
+                          {catalogScan.currentPath || 'Waiting for first image...'}
+                        </Text>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                        <div>
+                          <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
+                            Camera
+                          </Text>
+                          <Text variant={TextVariants.small}>{catalogScan.camera || '-'}</Text>
+                        </div>
+                        <div>
+                          <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
+                            Lens
+                          </Text>
+                          <Text variant={TextVariants.small}>{catalogScan.lens || '-'}</Text>
+                        </div>
+                        <div>
+                          <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
+                            Year
+                          </Text>
+                          <Text variant={TextVariants.small}>{catalogScan.year || '-'}</Text>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

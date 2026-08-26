@@ -18,11 +18,18 @@ import {
   Image as ImageIcon,
   Mouse,
   Touchpad,
+  Database,
+  FolderPlus,
+  FolderOpen,
+  Loader2,
+  RefreshCw,
+  Search,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
+import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { relaunch } from '@tauri-apps/plugin-process';
-import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
+import { motion, AnimatePresence, LayoutGroup, type Variants } from 'framer-motion';
 import clsx from 'clsx';
 import { Show, SignIn, useUser, useAuth, useClerk } from '@clerk/react';
 import Button from '../ui/Button';
@@ -33,7 +40,12 @@ import Input from '../ui/Input';
 import Slider from '../ui/Slider';
 import { ThemeProps, THEMES, DEFAULT_THEME_ID } from '../../utils/themes';
 import { useTranslation } from 'react-i18next';
-import { Invokes } from '../ui/AppProperties';
+import {
+  CatalogMetrics,
+  CatalogRoot,
+  Invokes,
+  LibraryInfo,
+} from '../ui/AppProperties';
 import {
   formatKeyCode,
   KeybindDefinition,
@@ -44,9 +56,11 @@ import {
 import Text from '../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../types/typography';
 import { useOsPlatform } from '../../hooks/useOsPlatform';
-import { open } from '@tauri-apps/plugin-shell';
+import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { RotateCcw } from 'lucide-react';
 import { useUIStore } from '../../store/useUIStore';
+import { useLibraryStore } from '../../store/useLibraryStore';
+import { useProcessStore } from '../../store/useProcessStore';
 
 interface ConfirmModalState {
   confirmText: string;
@@ -348,7 +362,7 @@ const CloudDashboard = () => {
           <Button
             variant="ghost"
             className="bg-transparent text-text-secondary hover:text-text-primary hover:bg-surface border-none shadow-none"
-            onClick={() => open('https://www.getrapidraw.com/dashboard')}
+            onClick={() => shellOpen('https://www.getrapidraw.com/dashboard')}
           >
             {t('settings.processing.ai.cloud.signedIn.manage')} <ExternalLinkIcon size={14} className="ml-1" />
           </Button>
@@ -384,7 +398,7 @@ const CloudDashboard = () => {
       ) : (
         <div className="bg-red-900/10 border border-red-500/50 p-4 rounded-md text-center">
           <Text className="mb-3">{t('settings.processing.ai.cloud.signedOut.upgradeDesc')}</Text>
-          <Button onClick={() => open('https://www.getrapidraw.com/cloud')}>
+          <Button onClick={() => shellOpen('https://www.getrapidraw.com/cloud')}>
             {t('settings.processing.ai.cloud.signedOut.upgradeBtn')}
           </Button>
         </div>
@@ -491,6 +505,11 @@ const PreviewModeSwitch = ({ mode, onModeChange }: PreviewModeSwitchProps) => {
   );
 };
 
+const waitForNextPaint = () =>
+  new Promise<void>((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
+  });
+
 export default function SettingsPanel({
   appSettings,
   onBack,
@@ -519,6 +538,15 @@ export default function SettingsPanel({
   const [testStatus, setTestStatus] = useState<TestStatus>({ message: '', success: null, testing: false });
   const [hasInteractedWithLivePreview, setHasInteractedWithLivePreview] = useState(false);
   const [recordingAction, setRecordingAction] = useState<string | null>(null);
+  const [libraryInfo, setLibraryInfo] = useState<LibraryInfo | null>(null);
+  const [catalogRoots, setCatalogRoots] = useState<CatalogRoot[]>([]);
+  const [libraryName, setLibraryName] = useState('RapidRAW Library');
+  const [libraryDirectory, setLibraryDirectory] = useState<string | null>(null);
+  const [libraryMessage, setLibraryMessage] = useState('');
+  const [libraryBusy, setLibraryBusy] = useState(false);
+  const [catalogMetrics, setCatalogMetrics] = useState<CatalogMetrics | null>(null);
+  const catalogScan = useProcessStore((state) => state.catalogScan);
+  const scanningRootId = catalogScan.isActive ? catalogScan.rootId : null;
 
   const [aiProvider, setAiProvider] = useState(appSettings?.aiProvider || 'cpu');
   const [aiConnectorAddress, setAiConnectorAddress] = useState<string>(appSettings?.aiConnectorAddress || '');
@@ -557,9 +585,235 @@ export default function SettingsPanel({
   const [logPathError, setLogPathError] = useState(false);
   const [dpr, setDpr] = useState(() => (typeof window !== 'undefined' ? window.devicePixelRatio : 1));
 
+  const refreshLibraryState = async () => {
+    const active = await invoke<LibraryInfo | null>(Invokes.GetActiveLibrary);
+    setLibraryInfo(active);
+    if (active) {
+      const roots = await invoke<CatalogRoot[]>(Invokes.ListLibraryRoots);
+      const metrics = await invoke<CatalogMetrics>(Invokes.GetCatalogMetrics);
+      setCatalogRoots(roots);
+      setCatalogMetrics(metrics);
+      useLibraryStore.getState().setLibrary({
+        librarySource: { type: 'catalog', libraryId: active.id, dbPath: active.dbPath, name: active.name },
+        catalogRoots: roots,
+      });
+    } else {
+      setCatalogRoots([]);
+      setCatalogMetrics(null);
+      useLibraryStore.getState().setLibrary({
+        librarySource: { type: 'filesystem' },
+        catalogRoots: [],
+        activeCatalogRootId: null,
+      });
+    }
+  };
+
+  const handleCreateLibrary = async () => {
+    setLibraryBusy(true);
+    setLibraryMessage(
+      libraryDirectory
+        ? `Creating SQLite library database in ${libraryDirectory}...`
+        : 'Creating SQLite library database in RapidRAW app data...',
+    );
+    try {
+      const created = await invoke<LibraryInfo>(Invokes.CreateLibrary, {
+        name: libraryName,
+        directory: libraryDirectory,
+      });
+      setLibraryInfo(created);
+      await onSettingsChange({ ...appSettings, activeLibraryDbPath: created.dbPath });
+      await refreshLibraryState();
+      setLibraryMessage(`Created library "${created.name}". Add a photo folder to start indexing.`);
+    } catch (err) {
+      setLibraryMessage(`Failed to create library: ${err}`);
+    } finally {
+      setLibraryBusy(false);
+    }
+  };
+
+  const handleChooseLibraryDirectory = async () => {
+    setLibraryMessage('Choose a folder for the SQLite database...');
+    try {
+      const selected = await openDialog({ directory: true, multiple: false, title: 'Choose Library Database Folder' });
+      if (typeof selected !== 'string') {
+        setLibraryMessage('Using the default RapidRAW app data location.');
+        setLibraryDirectory(null);
+        return;
+      }
+      setLibraryDirectory(selected);
+      setLibraryMessage(`Database location set to ${selected}.`);
+    } catch (err) {
+      setLibraryMessage(`Failed to choose database folder: ${err}`);
+    }
+  };
+
+  const handleOpenLibrary = async () => {
+    setLibraryBusy(true);
+    setLibraryMessage('Choose an existing RapidRAW library database...');
+    try {
+      const selected = await openDialog({
+        directory: false,
+        multiple: false,
+        title: 'Open RapidRAW Library',
+        filters: [{ name: 'SQLite Database', extensions: ['db', 'sqlite', 'sqlite3'] }],
+      });
+      if (typeof selected !== 'string') {
+        setLibraryMessage('No library database was selected.');
+        return;
+      }
+      setLibraryMessage(`Opening library database at ${selected}...`);
+      const opened = await invoke<LibraryInfo>(Invokes.OpenLibrary, { path: selected });
+      setLibraryInfo(opened);
+      await onSettingsChange({ ...appSettings, activeLibraryDbPath: opened.dbPath });
+      await refreshLibraryState();
+      setLibraryMessage(`Opened library "${opened.name}".`);
+    } catch (err) {
+      setLibraryMessage(`Failed to open library: ${err}`);
+    } finally {
+      setLibraryBusy(false);
+    }
+  };
+
+  const handleCloseLibrary = async () => {
+    setLibraryBusy(true);
+    setLibraryMessage('Closing the active library...');
+    try {
+      await invoke(Invokes.CloseLibrary);
+      await onSettingsChange({ ...appSettings, activeLibraryDbPath: null });
+      useLibraryStore.getState().setLibrary({
+        librarySource: { type: 'filesystem' },
+        catalogRoots: [],
+        activeCatalogRootId: null,
+        imageList: [],
+        imageRatings: {},
+        currentFolderPath: null,
+      });
+      await refreshLibraryState();
+      setLibraryMessage('Returned to folder browsing mode.');
+    } catch (err) {
+      setLibraryMessage(`Failed to close library: ${err}`);
+    } finally {
+      setLibraryBusy(false);
+    }
+  };
+
+  const executeDeleteLibrary = async () => {
+    if (!libraryInfo) return;
+    setLibraryBusy(true);
+    setLibraryMessage(`Deleting library "${libraryInfo.name}"...`);
+    try {
+      await invoke(Invokes.DeleteLibrary);
+      await onSettingsChange({ ...appSettings, activeLibraryDbPath: null });
+      useLibraryStore.getState().setLibrary({
+        librarySource: { type: 'filesystem' },
+        catalogRoots: [],
+        activeCatalogRootId: null,
+        imageList: [],
+        imageRatings: {},
+        currentFolderPath: null,
+      });
+      setLibraryInfo(null);
+      setCatalogRoots([]);
+      setCatalogMetrics(null);
+      setLibraryMessage('Library database deleted. Photo files and sidecars were not removed.');
+    } catch (err) {
+      setLibraryMessage(`Failed to delete library: ${err}`);
+    } finally {
+      setLibraryBusy(false);
+    }
+  };
+
+  const handleDeleteLibrary = () => {
+    if (!libraryInfo) return;
+    setConfirmModalState({
+      confirmText: 'Delete Library',
+      confirmVariant: 'destructive',
+      isOpen: true,
+      message:
+        'This deletes the active RapidRAW SQLite database only. Your photos and .rrdata sidecars will remain on disk.',
+      onConfirm: executeDeleteLibrary,
+      title: `Delete "${libraryInfo.name}"?`,
+    });
+  };
+
+  const handleAddLibraryRoot = async () => {
+    if (!libraryInfo) return;
+    setLibraryBusy(true);
+    setLibraryMessage('Choose a photo folder to add to the library...');
+    try {
+      const selected = await openDialog({ directory: true, multiple: false, title: 'Add Photo Folder to Library' });
+      if (typeof selected !== 'string') {
+        setLibraryMessage('No photo folder was selected.');
+        return;
+      }
+      setLibraryMessage(`Adding ${selected} to the library database...`);
+      const root = await invoke<CatalogRoot>(Invokes.AddLibraryRoot, { path: selected, label: null });
+      const nextRoots = catalogRoots.some((existing) => existing.id === root.id)
+        ? catalogRoots.map((existing) => (existing.id === root.id ? root : existing))
+        : [...catalogRoots, root];
+      setCatalogRoots(nextRoots);
+      useLibraryStore.getState().setLibrary({ catalogRoots: nextRoots });
+      setLibraryMessage(`Scanning and indexing images in ${selected}...`);
+      await waitForNextPaint();
+      await invoke(Invokes.StartCatalogScan, { rootId: root.id, recursive: true });
+      setLibraryMessage(`Catalog scan started for ${selected}. Progress is shown in the bottom status bar.`);
+    } catch (err) {
+      setLibraryMessage(`Failed to add folder: ${err}`);
+    } finally {
+      setLibraryBusy(false);
+    }
+  };
+
+  const handleScanLibraryRoot = async (root: CatalogRoot) => {
+    setLibraryBusy(true);
+    setLibraryMessage(`Scanning and indexing images in ${root.absolutePath}...`);
+    try {
+      await waitForNextPaint();
+      await invoke(Invokes.StartCatalogScan, { rootId: root.id, recursive: true });
+      setLibraryMessage(`Catalog scan started for ${root.absolutePath}. Progress is shown in the bottom status bar.`);
+    } catch (err) {
+      setLibraryMessage(`Failed to scan folder: ${err}`);
+    } finally {
+      setLibraryBusy(false);
+    }
+  };
+
+  const handleBrowseCatalogRoot = async (root: CatalogRoot) => {
+    setLibraryBusy(true);
+    setLibraryMessage(`Loading catalog images from ${root.absolutePath}...`);
+    try {
+      const files = await invoke<any[]>(Invokes.ListCatalogImages, { rootId: root.id, recursive: true });
+      const initialRatings: Record<string, number> = {};
+      files.forEach((file) => {
+        initialRatings[file.path] = file.rating || 0;
+      });
+      useLibraryStore.getState().setLibrary({
+        rootPaths: [root.absolutePath],
+        currentFolderPath: `Library: ${root.label || root.absolutePath}`,
+        activeAlbumId: null,
+        activeCatalogRootId: root.id,
+        imageList: files,
+        imageRatings: initialRatings,
+        multiSelectedPaths: [],
+        libraryActivePath: null,
+      });
+      useUIStore.getState().setUI({ activeView: 'library' });
+      setLibraryMessage(`Loaded ${files.length} catalog images.`);
+    } catch (err) {
+      setLibraryMessage(`Failed to browse library folder: ${err}`);
+    } finally {
+      setLibraryBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshLibraryState().catch((err) => setLibraryMessage(`Failed to load library state: ${err}`));
+  }, []);
+
   const settingCategories = useMemo(
     () => [
       { id: 'general', label: t('settings.categories.general'), icon: SlidersHorizontal },
+      { id: 'library', label: 'Library', icon: Database },
       { id: 'processing', label: t('settings.categories.processing'), icon: Cpu },
       { id: 'shortcuts', label: t('settings.categories.shortcuts'), icon: Keyboard },
     ],
@@ -897,7 +1151,7 @@ export default function SettingsPanel({
     });
   };
 
-  const shortcutTagVariants = {
+  const shortcutTagVariants: Variants = {
     visible: { opacity: 1, scale: 1, transition: { type: 'spring', stiffness: 500, damping: 30 } },
     exit: { opacity: 0, scale: 0.8, transition: { duration: 0.15 } },
   };
@@ -1733,6 +1987,305 @@ export default function SettingsPanel({
                   </div>
                 </motion.div>
               )}
+
+              {activeCategory === 'library' && (
+                <motion.div
+                  key="library"
+                  initial={{ opacity: 0, x: 10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -10 }}
+                  transition={{ duration: 0.2 }}
+                  className="space-y-10"
+                >
+                  <div className="p-6 bg-surface rounded-xl shadow-md">
+                    <Text variant={TextVariants.title} color={TextColors.accent} className="mb-2">
+                      Library Catalog
+                    </Text>
+                    <Text variant={TextVariants.small} className="mb-8">
+                      Use folder browsing for quick edits, or open a catalog to manage indexed collections.
+                    </Text>
+
+                    <div className="space-y-8">
+                      <div className="rounded-md border border-border-color bg-bg-primary p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-4">
+                          <div className="min-w-0">
+                            <Text variant={TextVariants.heading}>Database</Text>
+                            {libraryInfo ? (
+                              <>
+                                <Text variant={TextVariants.small} color={TextColors.accent}>
+                                  {libraryInfo.name} · SQLite · schema {libraryInfo.schemaVersion}
+                                </Text>
+                                <Text variant={TextVariants.small} className="break-all mt-1">
+                                  {libraryInfo.dbPath}
+                                </Text>
+                              </>
+                            ) : (
+                              <Text variant={TextVariants.small}>
+                                No catalog is open. RapidRAW is currently browsing folders directly.
+                              </Text>
+                            )}
+                          </div>
+                          <div className="flex flex-wrap gap-2 shrink-0">
+                            {libraryInfo ? (
+                              <>
+                                <Button
+                                  onClick={handleOpenLibrary}
+                                  disabled={libraryBusy}
+                                  className="bg-bg-primary text-text-primary border border-border-color hover:bg-card-active shadow-none"
+                                >
+                                  <FolderOpen size={16} />
+                                  Open Different
+                                </Button>
+                                <Button
+                                  onClick={handleCloseLibrary}
+                                  disabled={libraryBusy}
+                                  className="bg-bg-primary text-text-primary border border-border-color hover:bg-card-active shadow-none"
+                                >
+                                  <X size={16} />
+                                  Use Folder Browsing
+                                </Button>
+                                <Button
+                                  onClick={handleDeleteLibrary}
+                                  disabled={libraryBusy}
+                                  className="bg-red-600 text-white border border-red-500 hover:bg-red-500 shadow-none"
+                                >
+                                  <Trash2 size={16} />
+                                  Delete Library
+                                </Button>
+                              </>
+                            ) : (
+                              <Button onClick={handleOpenLibrary} disabled={libraryBusy}>
+                                <FolderOpen size={16} />
+                                Open Existing Library
+                              </Button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {!libraryInfo && (
+                        <div className="rounded-md border border-border-color bg-bg-primary p-4">
+                          <Text variant={TextVariants.heading} className="mb-2">
+                            Create New Library
+                          </Text>
+                          <Text variant={TextVariants.small} className="mb-4">
+                            The catalog database is separate from your photos. Your source folders and `.rrdata` sidecars
+                            are left in place.
+                          </Text>
+                          <div className="grid gap-4">
+                            <Input
+                              value={libraryName}
+                              onChange={(e: any) => setLibraryName(e.target.value)}
+                              placeholder="Library name"
+                              bgClassName="bg-surface"
+                            />
+                            <div className="rounded-md border border-border-color bg-surface p-3">
+                              <Text variant={TextVariants.label}>Database Location</Text>
+                              <Text variant={TextVariants.small} className="break-all mt-1">
+                                {libraryDirectory || 'Default RapidRAW app data folder'}
+                              </Text>
+                              <div className="flex flex-wrap gap-2 mt-3">
+                                <Button
+                                  onClick={handleChooseLibraryDirectory}
+                                  disabled={libraryBusy}
+                                  className="bg-bg-primary text-text-primary border border-border-color hover:bg-card-active shadow-none"
+                                >
+                                  <FolderOpen size={16} />
+                                  Choose Location
+                                </Button>
+                                {libraryDirectory && (
+                                  <Button
+                                    onClick={() => {
+                                      setLibraryDirectory(null);
+                                      setLibraryMessage('Database location reset to the default app data folder.');
+                                    }}
+                                    disabled={libraryBusy}
+                                    className="bg-bg-primary text-text-primary border border-border-color hover:bg-card-active shadow-none"
+                                  >
+                                    <X size={16} />
+                                    Use Default
+                                  </Button>
+                                )}
+                              </div>
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                              <Button onClick={handleCreateLibrary} disabled={libraryBusy}>
+                                <Database size={16} />
+                                Create Library
+                              </Button>
+                              <Button
+                                onClick={handleOpenLibrary}
+                                disabled={libraryBusy}
+                                className="bg-bg-primary text-text-primary border border-border-color hover:bg-card-active shadow-none"
+                              >
+                                <FolderOpen size={16} />
+                                Open Existing
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      <div>
+                        <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+                          <div>
+                            <Text variant={TextVariants.heading}>Local Collections</Text>
+                            <Text variant={TextVariants.small}>
+                              Collection roots are top-level photo folders. Subfolders become browsable albums in the
+                              catalog index.
+                            </Text>
+                          </div>
+                          <Button onClick={handleAddLibraryRoot} disabled={!libraryInfo || libraryBusy || catalogScan.isActive}>
+                            {catalogScan.isActive ? (
+                              <Loader2 size={16} className="animate-spin" />
+                            ) : (
+                              <FolderPlus size={16} />
+                            )}
+                            {catalogScan.isActive ? 'Scanning Collection' : 'Add Collection'}
+                          </Button>
+                        </div>
+
+                        {scanningRootId !== null && (
+                          <div className="mb-3 rounded-md border border-accent/40 bg-accent/10 px-4 py-3 text-text-primary flex items-center gap-3">
+                            <Loader2 size={18} className="animate-spin text-accent shrink-0" />
+                            <Text variant={TextVariants.small}>
+                              {catalogScan.total > 0
+                                ? `Scanning collection ${catalogScan.current}/${catalogScan.total}: ${catalogScan.currentPath || ''}`
+                                : 'Preparing catalog scan...'}
+                            </Text>
+                          </div>
+                        )}
+
+                        <div className="rounded-md border border-border-color overflow-hidden">
+                          <div className="hidden min-[900px]:grid grid-cols-[minmax(0,1fr)_80px_minmax(210px,auto)] gap-3 px-4 py-2 bg-bg-primary border-b border-border-color">
+                            <Text variant={TextVariants.label}>Name and Path</Text>
+                            <Text variant={TextVariants.label}>Images</Text>
+                            <Text variant={TextVariants.label}>Actions</Text>
+                          </div>
+                          {catalogRoots.length === 0 ? (
+                            <div className="bg-bg-primary p-4">
+                              <Text variant={TextVariants.small}>
+                                {libraryInfo
+                                  ? 'No collections have been added. Add a collection to index a photo folder.'
+                                  : 'Create or open a library before adding collections.'}
+                              </Text>
+                            </div>
+                          ) : (
+                            catalogRoots.map((root) => {
+                              const isScanningRoot = scanningRootId === root.id;
+                              return (
+                                <div
+                                  key={root.id}
+                                  className={clsx(
+                                    'grid grid-cols-1 min-[900px]:grid-cols-[minmax(0,1fr)_80px_minmax(210px,auto)] gap-3 items-start min-[900px]:items-center px-4 py-3 bg-bg-primary border-b border-border-color last:border-b-0',
+                                    isScanningRoot && 'bg-card-active/40',
+                                  )}
+                                >
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2 mb-1">
+                                    <span
+                                      className={clsx('h-2 w-2 rounded-full shrink-0', {
+                                        'bg-accent animate-pulse': isScanningRoot,
+                                        'bg-green-500': root.isAvailable && !isScanningRoot,
+                                        'bg-red-500': !root.isAvailable,
+                                      })}
+                                    />
+                                    <Text variant={TextVariants.heading} className="truncate">
+                                      {root.label || root.absolutePath.split('/').filter(Boolean).pop() || root.absolutePath}
+                                    </Text>
+                                  </div>
+                                  <Text variant={TextVariants.small} className="break-all">
+                                    {root.absolutePath}
+                                  </Text>
+                                  <Text variant={TextVariants.small}>
+                                    {isScanningRoot
+                                      ? 'Scanning and indexing metadata...'
+                                      : `${root.isAvailable ? 'Available' : 'Missing'}${
+                                          root.lastScanAt
+                                            ? ` · last scanned ${new Date(root.lastScanAt * 1000).toLocaleString()}`
+                                            : ' · not scanned yet'
+                                        }`}
+                                  </Text>
+                                </div>
+                                <Text variant={TextVariants.small}>
+                                  <span className="min-[900px]:hidden">Images: </span>
+                                  {root.imageCount}
+                                </Text>
+                                <div className="flex flex-wrap gap-2 min-[900px]:justify-end">
+                                  <Button
+                                    onClick={() => handleBrowseCatalogRoot(root)}
+                                    disabled={libraryBusy}
+                                    className="px-3 shrink-0"
+                                  >
+                                    <ImageIcon size={16} />
+                                    Browse
+                                  </Button>
+                                  <Button
+                                    onClick={() => handleScanLibraryRoot(root)}
+                                    disabled={libraryBusy || catalogScan.isActive}
+                                    className="bg-bg-primary text-text-primary border border-border-color hover:bg-card-active shadow-none px-3 shrink-0"
+                                  >
+                                    {isScanningRoot ? (
+                                      <Loader2 size={16} className="animate-spin" />
+                                    ) : (
+                                      <RefreshCw size={16} />
+                                    )}
+                                    {isScanningRoot ? 'Scanning' : 'Scan'}
+                                  </Button>
+                                </div>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+                      </div>
+
+                      {catalogMetrics && (
+                        <div className="rounded-md border border-border-color bg-bg-primary p-4">
+                          <div className="flex flex-wrap items-start justify-between gap-3 mb-4">
+                            <div>
+                              <Text variant={TextVariants.heading}>Catalog Metrics</Text>
+                              <Text variant={TextVariants.small}>
+                                Indexed metadata available for the Library toolbar search.
+                              </Text>
+                            </div>
+                            <div className="grid grid-cols-2 min-[900px]:grid-cols-4 gap-2 text-right">
+                              <div className="bg-surface rounded-md px-3 py-2">
+                                <Text variant={TextVariants.small}>Images</Text>
+                                <Text variant={TextVariants.heading}>{catalogMetrics.totalImages}</Text>
+                              </div>
+                              <div className="bg-surface rounded-md px-3 py-2">
+                                <Text variant={TextVariants.small}>Edited</Text>
+                                <Text variant={TextVariants.heading}>{catalogMetrics.editedImages}</Text>
+                              </div>
+                              <div className="bg-surface rounded-md px-3 py-2">
+                                <Text variant={TextVariants.small}>Rated</Text>
+                                <Text variant={TextVariants.heading}>{catalogMetrics.ratedImages}</Text>
+                              </div>
+                              <div className="bg-surface rounded-md px-3 py-2">
+                                <Text variant={TextVariants.small}>Missing</Text>
+                                <Text variant={TextVariants.heading}>{catalogMetrics.missingImages}</Text>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      {(libraryMessage || libraryBusy) && (
+                        <div className="rounded-md border border-border-color bg-bg-primary p-4">
+                          <Text variant={TextVariants.small}>
+                            {libraryBusy && (
+                              <span className="inline-block h-2 w-2 rounded-full bg-accent mr-2 animate-pulse" />
+                            )}
+                            {libraryMessage || 'Working on library database...'}
+                          </Text>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+
               {activeCategory === 'processing' && (
                 <motion.div
                   key="processing"
@@ -2333,7 +2886,7 @@ export default function SettingsPanel({
                                     <Text variant={TextVariants.small}>
                                       {t('settings.processing.ai.cloud.signedOut.noAccount')}{' '}
                                       <button
-                                        onClick={() => open('https://www.getrapidraw.com/dashboard')}
+                                        onClick={() => shellOpen('https://www.getrapidraw.com/dashboard')}
                                         className="text-accent hover:underline focus:outline-none"
                                       >
                                         {t('settings.processing.ai.cloud.signedOut.signup')}

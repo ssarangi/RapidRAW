@@ -6,6 +6,8 @@ import {
   CullingSuggestions,
   PanelRegion,
   WorkspaceState,
+  AutoCullPlan,
+  AutoCullResult,
 } from '../components/ui/AppProperties';
 
 export type SwitcherPlacement = 'bottom' | 'right' | 'left' | 'top';
@@ -203,6 +205,18 @@ export function reconcileWorkspace(
   };
 }
 
+export type AutoCullStage = 'rules' | 'analyzing' | 'preview' | 'conflict' | 'applying' | 'summary';
+
+export interface AutoCullModalState {
+  isOpen: boolean;
+  folderPath: string | null;
+  stage: AutoCullStage;
+  progress: { current: number; total: number; stage: string } | null;
+  plan: AutoCullPlan | null;
+  result: AutoCullResult | null;
+  error: string | null;
+}
+
 interface UIState {
   activeView: string;
   isFullScreen: boolean;
@@ -258,6 +272,7 @@ interface UIState {
   negativeModalState: NegativeConversionModalState;
   denoiseModalState: DenoiseModalState;
   cullingModalState: CullingModalState;
+  autoCullModalState: AutoCullModalState;
   collageModalState: CollageModalState;
 
   setUI: (updater: Partial<UIState> | ((state: UIState) => Partial<UIState>)) => void;
@@ -367,6 +382,15 @@ export const useUIStore = create<UIState>((set, get) => ({
     isRaw: false,
   },
   cullingModalState: { isOpen: false, suggestions: null, progress: null, error: null, pathsToCull: [] },
+  autoCullModalState: {
+    isOpen: false,
+    folderPath: null,
+    stage: 'rules',
+    progress: null,
+    plan: null,
+    result: null,
+    error: null,
+  },
   collageModalState: { isOpen: false, sourceImages: [] },
 
   setUI: (updater) => set((state) => (typeof updater === 'function' ? updater(state) : updater)),

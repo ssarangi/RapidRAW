@@ -2,6 +2,9 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
 import {
+  Calendar,
+  Camera,
+  Database,
   Search,
   Loader2,
   X,
@@ -11,12 +14,21 @@ import {
   ChevronUp,
   ChevronDown,
   HelpCircle,
+  Tags,
+  User,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
+import { invoke } from '@tauri-apps/api/core';
+import { toast } from 'react-toastify';
 import { useLibraryStore } from '../../../store/useLibraryStore';
 import {
+  CatalogMetrics,
+  CatalogRoot,
+  CatalogSearchQuery,
   FilterCriteria,
+  ImageFile,
+  Invokes,
   RawStatus,
   EditedStatus,
   LibraryViewMode,
@@ -464,6 +476,270 @@ export function SearchInput({ indexingProgress, isIndexing }: any) {
         )}
       </div>
     </motion.div>
+  );
+}
+
+export function CatalogSearchDropdown() {
+  const { t } = useTranslation();
+  const [isOpen, setIsOpen] = useState(false);
+  const [isSearching, setIsSearching] = useState(false);
+  const [metrics, setMetrics] = useState<CatalogMetrics | null>(null);
+  const [form, setForm] = useState({
+    text: '',
+    year: '',
+    camera: '',
+    lens: '',
+    person: '',
+    tags: '',
+    minRating: '',
+  });
+  const dropdownRef = useRef<HTMLDivElement>(null);
+
+  const { librarySource, catalogRoots, activeCatalogRootId } = useLibraryStore(
+    useShallow((state) => ({
+      librarySource: state.librarySource,
+      catalogRoots: state.catalogRoots,
+      activeCatalogRootId: state.activeCatalogRootId,
+    })),
+  );
+
+  const isCatalogAvailable = librarySource.type === 'catalog';
+  const activeRoot = catalogRoots.find((root: CatalogRoot) => root.id === activeCatalogRootId) || catalogRoots[0] || null;
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    if (!isOpen || !isCatalogAvailable) return;
+    invoke<CatalogMetrics>(Invokes.GetCatalogMetrics)
+      .then(setMetrics)
+      .catch((err) => {
+        console.error('Failed to load catalog metrics:', err);
+        setMetrics(null);
+      });
+  }, [isOpen, isCatalogAvailable]);
+
+  const setField = (key: keyof typeof form, value: string) => {
+    setForm((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const selectClassName =
+    'catalog-search-select w-full appearance-none bg-transparent text-text-primary border-none outline-none pr-7 disabled:text-text-secondary disabled:opacity-70';
+  const emptyOptionLabel = metrics ? 'Any' : 'Loading...';
+
+  const runCatalogSearch = async (overrideForm = form) => {
+    if (!isCatalogAvailable) {
+      toast.info('Open or create a SQLite library first.');
+      return;
+    }
+
+    setIsSearching(true);
+    try {
+      const tags = overrideForm.tags
+        .split(',')
+        .map((tag) => tag.trim())
+        .filter(Boolean);
+      const query: CatalogSearchQuery = {
+        rootId: activeRoot?.id ?? null,
+        text: overrideForm.text.trim() || null,
+        year: overrideForm.year.trim() ? Number(overrideForm.year) : null,
+        camera: overrideForm.camera.trim() || null,
+        lens: overrideForm.lens.trim() || null,
+        person: overrideForm.person.trim() || null,
+        tags: tags.length > 0 ? tags : null,
+        tagMode: tags.length > 1 ? 'AND' : null,
+        minRating: overrideForm.minRating.trim() ? Number(overrideForm.minRating) : null,
+        limit: 20_000,
+      };
+      const files = await invoke<ImageFile[]>(Invokes.SearchCatalogImages, { query });
+      const imageRatings: Record<string, number> = {};
+      files.forEach((file) => {
+        imageRatings[file.path] = file.rating || 0;
+      });
+      const overrideHasQuery = Object.values(overrideForm).some((value) => value.trim().length > 0);
+      const label = overrideHasQuery
+        ? 'Library: Search Results'
+        : `Library: ${activeRoot?.label || activeRoot?.absolutePath || librarySource.name}`;
+      useLibraryStore.getState().setLibrary({
+        rootPaths: activeRoot ? [activeRoot.absolutePath] : useLibraryStore.getState().rootPaths,
+        currentFolderPath: label,
+        activeAlbumId: null,
+        activeCatalogRootId: activeRoot?.id ?? null,
+        imageList: files,
+        imageRatings,
+        multiSelectedPaths: [],
+        libraryActivePath: null,
+        libraryScrollTop: 0,
+      });
+      useLibraryStore.getState().setSearchCriteria({ text: '', tags: [], mode: 'OR' });
+      setIsOpen(false);
+    } catch (err) {
+      console.error('Failed to search catalog:', err);
+      toast.error(`Failed to search catalog: ${err}`);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const clearCatalogSearch = async () => {
+    const emptyForm = { text: '', year: '', camera: '', lens: '', person: '', tags: '', minRating: '' };
+    setForm(emptyForm);
+    await runCatalogSearch(emptyForm);
+  };
+
+  return (
+    <div className="relative" ref={dropdownRef}>
+      <Button
+        aria-expanded={isOpen}
+        aria-haspopup="true"
+        className={clsx(
+          'h-12 px-3 bg-transparent text-text-primary shadow-none flex items-center justify-center gap-2',
+          !isCatalogAvailable && 'opacity-50',
+        )}
+        onClick={() => setIsOpen((open) => !open)}
+        data-tooltip={
+          isCatalogAvailable
+            ? t('library.header.catalogSearch.title', { defaultValue: 'Search Catalog' })
+            : t('library.header.catalogSearch.unavailable', { defaultValue: 'Open a SQLite library to search catalog metadata' })
+        }
+      >
+        <Database className="w-5 h-5" />
+        <span className="text-sm font-medium whitespace-nowrap">Catalog Search</span>
+      </Button>
+
+      <AnimatePresence>
+        {isOpen && (
+          <motion.div
+            className="absolute right-0 mt-2 w-[620px] max-w-[calc(100vw-2rem)] origin-top-right z-50"
+            initial={{ opacity: 0, scale: 0.95 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.95 }}
+            transition={{ duration: 0.1, ease: 'easeOut' }}
+          >
+            <div className="bg-surface/95 backdrop-blur-md border border-border-color/50 rounded-lg shadow-xl p-4">
+              <div className="flex items-start justify-between gap-4 mb-4">
+                <div className="min-w-0">
+                  <Text variant={TextVariants.heading} weight={TextWeights.semibold}>
+                    {t('library.header.catalogSearch.title', { defaultValue: 'Search Catalog' })}
+                  </Text>
+                  <Text variant={TextVariants.small} color={TextColors.secondary} className="truncate">
+                    {isCatalogAvailable
+                      ? activeRoot?.label || activeRoot?.absolutePath || librarySource.name
+                      : t('library.header.catalogSearch.noLibrary', { defaultValue: 'No SQLite library is open' })}
+                  </Text>
+                </div>
+                <button
+                  className="p-2 rounded-md text-text-secondary hover:text-text-primary hover:bg-bg-primary"
+                  onClick={() => setIsOpen(false)}
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <label className="col-span-2">
+                  <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mb-1">
+                    Text
+                  </Text>
+                    <div className="flex items-center bg-bg-primary rounded-md px-3 h-10 border border-border-color/30">
+                      <Search size={16} className="text-text-secondary mr-2 shrink-0" />
+                    <input
+                      className="w-full bg-transparent text-text-primary border-none outline-none"
+                      value={form.text}
+                      onChange={(event) => setField('text', event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') runCatalogSearch();
+                      }}
+                    />
+                  </div>
+                </label>
+
+                {[
+                  { key: 'year' as const, label: 'Year', Icon: Calendar, options: metrics?.years || [] },
+                  {
+                    key: 'minRating' as const,
+                    label: 'Minimum Rating',
+                    Icon: StarIcon,
+                    options: (metrics?.ratings || []).filter((item) => item.value !== '0'),
+                  },
+                  { key: 'lens' as const, label: 'Lens', Icon: Camera, options: metrics?.lenses || [] },
+                  { key: 'camera' as const, label: 'Camera', Icon: Camera, options: metrics?.cameras || [] },
+                  { key: 'person' as const, label: 'Person', Icon: User, options: metrics?.people || [] },
+                  { key: 'tags' as const, label: 'Tags', Icon: Tags, options: metrics?.tags || [] },
+                ].map(({ key, label, Icon, options }) => (
+                  <label key={key}>
+                    <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mb-1">
+                      {label}
+                    </Text>
+                    <div className="catalog-search-field flex items-center bg-bg-primary rounded-md px-3 h-10 border border-border-color/30">
+                      <Icon size={16} className="text-text-secondary mr-2 shrink-0" />
+                      <div className="relative min-w-0 flex-1">
+                        <select
+                          className={selectClassName}
+                          disabled={!metrics || options.length === 0}
+                          value={form[key]}
+                          onChange={(event) => setField(key, event.target.value)}
+                        >
+                          <option value="">{emptyOptionLabel}</option>
+                          {options.map((option) => (
+                            <option key={`${key}-${option.value}`} value={option.value}>
+                              {key === 'minRating' ? `${option.value}+ stars` : option.value} ({option.count})
+                            </option>
+                          ))}
+                        </select>
+                        <ChevronDown
+                          size={16}
+                          className="pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 text-text-secondary"
+                        />
+                      </div>
+                    </div>
+                  </label>
+                ))}
+              </div>
+
+              {metrics && (
+                <div className="mt-4 grid grid-cols-4 gap-3">
+                  {[
+                    { label: 'Images', value: metrics.totalImages },
+                    { label: 'Rated', value: metrics.ratedImages },
+                    { label: 'Edited', value: metrics.editedImages },
+                    { label: 'Missing', value: metrics.missingImages },
+                  ].map((item) => (
+                    <div key={item.label} className="bg-bg-primary rounded-md border border-border-color/30 px-3 py-2">
+                      <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
+                        {item.label}
+                      </Text>
+                      <Text variant={TextVariants.heading}>{item.value}</Text>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              <div className="mt-4 flex justify-end gap-2">
+                <Button
+                  className="h-10 bg-bg-primary text-text-primary border border-border-color shadow-none"
+                  disabled={isSearching || !isCatalogAvailable}
+                  onClick={clearCatalogSearch}
+                >
+                  Clear
+                </Button>
+                <Button className="h-10" disabled={isSearching || !isCatalogAvailable} onClick={() => runCatalogSearch()}>
+                  {isSearching && <Loader2 size={16} className="mr-2 animate-spin" />}
+                  Search
+                </Button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 }
 
