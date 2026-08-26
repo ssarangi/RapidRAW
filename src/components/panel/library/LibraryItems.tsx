@@ -789,16 +789,16 @@ const RowComponent = ({
     if (!row || row.type !== 'images') return;
 
     row.images.forEach((img: ImageFile) => {
-      queueThumbnailRequest(img.path);
+      queueThumbnailRequest(img);
     });
 
     const cloudPaths = row.images
       .filter((img: ImageFile) => img.is_cloud_placeholder)
-      .map((img: ImageFile) => img.path);
+      .map((img: ImageFile) => img);
     if (cloudPaths.length === 0) return;
 
     const interval = setInterval(() => {
-      cloudPaths.forEach((path: string) => queueThumbnailRequest(path));
+      cloudPaths.forEach((img: ImageFile) => queueThumbnailRequest(img));
     }, 5000);
 
     return () => clearInterval(interval);

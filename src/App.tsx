@@ -382,11 +382,27 @@ function App() {
           const album = findObj(albumTree);
           if (album) await handleSelectAlbum(album.id, album.name, album.images, true);
         }
+      } else if (currentFolderPath.startsWith('Library: ') || currentFolderPath.startsWith('LibraryFolder:')) {
+        const { activeCatalogRootId, setLibrary } = useLibraryStore.getState();
+        if (activeCatalogRootId) {
+          const match = /^LibraryFolder:(\d+):(.*)$/.exec(currentFolderPath);
+          const folderPath = match ? match[2] || '.' : '.';
+          const files = await invoke<ImageFile[]>(Invokes.ListCatalogImages, {
+            rootId: activeCatalogRootId,
+            recursive: appSettings?.libraryViewMode === LibraryViewMode.Recursive,
+            folderPath,
+          });
+          const imageRatings: Record<string, number> = {};
+          files.forEach((file) => {
+            imageRatings[file.path] = file.rating || 0;
+          });
+          setLibrary({ imageList: files, imageRatings });
+        }
       } else {
         await handleSelectSubfolder(currentFolderPath, false, undefined, false, true);
       }
     }
-  }, [currentFolderPath, handleSelectSubfolder, handleSelectAlbum]);
+  }, [currentFolderPath, handleSelectSubfolder, handleSelectAlbum, appSettings?.libraryViewMode]);
 
   const {
     executeDelete,

@@ -7,6 +7,7 @@ import { useUIStore } from '../store/useUIStore';
 import { Invokes, ImageFile, AlbumItem, Album, AlbumGroup } from '../components/ui/AppProperties';
 import { globalImageCache } from '../utils/ImageLRUCache';
 import { useSettingsStore } from '../store/useSettingsStore';
+import { createFolderTreePlaceholders } from '../utils/folderTreePlaceholders';
 import { computeSortedLibrary } from './useSortedLibrary';
 import { expandGroupedPaths } from '../utils/imageGrouping';
 
@@ -33,10 +34,18 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
       return { imageRatings: newRatings };
     });
 
-    invoke(Invokes.SetRatingForPaths, { paths: pathsToRate, rating: finalRating }).catch((err) => {
-      console.error(err);
-      toast.error(`Failed to apply rating: ${err}`);
-    });
+    invoke(Invokes.SetRatingForPaths, { paths: pathsToRate, rating: finalRating })
+      .then(() => {
+        if (useLibraryStore.getState().librarySource.type === 'catalog') {
+          invoke(Invokes.SyncCatalogPaths, { paths: pathsToRate }).catch((err) =>
+            console.error('Failed to sync catalog ratings:', err),
+          );
+        }
+      })
+      .catch((err) => {
+        console.error(err);
+        toast.error(`Failed to apply rating: ${err}`);
+      });
   }, []);
 
   const handleSetColorLabel = useCallback(async (color: string | null, paths?: string[]) => {
@@ -61,6 +70,11 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
 
     try {
       await invoke(Invokes.SetColorLabelForPaths, { paths: pathsToUpdate, color: finalColor });
+      if (useLibraryStore.getState().librarySource.type === 'catalog') {
+        invoke(Invokes.SyncCatalogPaths, { paths: pathsToUpdate }).catch((err) =>
+          console.error('Failed to sync catalog color labels:', err),
+        );
+      }
       setLibrary((state) => ({
         imageList: state.imageList.map((image: ImageFile) => {
           if (pathsToUpdate.includes(image.path)) {
@@ -325,16 +339,7 @@ export function useLibraryActions(handleImageSelect?: (path: string, openInEdito
 
     handleSettingsChange({ ...appSettings, pinnedFolders: newPins });
 
-    try {
-      const trees = await invoke(Invokes.GetPinnedFolderTrees, {
-        paths: newPins,
-        expandedFolders: Array.from(expandedFolders),
-        showImageCounts: appSettings.enableFolderImageCounts ?? false,
-      });
-      setLibrary({ pinnedFolderTrees: trees });
-    } catch (err) {
-      toast.error(`Failed to refresh pinned folders: ${err}`);
-    }
+    setLibrary({ pinnedFolderTrees: createFolderTreePlaceholders(newPins) });
   }, []);
 
   const handleCreateAlbumItem = useCallback(async (name: string, type: 'album' | 'group') => {

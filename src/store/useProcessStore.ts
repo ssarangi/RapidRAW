@@ -9,6 +9,21 @@ export interface ExternalEditSession {
   jpegQuality: number;
 }
 
+export interface CatalogScanState {
+  isActive: boolean;
+  rootId: number | null;
+  rootPath: string;
+  current: number;
+  total: number;
+  currentPath: string | null;
+  camera: string | null;
+  lens: string | null;
+  year: number | null;
+  isPaused: boolean;
+  message: string;
+  error: string | null;
+}
+
 interface ProcessState {
   exportState: ExportState;
   importState: ImportState;
@@ -23,6 +38,7 @@ interface ProcessState {
   isPasted: boolean;
   initialFileToOpen: string | null;
   externalEditSession: ExternalEditSession | null;
+  catalogScan: CatalogScanState;
 
   setProcess: (state: Partial<ProcessState> | ((state: ProcessState) => Partial<ProcessState>)) => void;
   setExportState: (updater: Partial<ExportState> | ((state: ExportState) => Partial<ExportState>)) => void;
@@ -52,6 +68,20 @@ export const useProcessStore = create<ProcessState>((set, get) => ({
   isPasted: false,
   initialFileToOpen: null,
   externalEditSession: null,
+  catalogScan: {
+    isActive: false,
+    rootId: null,
+    rootPath: '',
+    current: 0,
+    total: 0,
+    currentPath: null,
+    camera: null,
+    lens: null,
+    year: null,
+    isPaused: false,
+    message: '',
+    error: null,
+  },
 
   setProcess: (updater) => {
     set((prev) => {

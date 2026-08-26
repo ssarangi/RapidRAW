@@ -228,7 +228,7 @@ export default function LibraryGrid(props: any) {
   const libraryContainerRef = useRef<HTMLDivElement>(null);
   const gridObserverRef = useRef<ResizeObserver | null>(null);
   const loadedThumbnailsRef = useRef(new Set<string>());
-  const requestQueueRef = useRef<Set<string>>(new Set());
+  const requestQueueRef = useRef<Map<string, { path: string; modified?: number }>>(new Map());
   const requestTimeoutRef = useRef<any>(null);
   const exifOverlay = useSettingsStore((s) => s.appSettings?.exifOverlay || ExifOverlay.Off);
   const showExifCols = exifOverlay !== ExifOverlay.Off;
@@ -312,13 +312,14 @@ export default function LibraryGrid(props: any) {
   useEffect(() => () => handleScroll.cancel(), [handleScroll]);
 
   const queueThumbnailRequest = useCallback(
-    (path: string) => {
+    (image: ImageFile) => {
       if (!onRequestThumbnails) return;
+      const path = image.path;
       if (useProcessStore.getState().thumbnails[path]) return;
-      requestQueueRef.current.add(path);
+      requestQueueRef.current.set(path, { path, modified: image.modified });
       if (!requestTimeoutRef.current) {
         requestTimeoutRef.current = setTimeout(() => {
-          const paths = Array.from(requestQueueRef.current);
+          const paths = Array.from(requestQueueRef.current.values());
           if (paths.length > 0) {
             onRequestThumbnails(paths);
             requestQueueRef.current.clear();

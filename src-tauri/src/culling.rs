@@ -23,6 +23,18 @@ pub struct CullingSettings {
     pub use_subject_detection: bool,
 }
 
+impl Default for CullingSettings {
+    fn default() -> Self {
+        Self {
+            similarity_threshold: 28,
+            blur_threshold: 100.0,
+            group_similar: true,
+            filter_blurry: true,
+            use_subject_detection: false,
+        }
+    }
+}
+
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageAnalysisResult {
@@ -58,9 +70,9 @@ struct CullingProgress {
     stage: String,
 }
 
-struct ImageAnalysisData {
-    hash: image_hasher::ImageHash,
-    result: ImageAnalysisResult,
+pub(crate) struct ImageAnalysisData {
+    pub(crate) hash: image_hasher::ImageHash,
+    pub(crate) result: ImageAnalysisResult,
 }
 
 const WEIGHT_SHARPNESS: f64 = 0.40;
@@ -180,11 +192,16 @@ fn calculate_exposure_metric(image: &GrayImage) -> f64 {
     (1.0f64 - penalty).max(0.0)
 }
 
-fn analyze_image(
+pub(crate) fn analyze_image(
     path: &str,
     hasher: &image_hasher::Hasher,
     settings: &crate::app_settings::AppSettings,
     ai_models: Option<&Arc<AiModels>>,
+    // Round-robins into ai_models.u2netp_pool so concurrent calls (this runs
+    // inside a rayon par_iter) don't all contend for a single shared model
+    // session. Caller just needs to pass a distinct-ish value per call, e.g.
+    // its item index - exact fairness doesn't matter, just avoiding one lock.
+    pool_slot: usize,
 ) -> Result<ImageAnalysisData, String> {
     const ANALYSIS_DIM: u32 = 720; // FIXME: How should we calculate good focus if it's downscaled?!?
 
@@ -220,7 +237,10 @@ fn analyze_image(
     // is, instead of assuming it's centered. Falls back to the center-crop
     // metric when detection is off, fails, or the mask is too small/empty.
     let subject_focus_metric = ai_models.and_then(|models| {
-        let mask = run_u2netp_model(&thumbnail, &models.u2netp).ok()?;
+        let session = models
+            .u2netp_pool
+            .get(pool_slot % models.u2netp_pool.len().max(1))?;
+        let mask = run_u2netp_model(&thumbnail, session).ok()?;
         calculate_masked_laplacian_variance(&gray_thumbnail, &mask)
     });
 
@@ -249,85 +269,14 @@ fn analyze_image(
     })
 }
 
-#[tauri::command]
-pub async fn cull_images(
-    paths: Vec<String>,
-    settings: CullingSettings,
-    app_handle: AppHandle,
-    state: tauri::State<'_, AppState>,
-) -> Result<CullingSuggestions, String> {
-    if paths.is_empty() {
-        return Ok(CullingSuggestions::default());
-    }
-
-    let app_settings = load_settings(app_handle.clone()).unwrap_or_default();
-
-    let total_count = paths.len();
-    let completed_count = Arc::new(AtomicUsize::new(0));
-    let _ = app_handle.emit("culling-start", total_count);
-
-    let ai_models = if settings.use_subject_detection {
-        let _ = app_handle.emit(
-            "culling-progress",
-            CullingProgress {
-                current: 0,
-                total: total_count,
-                stage: "Loading subject detection model...".to_string(),
-            },
-        );
-        Some(
-            get_or_init_ai_models(&app_handle, &state.ai_state, &state.ai_init_lock)
-                .await
-                .map_err(|e| e.to_string())?,
-        )
-    } else {
-        None
-    };
-
-    let hasher = HasherConfig::new()
-        .hash_alg(HashAlg::DoubleGradient)
-        .hash_size(16, 16)
-        .to_hasher();
-
-    let analysis_results: Vec<Result<ImageAnalysisData, (String, String)>> = paths
-        .par_iter()
-        .map(|path| {
-            let completed = completed_count.fetch_add(1, Ordering::Relaxed) + 1;
-            let _ = app_handle.emit(
-                "culling-progress",
-                CullingProgress {
-                    current: completed,
-                    total: total_count,
-                    stage: "Analyzing images...".to_string(),
-                },
-            );
-
-            analyze_image(path, &hasher, &app_settings, ai_models.as_ref())
-                .map_err(|e| (path.to_string(), e))
-        })
-        .collect();
-
-    let mut successful_analyses = Vec::new();
-    let mut failed_paths = Vec::new();
-    for res in analysis_results {
-        match res {
-            Ok(data) => successful_analyses.push(data),
-            Err((path, error)) => {
-                eprintln!("Failed to analyze image {}: {}", path, error);
-                failed_paths.push(path);
-            }
-        }
-    }
-
-    let _ = app_handle.emit(
-        "culling-progress",
-        CullingProgress {
-            current: total_count,
-            total: total_count,
-            stage: "Grouping similar images...".to_string(),
-        },
-    );
-
+/// Turns raw per-image analysis into grouped duplicate suggestions + a
+/// blurry-images list. Shared by the manual `cull_images` command and the
+/// unattended auto-cull planner so both use the exact same grouping logic.
+pub(crate) fn build_culling_suggestions(
+    successful_analyses: Vec<ImageAnalysisData>,
+    failed_paths: Vec<String>,
+    settings: &CullingSettings,
+) -> CullingSuggestions {
     let mut suggestions = CullingSuggestions {
         failed_paths,
         ..Default::default()
@@ -402,6 +351,90 @@ pub async fn cull_images(
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
     }
+
+    suggestions
+}
+
+#[tauri::command]
+pub async fn cull_images(
+    paths: Vec<String>,
+    settings: CullingSettings,
+    app_handle: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<CullingSuggestions, String> {
+    if paths.is_empty() {
+        return Ok(CullingSuggestions::default());
+    }
+
+    let app_settings = load_settings(app_handle.clone()).unwrap_or_default();
+
+    let total_count = paths.len();
+    let completed_count = Arc::new(AtomicUsize::new(0));
+    let _ = app_handle.emit("culling-start", total_count);
+
+    let ai_models = if settings.use_subject_detection {
+        let _ = app_handle.emit(
+            "culling-progress",
+            CullingProgress {
+                current: 0,
+                total: total_count,
+                stage: "Loading subject detection model...".to_string(),
+            },
+        );
+        Some(
+            get_or_init_ai_models(&app_handle, &state.ai_state, &state.ai_init_lock)
+                .await
+                .map_err(|e| e.to_string())?,
+        )
+    } else {
+        None
+    };
+
+    let hasher = HasherConfig::new()
+        .hash_alg(HashAlg::DoubleGradient)
+        .hash_size(16, 16)
+        .to_hasher();
+
+    let analysis_results: Vec<Result<ImageAnalysisData, (String, String)>> = paths
+        .par_iter()
+        .map(|path| {
+            let completed = completed_count.fetch_add(1, Ordering::Relaxed) + 1;
+            let _ = app_handle.emit(
+                "culling-progress",
+                CullingProgress {
+                    current: completed,
+                    total: total_count,
+                    stage: "Analyzing images...".to_string(),
+                },
+            );
+
+            analyze_image(path, &hasher, &app_settings, ai_models.as_ref(), completed)
+                .map_err(|e| (path.to_string(), e))
+        })
+        .collect();
+
+    let mut successful_analyses = Vec::new();
+    let mut failed_paths = Vec::new();
+    for res in analysis_results {
+        match res {
+            Ok(data) => successful_analyses.push(data),
+            Err((path, error)) => {
+                eprintln!("Failed to analyze image {}: {}", path, error);
+                failed_paths.push(path);
+            }
+        }
+    }
+
+    let _ = app_handle.emit(
+        "culling-progress",
+        CullingProgress {
+            current: total_count,
+            total: total_count,
+            stage: "Grouping similar images...".to_string(),
+        },
+    );
+
+    let suggestions = build_culling_suggestions(successful_analyses, failed_paths, &settings);
 
     let _ = app_handle.emit("culling-complete", &suggestions);
     Ok(suggestions)
