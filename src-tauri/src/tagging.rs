@@ -42,16 +42,45 @@ pub async fn start_catalog_ai_tagging(
         None,
         None,
     )?;
+    if candidates.is_empty() {
+        crate::library_db::update_job(
+            &db_path,
+            &job_id,
+            "completed",
+            "All catalog images already have AI tags",
+            0,
+            0,
+            None,
+            None,
+        )?;
+        return Ok(job_id);
+    }
     let settings = crate::load_settings(app_handle.clone())?;
     let tag_count = settings.ai_tag_count.unwrap_or(10) as usize;
     let custom_tags = settings.custom_ai_tags.clone();
-    let clip_models = crate::ai_processing::get_or_init_clip_models(
+    let clip_models = match crate::ai_processing::get_or_init_clip_models(
         &app_handle,
         &state.ai_state,
         &state.ai_init_lock,
     )
     .await
-    .map_err(|error| error.to_string())?;
+    {
+        Ok(models) => models,
+        Err(error) => {
+            let message = error.to_string();
+            let _ = crate::library_db::update_job(
+                &db_path,
+                &job_id,
+                "failed",
+                "Unable to initialize the AI tagging model",
+                0,
+                candidates.len() as i64,
+                None,
+                Some(&message),
+            );
+            return Err(message);
+        }
+    };
     let worker_db_path = db_path.clone();
     let worker_job_id = job_id.clone();
     let worker_app_handle = app_handle.clone();
