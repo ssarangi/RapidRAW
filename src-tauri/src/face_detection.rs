@@ -594,4 +594,15 @@ mod tests {
         };
         assert!(intersection_over_union(&face, &overlapping) > 0.3);
     }
+
+    #[test]
+    fn normalized_embeddings_have_unit_similarity_with_themselves() {
+        let embedding = normalize_embedding(vec![3.0, 4.0]).unwrap();
+        assert!((cosine_similarity(&embedding, &embedding) - 1.0).abs() < 0.000_1);
+    }
+
+    #[test]
+    fn cosine_similarity_rejects_mismatched_dimensions() {
+        assert_eq!(cosine_similarity(&[1.0, 0.0], &[1.0]), -1.0);
+    }
 }
