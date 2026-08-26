@@ -184,7 +184,9 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-fn active_library_path(state: &tauri::State<'_, crate::AppState>) -> Result<PathBuf, String> {
+pub(crate) fn active_library_path(
+    state: &tauri::State<'_, crate::AppState>,
+) -> Result<PathBuf, String> {
     state
         .active_library_path
         .lock()
@@ -210,7 +212,7 @@ fn record_job_event(
     Ok(())
 }
 
-fn update_job(
+pub(crate) fn update_job(
     db_path: &Path,
     job_id: &str,
     state: &str,
@@ -247,6 +249,24 @@ fn create_catalog_scan_job(
     )
     .map_err(|error| error.to_string())?;
     record_job_event(conn, &id, "queued", "Queued catalog scan", 0, 0)?;
+    Ok(id)
+}
+
+pub(crate) fn create_background_job(
+    db_path: &Path,
+    kind: &str,
+    payload: serde_json::Value,
+) -> Result<String, String> {
+    let conn = open_connection(db_path)?;
+    let id = Uuid::new_v4().to_string();
+    let now = now_secs();
+    conn.execute(
+        "INSERT INTO background_jobs(id, kind, state, payload_json, message, created_at, updated_at)
+         VALUES(?1, ?2, 'queued', ?3, 'Queued background job', ?4, ?4)",
+        params![id, kind, payload.to_string(), now],
+    )
+    .map_err(|error| error.to_string())?;
+    record_job_event(&conn, &id, "queued", "Queued background job", 0, 0)?;
     Ok(id)
 }
 

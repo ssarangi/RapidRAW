@@ -411,6 +411,7 @@ pub async fn download_face_model_pack(
     pack_id: String,
     accept_restricted_license: bool,
     app_handle: AppHandle,
+    state: tauri::State<'_, crate::AppState>,
 ) -> Result<FaceModelPackStatus, String> {
     let pack = find_pack(&pack_id)?;
     if pack.availability != ModelAvailability::DirectDownload {
@@ -430,8 +431,43 @@ pub async fn download_face_model_pack(
     fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
     let total = pack.artifacts.len();
     let mut installed_paths = Vec::new();
+    let job = crate::library_db::active_library_path(&state)
+        .ok()
+        .and_then(|db_path| {
+            crate::library_db::create_background_job(
+                &db_path,
+                "model_download",
+                serde_json::json!({ "packId": pack.id, "displayName": pack.display_name }),
+            )
+            .map(|job_id| (db_path, job_id))
+            .ok()
+        });
+    if let Some((db_path, job_id)) = job.as_ref() {
+        let _ = crate::library_db::update_job(
+            db_path,
+            job_id,
+            "running",
+            "Starting model download",
+            0,
+            total as i64,
+            None,
+            None,
+        );
+    }
 
     for (index, artifact) in pack.artifacts.iter().enumerate() {
+        if let Some((db_path, job_id)) = job.as_ref() {
+            let _ = crate::library_db::update_job(
+                db_path,
+                job_id,
+                "running",
+                &format!("Downloading {}", artifact.file_name),
+                index as i64,
+                total as i64,
+                Some(&artifact.file_name),
+                None,
+            );
+        }
         let _ = app_handle.emit(
             "face-model-download-progress",
             FaceModelDownloadProgress {
@@ -487,6 +523,19 @@ pub async fn download_face_model_pack(
     };
     let manifest = serde_json::to_vec_pretty(&installed).map_err(|error| error.to_string())?;
     write_atomically(&installed_manifest_path(&destination), &manifest)?;
+
+    if let Some((db_path, job_id)) = job.as_ref() {
+        let _ = crate::library_db::update_job(
+            db_path,
+            job_id,
+            "completed",
+            "Model download complete",
+            total as i64,
+            total as i64,
+            None,
+            None,
+        );
+    }
 
     let _ = app_handle.emit(
         "face-model-download-complete",
