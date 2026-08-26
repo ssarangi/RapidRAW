@@ -357,6 +357,12 @@ pub fn start_face_recognition(
         .lock()
         .unwrap()
         .insert(job_id.clone(), cancellation.clone());
+    let pause = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    state
+        .background_job_pauses
+        .lock()
+        .unwrap()
+        .insert(job_id.clone(), pause.clone());
     let app = app_handle.clone();
     let worker_job_id = job_id.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -366,6 +372,7 @@ pub fn start_face_recognition(
             &model_path,
             &worker_job_id,
             &cancellation,
+            &pause,
         );
         if let Err(error) = result {
             let job_state = if error == "Face recognition cancelled" {
@@ -403,6 +410,7 @@ fn run_face_recognition(
     model_path: &Path,
     job_id: &str,
     cancellation: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pause: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), String> {
     let conn = rusqlite::Connection::open(db_path).map_err(|error| error.to_string())?;
     let mut sql = "SELECT f.id, r.absolute_path, i.relative_path, f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present' AND f.model_pack_id = 'opencv-yunet-sface' AND f.review_state <> 'rejected' AND f.embedding_id IS NULL".to_string();
@@ -474,6 +482,19 @@ fn run_face_recognition(
         .commit_from_file(model_path)
         .map_err(|error| error.to_string())?;
     for (index, (face_id, root, relative, x, y, width, height)) in faces.into_iter().enumerate() {
+        while pause.load(Ordering::SeqCst) {
+            let _ = update_job(
+                db_path,
+                job_id,
+                "paused",
+                "Face recognition paused",
+                index as i64,
+                total,
+                None,
+                None,
+            );
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
         if cancellation.load(Ordering::SeqCst) {
             return Err("Face recognition cancelled".to_string());
         }
