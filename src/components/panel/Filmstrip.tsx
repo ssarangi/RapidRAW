@@ -27,7 +27,7 @@ interface ItemData {
   selectedPath: string | undefined;
   multiSelectedPaths: string[];
   thumbnailAspectRatio: ThumbnailAspectRatio;
-  onRequestThumbnails?: (paths: string[]) => void;
+  onRequestThumbnails?: (paths: Array<{ path: string; modified?: number }>) => void;
   onContextMenu?: (event: any, path: string) => void;
   onImageSelect?: (path: string, event: any) => void;
   itemHeight: number;
@@ -457,12 +457,12 @@ const FilmstripList = ({
       if (!currentData.onRequestThumbnails) return;
 
       const cached = useProcessStore.getState().thumbnails;
-      const pathsToRequest: string[] = [];
+      const pathsToRequest: Array<{ path: string; modified?: number }> = [];
 
       for (let i = allCells.columnStartIndex; i <= allCells.columnStopIndex; i++) {
         const img = currentData.imageList[i];
         if (img && !cached[img.path]) {
-          pathsToRequest.push(img.path);
+          pathsToRequest.push({ path: img.path, modified: img.modified });
         }
       }
 
@@ -609,7 +609,7 @@ interface FilmStripProps {
   onContextMenu?(event: any, path: string): void;
   onEmptyAreaContextMenu?(event: any): void;
   onImageSelect?(path: string, event: any): void;
-  onRequestThumbnails?(paths: string[]): void;
+  onRequestThumbnails?(paths: Array<{ path: string; modified?: number }>): void;
   selectedImage?: SelectedImage;
   thumbnailAspectRatio: ThumbnailAspectRatio;
   totalImages?: number;

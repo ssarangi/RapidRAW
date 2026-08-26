@@ -12,6 +12,7 @@ mod ai_processing;
 mod android_integration;
 mod app_settings;
 mod app_state;
+mod auto_cull;
 mod cache_utils;
 mod camera_tethering;
 mod culling;
@@ -29,6 +30,7 @@ mod inpainting;
 mod launch_request;
 mod lens_blur;
 mod lens_correction;
+mod library_db;
 mod lut_processing;
 mod mask_generation;
 mod multi_exposure;
@@ -2303,9 +2305,11 @@ pub fn run() {
             decoded_image_cache: Mutex::new(DecodedImageCache::new(5)),
             thumbnail_manager: ThumbnailManager::new(),
             metadata_manager: MetadataManager::new(),
+            catalog_scan_control: CatalogScanControl::new(),
             disks_cache: Mutex::new(None),
             disks_cache_refreshing: AtomicBool::new(false),
             camera_session: Mutex::new(camera_tethering::CameraSession::new()),
+            active_library_path: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             apply_adjustments,
@@ -2370,6 +2374,7 @@ pub fn run() {
             file_management::get_folder_tree,
             file_management::get_folder_children,
             file_management::get_pinned_folder_trees,
+            file_management::get_system_bookmarks,
             file_management::update_thumbnail_queue,
             file_management::create_folder,
             file_management::delete_folder,
@@ -2404,12 +2409,32 @@ pub fn run() {
             file_management::save_albums,
             file_management::add_to_album,
             file_management::get_album_images,
+            library_db::create_library,
+            library_db::open_library,
+            library_db::close_library,
+            library_db::delete_library,
+            library_db::get_active_library,
+            library_db::add_library_root,
+            library_db::list_library_roots,
+            library_db::list_catalog_folder_tree,
+            library_db::scan_library_root,
+            library_db::start_catalog_scan,
+            library_db::pause_catalog_scan,
+            library_db::resume_catalog_scan,
+            library_db::cancel_catalog_scan,
+            library_db::list_catalog_images,
+            library_db::sync_catalog_paths,
+            library_db::search_catalog_images,
+            library_db::get_catalog_metrics,
             tagging::start_background_indexing,
             tagging::clear_ai_tags,
             tagging::clear_all_tags,
             tagging::add_tag_for_paths,
             tagging::remove_tag_for_paths,
             culling::cull_images,
+            auto_cull::plan_auto_cull,
+            auto_cull::apply_auto_cull_plan,
+            auto_cull::undo_auto_cull,
             lens_correction::get_lensfun_makers,
             lens_correction::get_lensfun_lenses_for_maker,
             lens_correction::autodetect_lens,

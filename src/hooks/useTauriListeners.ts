@@ -1,7 +1,8 @@
 import { useEffect, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { convertFileSrc } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import { Status } from '../components/ui/ExportImportProperties';
+import { CatalogRoot, Invokes } from '../components/ui/AppProperties';
 import { useProcessStore } from '../store/useProcessStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
@@ -29,6 +30,7 @@ export function useTauriListeners({
   const thumbnailBuffer = useRef<Record<string, string>>({});
   const ratingBuffer = useRef<Record<string, number>>({});
   const editStatusBuffer = useRef<Record<string, boolean>>({});
+  const catalogThumbnailRequests = useRef<Set<string>>(new Set());
   const flushHandle = useRef<number | null>(null);
 
   useEffect(() => {
@@ -150,6 +152,75 @@ export function useTauriListeners({
             refs.current.refreshImageList();
           }
         }
+      }),
+      listen('catalog-scan-progress', (event: any) => {
+        if (!isEffectActive) return;
+        const payload = event.payload || {};
+        const currentPath = payload.currentPath ?? null;
+        useProcessStore.getState().setProcess({
+          catalogScan: {
+            isActive: true,
+            rootId: payload.rootId ?? null,
+            rootPath: payload.rootPath ?? '',
+            current: payload.current ?? 0,
+            total: payload.total ?? 0,
+            currentPath,
+            camera: payload.camera ?? null,
+            lens: payload.lens ?? null,
+            year: payload.year ?? null,
+            isPaused: payload.message === 'Indexing paused',
+            message: payload.message ?? 'Scanning catalog',
+            error: null,
+          },
+        });
+        if (
+          currentPath &&
+          !catalogThumbnailRequests.current.has(currentPath) &&
+          !useProcessStore.getState().thumbnails[currentPath]
+        ) {
+          catalogThumbnailRequests.current.add(currentPath);
+          invoke('update_thumbnail_queue', { paths: [{ path: currentPath, modified: null }] }).catch((err) =>
+            console.error('Failed to queue catalog scan thumbnail:', err),
+          );
+        }
+      }),
+      listen('catalog-scan-complete', (event: any) => {
+        if (!isEffectActive) return;
+        const payload = event.payload || {};
+        catalogThumbnailRequests.current.clear();
+        useProcessStore.getState().setProcess((state) => ({
+          catalogScan: {
+            ...state.catalogScan,
+            isActive: false,
+            isPaused: false,
+            current: payload.scanned ?? state.catalogScan.current,
+            total: payload.scanned ?? state.catalogScan.total,
+            message: `Catalog scan complete: ${payload.insertedOrUpdated ?? 0} images indexed`,
+            error: null,
+          },
+        }));
+        const currentPath = useLibraryStore.getState().currentFolderPath;
+        if (currentPath?.startsWith('Library: ') || currentPath?.startsWith('LibraryFolder:')) {
+          refs.current.refreshImageList();
+        }
+        invoke<CatalogRoot[]>(Invokes.ListLibraryRoots)
+          .then((catalogRoots) => useLibraryStore.getState().setLibrary({ catalogRoots }))
+          .catch((err) => console.error('Failed to refresh catalog roots after scan:', err));
+      }),
+      listen('catalog-scan-error', (event: any) => {
+        if (!isEffectActive) return;
+        const payload = event.payload || {};
+        catalogThumbnailRequests.current.clear();
+        useProcessStore.getState().setProcess((state) => ({
+          catalogScan: {
+            ...state.catalogScan,
+            isActive: false,
+            isPaused: false,
+            rootId: payload.rootId ?? state.catalogScan.rootId,
+            message: 'Catalog scan failed',
+            error: payload.error ?? 'Unknown catalog scan error',
+          },
+        }));
       }),
       listen('batch-export-progress', (event: any) => {
         if (isEffectActive) useProcessStore.getState().setExportState({ progress: event.payload });
@@ -384,6 +455,23 @@ export function useTauriListeners({
           }));
         }
       }),
+      listen('auto-cull-plan-start', (event: any) => {
+        if (isEffectActive) {
+          useUIStore.getState().setUI((state) => ({
+            autoCullModalState: {
+              ...state.autoCullModalState,
+              progress: { current: 0, total: event.payload, stage: 'Initializing...' },
+            },
+          }));
+        }
+      }),
+      listen('auto-cull-plan-progress', (event: any) => {
+        if (isEffectActive) {
+          useUIStore
+            .getState()
+            .setUI((state) => ({ autoCullModalState: { ...state.autoCullModalState, progress: event.payload } }));
+        }
+      }),
     ];
 
     return () => {
@@ -394,6 +482,8 @@ export function useTauriListeners({
       }
       thumbnailBuffer.current = {};
       ratingBuffer.current = {};
+      editStatusBuffer.current = {};
+      catalogThumbnailRequests.current.clear();
       listeners.forEach((p) => p.then((unlisten) => unlisten()));
     };
   }, []);

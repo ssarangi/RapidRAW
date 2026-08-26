@@ -955,11 +955,11 @@ const Row = React.memo(
 
     useEffect(() => {
       if (!image || !queueThumbnailRequest) return;
-      queueThumbnailRequest(image.path);
+      queueThumbnailRequest(image);
 
       if (image.is_cloud_placeholder) {
         const interval = setInterval(() => {
-          queueThumbnailRequest(image.path);
+          queueThumbnailRequest(image);
         }, 5000);
         return () => clearInterval(interval);
       }
@@ -1011,7 +1011,7 @@ export default function CullingView(props: any) {
   const [sidebarWidth, setSidebarWidth] = useState(224);
   const isResizing = useRef(false);
 
-  const requestQueueRef = useRef<Set<string>>(new Set());
+  const requestQueueRef = useRef<Map<string, { path: string; modified?: number }>>(new Map());
   const requestTimeoutRef = useRef<any>(null);
 
   const [hoveredCullingPath, setHoveredCullingPath] = useState<string | null>(null);
@@ -1072,13 +1072,14 @@ export default function CullingView(props: any) {
   }, [activePath, listHandle, imageList, sidebarWidth]);
 
   const queueThumbnailRequest = useCallback(
-    (path: string) => {
+    (image: ImageFile) => {
       if (!onRequestThumbnails) return;
+      const path = image.path;
       if (useProcessStore.getState().thumbnails[path]) return;
-      requestQueueRef.current.add(path);
+      requestQueueRef.current.set(path, { path, modified: image.modified });
       if (!requestTimeoutRef.current) {
         requestTimeoutRef.current = setTimeout(() => {
-          const paths = Array.from(requestQueueRef.current);
+          const paths = Array.from(requestQueueRef.current.values());
           if (paths.length > 0) {
             onRequestThumbnails(paths);
             requestQueueRef.current.clear();

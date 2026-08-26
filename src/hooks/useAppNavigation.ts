@@ -8,10 +8,13 @@ import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
 import { useProcessStore } from '../store/useProcessStore';
 import { useSettingsStore } from '../store/useSettingsStore';
-import { Invokes, LibraryViewMode, ImageFile } from '../components/ui/AppProperties';
+import { CatalogRoot, Invokes, LibraryViewMode, ImageFile } from '../components/ui/AppProperties';
 import { INITIAL_ADJUSTMENTS, normalizeLoadedAdjustments } from '../utils/adjustments';
 import { globalImageCache } from '../utils/ImageLRUCache';
 import { debouncedSave, debouncedSetHistory } from './useEditorActions';
+import { createFolderTreePlaceholders } from '../utils/folderTreePlaceholders';
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export interface AppNavigationProps {
   clearThumbnailQueue: () => void;
@@ -99,7 +102,8 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
       }
 
       const cached = globalImageCache.get(path);
-      const isFrontendCached = Boolean(cached && cached.selectedImage?.isReady);
+      const cachedEntry = cached?.selectedImage?.isReady ? cached : null;
+      const isFrontendCached = Boolean(cachedEntry);
       const isCachedInBackend = isFrontendCached
         ? await invoke<boolean>('is_image_cached', { path }).catch(() => false)
         : false;
@@ -138,23 +142,23 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
         compactEditorPanelHeightOverride: null,
       });
 
-      if (isFrontendCached) {
+      if (cachedEntry) {
         setEditor({
           selectedImage: {
-            ...cached.selectedImage,
-            thumbnailUrl: useProcessStore.getState().thumbnails[path] || cached.selectedImage.thumbnailUrl,
+            ...cachedEntry.selectedImage,
+            thumbnailUrl: useProcessStore.getState().thumbnails[path] || cachedEntry.selectedImage.thumbnailUrl,
           },
-          originalSize: cached.originalSize,
-          previewSize: cached.previewSize,
-          histogram: cached.histogram,
-          waveform: cached.waveform,
-          finalPreviewUrl: cached.finalPreviewUrl,
-          uncroppedAdjustedPreviewUrl: cached.uncroppedPreviewUrl,
+          originalSize: cachedEntry.originalSize,
+          previewSize: cachedEntry.previewSize,
+          histogram: cachedEntry.histogram,
+          waveform: cachedEntry.waveform,
+          finalPreviewUrl: cachedEntry.finalPreviewUrl,
+          uncroppedAdjustedPreviewUrl: cachedEntry.uncroppedPreviewUrl,
         });
 
-        setEditor({ adjustments: cached.adjustments });
-        resetHistory(cached.adjustments);
-        prevAdjustmentsRef.current = { path, adjustments: cached.adjustments };
+        setEditor({ adjustments: cachedEntry.adjustments });
+        resetHistory(cachedEntry.adjustments);
+        prevAdjustmentsRef.current = { path, adjustments: cachedEntry.adjustments };
 
         setLibrary({ isViewLoading: false });
 
@@ -185,11 +189,11 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
             } else {
               freshAdjustments = { ...INITIAL_ADJUSTMENTS };
             }
-            if (!isSliderDragging && JSON.stringify(cached.adjustments) !== JSON.stringify(freshAdjustments)) {
+            if (!isSliderDragging && JSON.stringify(cachedEntry.adjustments) !== JSON.stringify(freshAdjustments)) {
               setEditor({ adjustments: freshAdjustments });
               resetHistory(freshAdjustments);
               prevAdjustmentsRef.current = { path, adjustments: freshAdjustments };
-              globalImageCache.set(path, { ...cached, adjustments: freshAdjustments });
+              globalImageCache.set(path, { ...cachedEntry, adjustments: freshAdjustments });
             }
           })
           .catch((err) => console.error('Failed background metadata sync on cache hit:', err));
@@ -317,11 +321,26 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
         const command =
           libraryViewMode === LibraryViewMode.Recursive ? Invokes.ListImagesRecursive : Invokes.ListImagesInDir;
 
-        let files: ImageFile[];
+        let files: ImageFile[] = [];
         if (preloadedImages) {
           files = preloadedImages;
         } else {
-          files = await invoke(command, { path });
+          let lastError: unknown = null;
+          for (let attempt = 0; attempt < 4; attempt += 1) {
+            try {
+              files = await invoke<ImageFile[]>(command, { path });
+              lastError = null;
+              break;
+            } catch (err) {
+              lastError = err;
+              const message = String(err).toLowerCase();
+              if (!message.includes('directory does not exist') || attempt === 3) {
+                throw err;
+              }
+              await delay(750 * (attempt + 1));
+            }
+          }
+          if (lastError) throw lastError;
         }
 
         const initialRatings: Record<string, number> = {};
@@ -504,10 +523,10 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
           ? [appSettings.lastRootPath]
           : [];
 
-      if (rootFolders.length === 0) return;
-
       const folderState = appSettings?.lastFolderState;
       const pathToSelect = folderState?.currentFolderPath || rootFolders[0];
+
+      if (!pathToSelect) return;
 
       setLibrary({ rootPaths: rootFolders });
 
@@ -518,37 +537,12 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
         setLibrary({ expandedFolders: new Set(rootFolders) });
       }
 
-      setLibrary({ isTreeLoading: true });
-      try {
-        let treesData;
-        if (preloadedDataRef.current?.rootPaths?.join() === rootFolders.join() && preloadedDataRef.current.trees) {
-          treesData = await preloadedDataRef.current.trees;
-          preloadedDataRef.current.trees = undefined;
-        } else {
-          const expandedArr = folderState?.expandedFolders
-            ? Array.from(new Set(folderState.expandedFolders))
-            : rootFolders;
-          treesData = await invoke(Invokes.GetPinnedFolderTrees, {
-            paths: rootFolders,
-            expandedFolders: expandedArr,
-            showImageCounts: appSettings?.enableFolderImageCounts || appSettings?.folderTreeSort?.key === 'imageCount',
-          });
-        }
-        setLibrary({ folderTrees: treesData });
-      } catch (err) {
-        console.error('Failed to restore folder trees:', err);
-      } finally {
-        setLibrary({ isTreeLoading: false });
-      }
-
-      let preloadedImages: ImageFile[] | undefined = undefined;
-      if (preloadedDataRef.current?.currentPath === pathToSelect && preloadedDataRef.current.images) {
-        try {
-          preloadedImages = await preloadedDataRef.current.images;
-          preloadedDataRef.current.images = undefined;
-        } catch (e) {
-          console.error('Failed to retrieve preloaded images', e);
-        }
+      if (rootFolders.length > 0) {
+        setLibrary({
+          folderTrees: createFolderTreePlaceholders(rootFolders),
+          isTreeLoading: false,
+          isRootFoldersLoading: false,
+        });
       }
 
       if (pathToSelect && pathToSelect.startsWith('Album: ')) {
@@ -573,17 +567,70 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
             if (album) {
               await handleSelectAlbum(album.id, album.name, album.images);
             } else {
-              await handleSelectSubfolder(rootFolders[0], false, undefined, false);
+              setLibrary({ currentFolderPath: null, activeAlbumId: null, imageList: [] });
+              useUIStore.getState().setUI({ activeView: 'library' });
             }
           } catch (e) {
             console.error('Failed to restore album session:', e);
-            await handleSelectSubfolder(rootFolders[0], false, undefined, false);
+            setLibrary({ currentFolderPath: null, activeAlbumId: null, imageList: [] });
+            useUIStore.getState().setUI({ activeView: 'library' });
           }
         } else {
-          await handleSelectSubfolder(rootFolders[0], false, undefined, false);
+          setLibrary({ currentFolderPath: null, activeAlbumId: null, imageList: [] });
+          useUIStore.getState().setUI({ activeView: 'library' });
+        }
+      } else if (
+        pathToSelect &&
+        (pathToSelect.startsWith('Library: ') || pathToSelect.startsWith('LibraryFolder:'))
+      ) {
+        const activeCatalogRootId = folderState?.activeCatalogRootId;
+        if (activeCatalogRootId) {
+          try {
+            const catalogRoots = await invoke<CatalogRoot[]>(Invokes.ListLibraryRoots);
+            const activeRoot = catalogRoots.find((root) => root.id === activeCatalogRootId);
+            const match = /^LibraryFolder:(\d+):(.*)$/.exec(pathToSelect);
+            const folderPath = match ? match[2] || '.' : '.';
+            const files = await invoke<ImageFile[]>(Invokes.ListCatalogImages, {
+              rootId: activeCatalogRootId,
+              recursive: appSettings?.libraryViewMode === LibraryViewMode.Recursive,
+              folderPath,
+            });
+            const imageRatings: Record<string, number> = {};
+            files.forEach((file) => {
+              imageRatings[file.path] = file.rating || 0;
+            });
+            setLibrary({
+              rootPaths: activeRoot ? [activeRoot.absolutePath] : rootFolders,
+              catalogRoots,
+              currentFolderPath: pathToSelect,
+              activeAlbumId: null,
+              activeCatalogRootId,
+              imageList: files,
+              imageRatings,
+              multiSelectedPaths: [],
+              libraryActivePath: null,
+            });
+            useUIStore.getState().setUI({ activeView: 'library' });
+          } catch (e) {
+            console.error('Failed to restore catalog session:', e);
+            setLibrary({ currentFolderPath: null, activeCatalogRootId: null, imageList: [] });
+            useUIStore.getState().setUI({ activeView: 'library' });
+          }
+        } else {
+          setLibrary({ currentFolderPath: null, activeCatalogRootId: null, imageList: [] });
+          useUIStore.getState().setUI({ activeView: 'library' });
         }
       } else {
-        await handleSelectSubfolder(pathToSelect, false, preloadedImages, false);
+        setLibrary({
+          currentFolderPath: null,
+          activeAlbumId: null,
+          activeCatalogRootId: null,
+          imageList: [],
+          imageRatings: {},
+          multiSelectedPaths: [],
+          libraryActivePath: null,
+        });
+        useUIStore.getState().setUI({ activeView: 'library' });
       }
     };
 
@@ -591,7 +638,11 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
       console.error('Failed to restore session:', err);
       toast.error('Failed to restore session. A folder may have been moved or deleted.');
       handleGoHome();
-      useLibraryStore.getState().setLibrary({ isTreeLoading: false });
+      useLibraryStore.getState().setLibrary({
+        isTreeLoading: false,
+        isRootFoldersLoading: false,
+        isPinnedFoldersLoading: false,
+      });
     });
   };
 

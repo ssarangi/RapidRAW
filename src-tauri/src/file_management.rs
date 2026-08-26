@@ -30,6 +30,7 @@ use crate::PendingMetadata;
 #[cfg(target_os = "android")]
 use crate::android_integration::*;
 use crate::app_settings::*;
+use crate::app_state::ThumbnailJob;
 use crate::exif_processing;
 use crate::formats::{is_raw_file, is_supported_image_file};
 use crate::gpu_processing;
@@ -63,16 +64,23 @@ fn emit_thumbnail_cache_setup_error(app_handle: &AppHandle, path: &str, reason: 
     );
 }
 
-fn compute_thumbnail_cache_hash(path_str: &str, adjustments_bytes: &[u8]) -> Option<String> {
+fn compute_thumbnail_cache_hash(
+    path_str: &str,
+    adjustments_bytes: &[u8],
+    source_modified: Option<u64>,
+) -> Option<String> {
     let (source_path, _) = parse_virtual_path(path_str);
 
-    let img_mod_time = fs::metadata(&source_path)
-        .ok()?
-        .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?
-        .as_secs();
+    let img_mod_time = match source_modified {
+        Some(modified) if modified > 0 => modified,
+        _ => fs::metadata(&source_path)
+            .ok()?
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_secs(),
+    };
 
     let mut hasher = blake3::Hasher::new();
     hasher.update(path_str.as_bytes());
@@ -281,15 +289,15 @@ impl fmt::Display for ReadFileError {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ImageFile {
     pub path: String,
-    modified: u64,
-    is_edited: bool,
-    rating: u8,
-    tags: Option<Vec<String>>,
-    exif: Option<HashMap<String, String>>,
-    is_virtual_copy: bool,
-    is_cloud_placeholder: bool,
-    is_raw: bool,
-    group_id: Option<String>,
+    pub modified: u64,
+    pub is_edited: bool,
+    pub rating: u8,
+    pub tags: Option<Vec<String>>,
+    pub exif: Option<HashMap<String, String>>,
+    pub is_virtual_copy: bool,
+    pub is_cloud_placeholder: bool,
+    pub is_raw: bool,
+    pub group_id: Option<String>,
 }
 
 fn make_group_key(source_path: &Path) -> String {
@@ -298,7 +306,10 @@ fn make_group_key(source_path: &Path) -> String {
     format!("{}/{}", parent.to_string_lossy(), stem.to_string_lossy())
 }
 
-fn assign_group_ids(files: &mut [ImageFile], settings: &crate::app_settings::AppSettings) {
+pub(crate) fn assign_group_ids(
+    files: &mut [ImageFile],
+    settings: &crate::app_settings::AppSettings,
+) {
     let require_matching_exif = settings.require_matching_exif.unwrap_or(false);
     let group_edited_files = settings.group_edited_files.unwrap_or(true);
 
@@ -373,6 +384,50 @@ fn assign_group_ids(files: &mut [ImageFile], settings: &crate::app_settings::App
             files[candidate.index].group_id = Some(key.clone());
         }
     }
+}
+
+/// One logical photo for auto-cull purposes: a representative path to run
+/// analysis/scoring against, plus every file that should move/get labeled
+/// together with it (e.g. a RAW file and its JPG sibling, sharing a
+/// `group_id` from `assign_group_ids`). `ImageFile`'s fields are private to
+/// this module, so this is the boundary auto_cull.rs reads through instead
+/// of needing field access itself.
+pub(crate) struct AutoCullCandidate {
+    pub(crate) representative_path: String,
+    pub(crate) backing_paths: Vec<String>,
+}
+
+pub(crate) fn resolve_auto_cull_candidates(images: &[ImageFile]) -> Vec<AutoCullCandidate> {
+    let mut grouped: HashMap<String, Vec<&ImageFile>> = HashMap::new();
+    let mut candidates = Vec::new();
+
+    for image in images {
+        if image.is_virtual_copy {
+            continue;
+        }
+        match &image.group_id {
+            Some(group_id) => grouped.entry(group_id.clone()).or_default().push(image),
+            None => candidates.push(AutoCullCandidate {
+                representative_path: image.path.clone(),
+                backing_paths: vec![image.path.clone()],
+            }),
+        }
+    }
+
+    for members in grouped.into_values() {
+        let representative = members
+            .iter()
+            .find(|f| f.is_raw)
+            .or_else(|| members.first())
+            .expect("group always has at least one member");
+
+        candidates.push(AutoCullCandidate {
+            representative_path: representative.path.clone(),
+            backing_paths: members.iter().map(|f| f.path.clone()).collect(),
+        });
+    }
+
+    candidates
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -529,6 +584,20 @@ fn match_disk_kind(disks: &Disks, canonical: &Path) -> Option<bool> {
 
 fn update_rotational_disk_flag(path: &str, app_handle: &AppHandle) {
     let state = app_handle.state::<crate::AppState>();
+
+    if path.starts_with("/mnt/")
+        || path.starts_with("/media/")
+        || path.starts_with("/run/user/")
+        || path.starts_with("//")
+        || path.starts_with("\\\\")
+    {
+        state
+            .thumbnail_manager
+            .rotational_disk
+            .store(false, Ordering::Relaxed);
+        return;
+    }
+
     let Ok(canonical) = Path::new(path).canonicalize() else {
         return;
     };
@@ -1224,13 +1293,33 @@ fn scan_dir_lazy(
     Ok((children_folders, current_dir_image_count))
 }
 
-fn get_folder_tree_sync(
+fn wait_for_directory(path: &Path, attempts: usize, delay_ms: u64) -> bool {
+    for attempt in 0..attempts.max(1) {
+        if path.is_dir() {
+            return true;
+        }
+
+        if attempt + 1 < attempts {
+            thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+    }
+
+    false
+}
+
+fn get_folder_tree_sync_with_retry(
     path: String,
     expanded_folders: Vec<String>,
     show_image_counts: bool,
+    directory_check_attempts: usize,
+    directory_check_delay_ms: u64,
 ) -> Result<FolderNode, String> {
     let root_path = Path::new(&path);
-    if !root_path.is_dir() {
+    if !wait_for_directory(
+        root_path,
+        directory_check_attempts,
+        directory_check_delay_ms,
+    ) {
         return Err(format!("Directory does not exist: {}", path));
     }
 
@@ -1254,7 +1343,7 @@ fn get_folder_tree_sync(
 
     let expanded_set: HashSet<&str> = expanded_folders.iter().map(|s| s.as_str()).collect();
 
-    let (children, own_count) = scan_dir_lazy(root_path, &expanded_set, show_image_counts, true)
+    let (children, own_count) = scan_dir_lazy(root_path, &expanded_set, show_image_counts, false)
         .map_err(|e| e.to_string())?;
 
     let children_sum: usize = children.iter().map(|c| c.image_count).sum();
@@ -1284,6 +1373,14 @@ fn get_folder_tree_sync(
     })
 }
 
+fn get_folder_tree_sync(
+    path: String,
+    expanded_folders: Vec<String>,
+    show_image_counts: bool,
+) -> Result<FolderNode, String> {
+    get_folder_tree_sync_with_retry(path, expanded_folders, show_image_counts, 3, 500)
+}
+
 #[tauri::command]
 pub async fn get_folder_children(
     path: String,
@@ -1291,7 +1388,7 @@ pub async fn get_folder_children(
 ) -> Result<Vec<FolderNode>, String> {
     match tauri::async_runtime::spawn_blocking(move || {
         let root_path = Path::new(&path);
-        if !root_path.is_dir() {
+        if !wait_for_directory(root_path, 3, 500) {
             return Err(format!("Directory does not exist: {}", path));
         }
         let empty_set = HashSet::new();
@@ -1335,7 +1432,13 @@ pub async fn get_pinned_folder_trees(
         let results: Vec<Result<FolderNode, String>> = paths
             .par_iter()
             .map(|path| {
-                get_folder_tree_sync(path.clone(), expanded_folders.clone(), show_image_counts)
+                get_folder_tree_sync_with_retry(
+                    path.clone(),
+                    expanded_folders.clone(),
+                    show_image_counts,
+                    8,
+                    750,
+                )
             })
             .collect();
 
@@ -1354,6 +1457,75 @@ pub async fn get_pinned_folder_trees(
         Ok(nodes) => Ok(nodes),
         Err(e) => Err(format!("Task failed: {}", e)),
     }
+}
+
+#[tauri::command]
+pub fn get_system_bookmarks() -> Result<Vec<String>, String> {
+    let mut bookmarks = Vec::new();
+    let mut seen = HashSet::new();
+
+    // 1. Check GTK 3.0 bookmarks (~/.config/gtk-3.0/bookmarks)
+    if let Ok(home) = std::env::var("HOME") {
+        let gtk_file = PathBuf::from(&home).join(".config/gtk-3.0/bookmarks");
+        if let Ok(content) = fs::read_to_string(&gtk_file) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                let url_part = trimmed.split_whitespace().next().unwrap_or("");
+                if let Some(path_str) = url_part.strip_prefix("file://") {
+                    let decoded_path = path_str.replace("%20", " ");
+                    if seen.insert(decoded_path.clone()) {
+                        bookmarks.push(decoded_path);
+                    }
+                }
+            }
+        }
+
+        // 2. Check COSMIC Files favorites (~/.config/cosmic/com.system76.CosmicFiles/v1/favorites)
+        let cosmic_file =
+            PathBuf::from(&home).join(".config/cosmic/com.system76.CosmicFiles/v1/favorites");
+        if let Ok(content) = fs::read_to_string(&cosmic_file) {
+            let path_re = regex::Regex::new(r#"Path\("([^"]+)"\)"#).ok();
+            if let Some(re) = path_re {
+                for cap in re.captures_iter(&content) {
+                    if let Some(m) = cap.get(1) {
+                        let raw_path = m.as_str();
+                        if seen.insert(raw_path.to_string()) {
+                            bookmarks.push(raw_path.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Write back any missing bookmarks into GTK 3.0 bookmarks file so the native Open dialog shows them
+    if let Ok(home) = std::env::var("HOME") {
+        let gtk_file = PathBuf::from(&home).join(".config/gtk-3.0/bookmarks");
+        let mut existing_lines = Vec::new();
+        if let Ok(content) = fs::read_to_string(&gtk_file) {
+            existing_lines = content.lines().map(|s| s.to_string()).collect();
+        }
+        let mut file_changed = false;
+        for bookmark in &bookmarks {
+            let file_url = format!("file://{}", bookmark);
+            if !existing_lines
+                .iter()
+                .any(|line| line.starts_with(&file_url))
+            {
+                existing_lines.push(file_url);
+                file_changed = true;
+            }
+        }
+        if file_changed {
+            let new_content = existing_lines.join("\n") + "\n";
+            let _ = fs::write(&gtk_file, new_content);
+        }
+    }
+
+    Ok(bookmarks)
 }
 
 /// Checks if the given path exists and is an iCloud placeholder file on macOS.
@@ -1776,6 +1948,7 @@ fn encode_thumbnail(image: &DynamicImage, target_width: u32) -> Result<Vec<u8>> 
 
 fn generate_single_thumbnail_and_cache(
     path_str: &str,
+    source_modified: Option<u64>,
     thumb_cache_dir: &Path,
     gpu_context: Option<&GpuContext>,
     preloaded_image: Option<&DynamicImage>,
@@ -1810,7 +1983,7 @@ fn generate_single_thumbnail_and_cache(
         (0, false, Vec::new())
     };
 
-    let cache_hash = compute_thumbnail_cache_hash(path_str, &adjustments_bytes)?;
+    let cache_hash = compute_thumbnail_cache_hash(path_str, &adjustments_bytes, source_modified)?;
 
     let cache_filename = format!("{}.jpg", cache_hash);
     let cache_path = thumb_cache_dir.join(cache_filename);
@@ -1835,11 +2008,6 @@ fn generate_single_thumbnail_and_cache(
     None
 }
 
-fn prefetch_source_file(path_str: &str) {
-    let (source_path, _) = parse_virtual_path(path_str);
-    let _ = fs::read(&source_path);
-}
-
 pub fn start_thumbnail_workers(app_handle: tauri::AppHandle) {
     let state = app_handle.state::<crate::AppState>();
     let manager = state.thumbnail_manager.clone();
@@ -1853,21 +2021,21 @@ pub fn start_thumbnail_workers(app_handle: tauri::AppHandle) {
 
         std::thread::spawn(move || {
             loop {
-                let path_to_process: String = {
+                let job_to_process: ThumbnailJob = {
                     let mut queue = manager_clone.queue.lock().unwrap();
                     while queue.is_empty() {
                         queue = manager_clone.cvar.wait(queue).unwrap();
                     }
-                    let path = queue.pop_back().unwrap();
+                    let job = queue.pop_back().unwrap();
 
                     let mut processing = manager_clone.processing_now.lock().unwrap();
-                    if processing.contains(&path) {
+                    if processing.contains(&job.path) {
                         let state = app_clone.state::<crate::AppState>();
                         increment_thumbnail_progress(&state, &app_clone);
                         continue;
                     }
-                    processing.insert(path.clone());
-                    path
+                    processing.insert(job.path.clone());
+                    job
                 };
 
                 let state = app_clone.state::<crate::AppState>();
@@ -1875,13 +2043,9 @@ pub fn start_thumbnail_workers(app_handle: tauri::AppHandle) {
                     crate::gpu_processing::get_or_init_gpu_context(&state, &app_clone).ok();
 
                 if let Ok(cache_dir) = get_thumb_cache_dir(&app_clone) {
-                    if manager_clone.rotational_disk.load(Ordering::Relaxed) {
-                        let _io_permit = manager_clone.io_gate.lock().unwrap();
-                        prefetch_source_file(&path_to_process);
-                    }
-
                     let result = generate_single_thumbnail_and_cache(
-                        &path_to_process,
+                        &job_to_process.path,
+                        job_to_process.modified,
                         &cache_dir,
                         gpu_context.as_ref(),
                         None,
@@ -1893,7 +2057,7 @@ pub fn start_thumbnail_workers(app_handle: tauri::AppHandle) {
                     if let Some((thumbnail_path, rating, is_edited)) = result {
                         emit_thumbnail_generated(
                             &app_clone,
-                            &path_to_process,
+                            &job_to_process.path,
                             &thumbnail_path,
                             rating,
                             is_edited,
@@ -1905,7 +2069,7 @@ pub fn start_thumbnail_workers(app_handle: tauri::AppHandle) {
                     .processing_now
                     .lock()
                     .unwrap()
-                    .remove(&path_to_process);
+                    .remove(&job_to_process.path);
             }
         });
     }
@@ -1913,7 +2077,7 @@ pub fn start_thumbnail_workers(app_handle: tauri::AppHandle) {
 
 #[tauri::command]
 pub fn update_thumbnail_queue(
-    paths: Vec<String>,
+    paths: Vec<ThumbnailJob>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
     let state = app_handle.state::<crate::AppState>();
@@ -1937,31 +2101,20 @@ pub fn update_thumbnail_queue(
 
     let mut unique_paths = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for path in paths {
-        if seen.insert(path.clone()) {
-            unique_paths.push(path);
+    for job in paths {
+        if seen.insert(job.path.clone()) {
+            unique_paths.push(job);
         }
     }
 
-    queue.retain(|p| !seen.contains(p));
+    queue.retain(|job| !seen.contains(&job.path));
 
     while queue.len() + unique_paths.len() > 500 {
         queue.pop_front();
     }
 
-    if state
-        .thumbnail_manager
-        .rotational_disk
-        .load(Ordering::Relaxed)
-    {
-        unique_paths.sort();
-        for path in unique_paths.into_iter().rev() {
-            queue.push_back(path);
-        }
-    } else {
-        for path in unique_paths {
-            queue.push_back(path);
-        }
+    for path in unique_paths {
+        queue.push_back(path);
     }
 
     let queue_len = queue.len();
@@ -2422,14 +2575,15 @@ pub fn move_files(
         ));
     }
 
-    let unique_source_images: HashSet<PathBuf> = source_paths
+    let unique_source_images: Vec<PathBuf> = source_paths
         .iter()
         .map(|p| parse_virtual_path(p).0)
+        .collect::<HashSet<PathBuf>>()
+        .into_iter()
         .collect();
 
     let mut operations_to_perform = Vec::new();
     let mut renames = HashMap::new();
-
     for source_image_path in &unique_source_images {
         let source_parent = source_image_path
             .parent()
@@ -2554,6 +2708,7 @@ pub fn save_metadata_and_update_thumbnail(
 
         let result = generate_single_thumbnail_and_cache(
             &path_clone,
+            None,
             &thumb_cache_dir,
             gpu_context.as_ref(),
             preloaded_image_option.as_deref(),
@@ -2655,6 +2810,7 @@ pub async fn apply_adjustments_to_paths(
         paths.par_iter().for_each(|path_str| {
             let result = generate_single_thumbnail_and_cache(
                 path_str,
+                None,
                 &thumb_cache_dir,
                 gpu_context.as_ref(),
                 None,
@@ -2724,6 +2880,7 @@ pub async fn reset_adjustments_for_paths(
         paths.par_iter().for_each(|path_str| {
             let result = generate_single_thumbnail_and_cache(
                 path_str,
+                None,
                 &thumb_cache_dir,
                 gpu_context.as_ref(),
                 None,
@@ -2834,6 +2991,7 @@ pub async fn apply_auto_adjustments_to_paths(
 
             let result = generate_single_thumbnail_and_cache(
                 path,
+                None,
                 &thumb_cache_dir,
                 gpu_context.as_ref(),
                 loaded_image.as_ref(),
@@ -3524,7 +3682,7 @@ pub fn get_cache_key_hash(path_str: &str) -> Option<String> {
         Vec::new()
     };
 
-    compute_thumbnail_cache_hash(path_str, &adjustments_bytes)
+    compute_thumbnail_cache_hash(path_str, &adjustments_bytes, None)
 }
 
 pub fn get_cached_or_generate_thumbnail_image(

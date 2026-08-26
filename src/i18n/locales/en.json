@@ -203,6 +203,7 @@
       "undo": "Undo"
     },
     "folders": {
+      "autoCull": "Auto-Cull Folder...",
       "changeIcon": "Change Icon",
       "confirm": "Confirm",
       "copyHere_one": "Copy image here",
@@ -1090,6 +1091,40 @@
     }
   },
   "modals": {
+    "autoCull": {
+      "analyze": "Analyze",
+      "analyzing": "Analyzing folder...",
+      "applying": "Applying...",
+      "conflictDesc": "{{count}} file(s) already exist in the destination folder, likely from a previous run. Choose how to handle all of them - this applies to every conflicting file, you won't be asked one by one.",
+      "conflictTitle": "Some Files Already Exist",
+      "deleteInsteadOfMove": "Delete rejected images instead of moving them",
+      "deleteWarning": "Rejected images will be sent to the system trash instead of a folder. This can't be undone from within the app.",
+      "failed": "Auto-Cull Failed",
+      "includeSubfolders": "Include subfolders",
+      "no": "no",
+      "nothingToReject": "No images would be rejected with these settings.",
+      "overwriteConflicts": "Overwrite",
+      "previewConflicts": "{{count}} image(s) already exist at the destination and will need Skip/Overwrite when you run this.",
+      "previewDeleteAction": "Rejected images will be sent to the system trash.",
+      "previewFailed": "{{count}} image(s) could not be analyzed and will be skipped.",
+      "previewFolder": "Folder: {{folder}}",
+      "previewMoveAction": "Rejected images will be moved to \"{{folder}}\".",
+      "previewSettings": "Include subfolders: {{subfolders}} - AI subject detection: {{subjectDetection}}",
+      "previewSummary": "{{total}} images analyzed - {{keep}} kept - {{reject}} rejected",
+      "previewTitle": "Review Before Running",
+      "reasonBlurry": "Blurry",
+      "reasonConflict": "Already exists",
+      "reasonDuplicate": "Duplicate",
+      "rejectedFolderName": "Rejected folder name",
+      "runButton": "Move {{count}} image(s)",
+      "skipConflicts": "Skip These Files",
+      "summaryDeleted": "{{count}} image(s) sent to the trash.",
+      "summaryMoved": "{{count}} image(s) moved to {{folder}}.",
+      "summarySkipped": "{{count}} image(s) skipped because they already existed at the destination.",
+      "title": "Auto-Cull Folder",
+      "undo": "Undo",
+      "yes": "yes"
+    },
     "collage": {
       "aspectRatio": "Aspect Ratio",
       "background": "Background",
@@ -1206,7 +1241,9 @@
       "similarityThresholdDesc": "Lower is stricter (exact duplicates). Higher is looser (near duplicates). A value of 24-32 is recommended.",
       "startCulling": "Start Culling",
       "starting": "Starting...",
-      "title": "Cull Images"
+      "title": "Cull Images",
+      "useSubjectDetection": "Use AI Subject Detection",
+      "useSubjectDetectionDesc": "Measures sharpness on the detected subject instead of the frame center - more accurate for off-center subjects, but slower and downloads an AI model on first use."
     },
     "denoise": {
       "batchProgressText": "Denoising {{current}} of {{total}}...",

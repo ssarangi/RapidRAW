@@ -17,6 +17,7 @@ import RenameFileModal from './RenameFileModal';
 import ConfirmModal from './ConfirmModal';
 import ImportSettingsModal from './ImportSettingsModal';
 import CullingModal from './CullingModal';
+import AutoCullModal from './AutoCullModal';
 import CollageModal from './CollageModal';
 import { AppSettings, Invokes, AlbumItem, Album, AlbumGroup } from '../ui/AppProperties';
 import { CopyPasteSettings } from '../../utils/adjustments';
@@ -357,6 +358,7 @@ export default function AppModals(props: AppModalsProps) {
         sourceImages={collageModalState.sourceImages}
         thumbnails={thumbnails}
       />
+      <AutoCullModal />
     </>
   );
 }

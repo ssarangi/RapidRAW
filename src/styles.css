@@ -400,6 +400,25 @@
   }
 }
 
+.catalog-search-select {
+  color-scheme: dark;
+  background-color: transparent;
+}
+
+.catalog-search-select:focus {
+  outline: none;
+}
+
+.catalog-search-select option,
+.catalog-search-select optgroup {
+  background-color: var(--app-bg-primary);
+  color: var(--app-text-primary);
+}
+
+.catalog-search-select option:disabled {
+  color: var(--app-text-secondary);
+}
+
 .cg-hue-gradient {
   background: linear-gradient(
     to right,

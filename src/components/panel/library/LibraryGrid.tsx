@@ -156,6 +156,44 @@ const groupImagesByFolder = (images: any[], baseFolderPath: string | null) => {
   }));
 };
 
+// Content-space rect (y already includes scrollTop) -> paths of every image
+// cell it overlaps. Walks gridData.rows directly rather than querying the DOM,
+// since react-window only mounts currently-visible rows - this has to work
+// for rows scrolled out of view too.
+function getPathsInDragRect(gridData: any, startX: number, startY: number, endX: number, endY: number): string[] {
+  const { rows, itemWidth, rowHeight, headerHeight, ITEM_GAP, OUTER_PADDING, isListView } = gridData;
+  const y1 = Math.min(startY, endY);
+  const y2 = Math.max(startY, endY);
+  const x1 = Math.min(startX, endX);
+  const x2 = Math.max(startX, endX);
+
+  const paths: string[] = [];
+  let top = 0;
+  for (const row of rows) {
+    const h =
+      row.type === 'footer' ? (isListView ? 24 : OUTER_PADDING) : row.type === 'header' ? headerHeight : rowHeight;
+    const bottom = top + h;
+
+    if (row.type === 'images' && bottom > y1 && top < y2) {
+      row.images.forEach((img: any, col: number) => {
+        if (isListView) {
+          paths.push(img.path);
+          return;
+        }
+        const cellLeft = OUTER_PADDING + col * (itemWidth + ITEM_GAP);
+        const cellRight = cellLeft + itemWidth;
+        if (cellRight > x1 && cellLeft < x2) {
+          paths.push(img.path);
+        }
+      });
+    }
+    top = bottom;
+  }
+  return paths;
+}
+
+const DRAG_SELECT_THRESHOLD = 4;
+
 export default function LibraryGrid(props: any) {
   const {
     imageList,
@@ -190,10 +228,26 @@ export default function LibraryGrid(props: any) {
   const libraryContainerRef = useRef<HTMLDivElement>(null);
   const gridObserverRef = useRef<ResizeObserver | null>(null);
   const loadedThumbnailsRef = useRef(new Set<string>());
-  const requestQueueRef = useRef<Set<string>>(new Set());
+  const requestQueueRef = useRef<Map<string, { path: string; modified?: number }>>(new Map());
   const requestTimeoutRef = useRef<any>(null);
   const exifOverlay = useSettingsStore((s) => s.appSettings?.exifOverlay || ExifOverlay.Off);
   const showExifCols = exifOverlay !== ExifOverlay.Off;
+
+  const [dragSelectRect, setDragSelectRect] = useState<null | {
+    x1: number;
+    y1: number;
+    x2: number;
+    y2: number;
+  }>(null);
+  const dragStartRef = useRef<null | {
+    clientX: number;
+    clientY: number;
+    contentX: number;
+    contentY: number;
+    additive: boolean;
+    baseSelection: string[];
+  }>(null);
+  const hasDragSelectedRef = useRef(false);
 
   useEffect(() => {
     const el = libraryContainerRef.current;
@@ -258,13 +312,14 @@ export default function LibraryGrid(props: any) {
   useEffect(() => () => handleScroll.cancel(), [handleScroll]);
 
   const queueThumbnailRequest = useCallback(
-    (path: string) => {
+    (image: ImageFile) => {
       if (!onRequestThumbnails) return;
+      const path = image.path;
       if (useProcessStore.getState().thumbnails[path]) return;
-      requestQueueRef.current.add(path);
+      requestQueueRef.current.set(path, { path, modified: image.modified });
       if (!requestTimeoutRef.current) {
         requestTimeoutRef.current = setTimeout(() => {
-          const paths = Array.from(requestQueueRef.current);
+          const paths = Array.from(requestQueueRef.current.values());
           if (paths.length > 0) {
             onRequestThumbnails(paths);
             requestQueueRef.current.clear();
@@ -370,6 +425,78 @@ export default function LibraryGrid(props: any) {
     currentFolderPath,
     thumbnailSizeOptions,
   ]);
+
+  const handleGridMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      if (e.button !== 0) return;
+      const target = e.target as HTMLElement;
+      if (target.closest('[data-bench-id="thumbnail"]')) return;
+      const listEl = listHandle?.element as HTMLElement | undefined;
+      if (!listEl) return;
+
+      const rect = listEl.getBoundingClientRect();
+      dragStartRef.current = {
+        clientX: e.clientX,
+        clientY: e.clientY,
+        contentX: e.clientX - rect.left,
+        contentY: e.clientY - rect.top + listEl.scrollTop,
+        additive: e.ctrlKey || e.metaKey,
+        baseSelection: multiSelectedPaths,
+      };
+      hasDragSelectedRef.current = false;
+    },
+    [listHandle, multiSelectedPaths],
+  );
+
+  const handleGridClick = useCallback(() => {
+    if (hasDragSelectedRef.current) {
+      hasDragSelectedRef.current = false;
+      return;
+    }
+    props.onClearSelection();
+  }, [props]);
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      const start = dragStartRef.current;
+      const listEl = listHandle?.element as HTMLElement | undefined;
+      if (!start || !listEl || !gridData) return;
+
+      const dx = e.clientX - start.clientX;
+      const dy = e.clientY - start.clientY;
+      if (!hasDragSelectedRef.current && Math.abs(dx) < DRAG_SELECT_THRESHOLD && Math.abs(dy) < DRAG_SELECT_THRESHOLD) {
+        return;
+      }
+      hasDragSelectedRef.current = true;
+
+      setDragSelectRect({
+        x1: Math.min(start.clientX, e.clientX),
+        y1: Math.min(start.clientY, e.clientY),
+        x2: Math.max(start.clientX, e.clientX),
+        y2: Math.max(start.clientY, e.clientY),
+      });
+
+      const rect = listEl.getBoundingClientRect();
+      const contentX = e.clientX - rect.left;
+      const contentY = e.clientY - rect.top + listEl.scrollTop;
+
+      const covered = getPathsInDragRect(gridData, start.contentX, start.contentY, contentX, contentY);
+      const nextSelection = start.additive ? Array.from(new Set([...start.baseSelection, ...covered])) : covered;
+      setLibrary({ multiSelectedPaths: nextSelection });
+    };
+
+    const handleMouseUp = () => {
+      dragStartRef.current = null;
+      setDragSelectRect(null);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [listHandle, gridData, setLibrary]);
 
   useEffect(() => {
     if (!listHandle?.element || !gridData) return;
@@ -550,9 +677,21 @@ export default function LibraryGrid(props: any) {
     <div
       ref={libraryContainerRef}
       className="flex-1 w-full h-full"
-      onClick={props.onClearSelection}
+      onClick={handleGridClick}
+      onMouseDown={handleGridMouseDown}
       onContextMenu={props.onEmptyAreaContextMenu}
     >
+      {dragSelectRect && (
+        <div
+          className="fixed border border-accent bg-accent/20 pointer-events-none z-50"
+          style={{
+            left: dragSelectRect.x1,
+            top: dragSelectRect.y1,
+            width: dragSelectRect.x2 - dragSelectRect.x1,
+            height: dragSelectRect.y2 - dragSelectRect.y1,
+          }}
+        />
+      )}
       <div className="flex flex-col w-full h-full">
         {gridData.isListView && (
           <ListHeader

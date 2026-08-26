@@ -65,6 +65,12 @@ pub struct AiModels {
     pub u2netp: Mutex<Session>,
     pub sky_seg: Mutex<Session>,
     pub depth_anything: Mutex<Session>,
+    /// Extra loaded copies of the u2netp model, used only by the culling
+    /// analysis path (plan_auto_cull / cull_images) so subject-aware scoring
+    /// can run inference on multiple images at once instead of every worker
+    /// thread contending for the single `u2netp` session above. Sized in
+    /// get_or_init_ai_models based on the available thread count.
+    pub u2netp_pool: Vec<Mutex<Session>>,
 }
 
 pub struct ClipModels {
@@ -384,9 +390,19 @@ pub async fn get_or_init_ai_models(
 
     let sam_encoder = Session::builder()?.commit_from_file(encoder_path)?;
     let sam_decoder = Session::builder()?.commit_from_file(decoder_path)?;
-    let u2netp = Session::builder()?.commit_from_file(u2netp_path)?;
+    let u2netp = Session::builder()?.commit_from_file(u2netp_path.clone())?;
     let sky_seg = Session::builder()?.commit_from_file(sky_seg_path)?;
     let depth_anything = Session::builder()?.commit_from_file(depth_path)?;
+
+    // A handful of extra sessions dedicated to the culling analysis path -
+    // see the doc comment on AiModels::u2netp_pool. Capped at 4 regardless
+    // of core count so this doesn't balloon memory on high-core machines.
+    let u2netp_pool_size = rayon::current_num_threads().clamp(1, 4);
+    let mut u2netp_pool: Vec<Mutex<Session>> = Vec::with_capacity(u2netp_pool_size);
+    for _ in 0..u2netp_pool_size {
+        let pooled_session = Session::builder()?.commit_from_file(u2netp_path.clone())?;
+        u2netp_pool.push(Mutex::new(pooled_session));
+    }
 
     crate::register_exit_handler();
 
@@ -396,6 +412,7 @@ pub async fn get_or_init_ai_models(
         u2netp: Mutex::new(u2netp),
         sky_seg: Mutex::new(sky_seg),
         depth_anything: Mutex::new(depth_anything),
+        u2netp_pool,
     });
 
     let mut ai_state_lock = ai_state_mutex.lock().unwrap();
