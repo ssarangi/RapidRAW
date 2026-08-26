@@ -17,6 +17,7 @@ fn main() {
     let result = match arguments.first().map(String::as_str) {
         Some("library") if arguments.get(1).map(String::as_str) == Some("inspect") => inspect(&arguments),
         Some("library") if arguments.get(1).map(String::as_str) == Some("roots") => list_roots(&arguments),
+        Some("library") if arguments.get(1).map(String::as_str) == Some("metrics") => metrics(&arguments),
         Some("jobs") if arguments.get(1).map(String::as_str) == Some("list") => list_jobs(&arguments),
         Some("faces") if arguments.get(1).map(String::as_str) == Some("status") => face_status(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("status") => tag_status(&arguments),
@@ -55,6 +56,19 @@ fn list_roots(arguments: &[String]) -> Result<serde_json::Value, String> {
         .map_err(|error| error.to_string())?;
     let roots = statement.query_map([], |row| Ok(json!({ "id": row.get::<_, i64>(0)?, "label": row.get::<_, Option<String>>(1)?, "path": row.get::<_, String>(2)?, "lastScanAt": row.get::<_, Option<i64>>(3)?, "images": row.get::<_, i64>(4)?, "missingImages": row.get::<_, i64>(5)? }))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
     Ok(json!(roots))
+}
+
+fn metrics(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let connection =
+        Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let count = |sql| {
+        connection
+            .query_row(sql, [], |row| row.get::<_, i64>(0))
+            .map_err(|error| error.to_string())
+    };
+    Ok(
+        json!({ "images": count("SELECT COUNT(*) FROM images WHERE status = 'present'")?, "missing": count("SELECT COUNT(*) FROM images WHERE status = 'missing'")?, "aiSuggested": count("SELECT COUNT(*) FROM image_ai_tags WHERE review_state = 'suggested'")?, "aiAccepted": count("SELECT COUNT(*) FROM image_ai_tags WHERE review_state = 'accepted'")? }),
+    )
 }
 
 fn list_jobs(arguments: &[String]) -> Result<serde_json::Value, String> {
