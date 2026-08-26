@@ -333,6 +333,16 @@ pub fn start_face_detection(
                 Some(&error),
             );
         }
+        app.state::<crate::AppState>()
+            .background_job_cancellations
+            .lock()
+            .unwrap()
+            .remove(&worker_job_id);
+        app.state::<crate::AppState>()
+            .background_job_pauses
+            .lock()
+            .unwrap()
+            .remove(&worker_job_id);
         let _ = app.emit(
             "face-detection-complete",
             serde_json::json!({ "jobId": event_job_id }),
