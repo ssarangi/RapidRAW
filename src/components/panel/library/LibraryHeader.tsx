@@ -713,12 +713,14 @@ export function CatalogSearchDropdown() {
               </div>
 
               {metrics && (
-                <div className="mt-4 grid grid-cols-4 gap-3">
+                <div className="mt-4 grid grid-cols-3 gap-3">
                   {[
                     { label: 'Images', value: metrics.totalImages },
                     { label: 'Rated', value: metrics.ratedImages },
                     { label: 'Edited', value: metrics.editedImages },
                     { label: 'Missing', value: metrics.missingImages },
+                    { label: 'AI pending', value: metrics.aiTagsSuggested },
+                    { label: 'AI accepted', value: metrics.aiTagsAccepted },
                   ].map((item) => (
                     <div key={item.label} className="bg-bg-primary rounded-md border border-border-color/30 px-3 py-2">
                       <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>

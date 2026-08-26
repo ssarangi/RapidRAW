@@ -112,6 +112,8 @@ pub struct CatalogMetrics {
     pub edited_images: i64,
     pub rated_images: i64,
     pub missing_images: i64,
+    pub ai_tags_suggested: i64,
+    pub ai_tags_accepted: i64,
     pub years: Vec<CatalogFacetValue>,
     pub cameras: Vec<CatalogFacetValue>,
     pub lenses: Vec<CatalogFacetValue>,
@@ -2790,12 +2792,28 @@ pub fn get_catalog_metrics(
             |row| row.get(0),
         )
         .map_err(|e| e.to_string())?;
+    let ai_tags_suggested = conn
+        .query_row(
+            "SELECT COUNT(*) FROM image_ai_tags WHERE review_state = 'suggested'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let ai_tags_accepted = conn
+        .query_row(
+            "SELECT COUNT(*) FROM image_ai_tags WHERE review_state = 'accepted'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
 
     Ok(CatalogMetrics {
         total_images,
         edited_images,
         rated_images,
         missing_images,
+        ai_tags_suggested,
+        ai_tags_accepted,
         years: facet_query(
             &conn,
             "SELECT CAST(m.year AS TEXT), COUNT(*) FROM image_metadata m JOIN images i ON i.id = m.image_id WHERE i.status = 'present' AND m.year IS NOT NULL GROUP BY m.year ORDER BY m.year DESC",
