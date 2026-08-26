@@ -491,6 +491,7 @@ export function CatalogSearchDropdown() {
     lens: '',
     person: '',
     tags: '',
+    aiTags: '',
     minRating: '',
   });
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -546,6 +547,10 @@ export function CatalogSearchDropdown() {
         .split(',')
         .map((tag) => tag.trim())
         .filter(Boolean);
+      const aiTags = overrideForm.aiTags
+        .split(',')
+        .map((tag) => tag.trim())
+        .filter(Boolean);
       const query: CatalogSearchQuery = {
         rootId: activeRoot?.id ?? null,
         text: overrideForm.text.trim() || null,
@@ -554,6 +559,7 @@ export function CatalogSearchDropdown() {
         lens: overrideForm.lens.trim() || null,
         person: overrideForm.person.trim() || null,
         tags: tags.length > 0 ? tags : null,
+        aiTags: aiTags.length > 0 ? aiTags : null,
         tagMode: tags.length > 1 ? 'AND' : null,
         minRating: overrideForm.minRating.trim() ? Number(overrideForm.minRating) : null,
         limit: 20_000,
@@ -589,7 +595,7 @@ export function CatalogSearchDropdown() {
   };
 
   const clearCatalogSearch = async () => {
-    const emptyForm = { text: '', year: '', camera: '', lens: '', person: '', tags: '', minRating: '' };
+    const emptyForm = { text: '', year: '', camera: '', lens: '', person: '', tags: '', aiTags: '', minRating: '' };
     setForm(emptyForm);
     await runCatalogSearch(emptyForm);
   };
@@ -673,6 +679,7 @@ export function CatalogSearchDropdown() {
                   { key: 'camera' as const, label: 'Camera', Icon: Camera, options: metrics?.cameras || [] },
                   { key: 'person' as const, label: 'Person', Icon: User, options: metrics?.people || [] },
                   { key: 'tags' as const, label: 'Tags', Icon: Tags, options: metrics?.tags || [] },
+                  { key: 'aiTags' as const, label: 'AI Tags', Icon: Tags, options: metrics?.aiTags || [] },
                 ].map(({ key, label, Icon, options }) => (
                   <label key={key}>
                     <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mb-1">

@@ -382,6 +382,7 @@ export interface CatalogMetrics {
   lenses: CatalogFacetValue[];
   people: CatalogFacetValue[];
   tags: CatalogFacetValue[];
+  aiTags: CatalogFacetValue[];
   ratings: CatalogFacetValue[];
 }
 
@@ -453,6 +454,7 @@ export interface CatalogSearchQuery {
   rating?: number | null;
   minRating?: number | null;
   tags?: string[] | null;
+  aiTags?: string[] | null;
   tagMode?: 'AND' | 'OR' | null;
   year?: number | null;
   camera?: string | null;

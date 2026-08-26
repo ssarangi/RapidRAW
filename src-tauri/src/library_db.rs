@@ -86,6 +86,7 @@ pub struct CatalogSearchQuery {
     pub rating: Option<i64>,
     pub min_rating: Option<i64>,
     pub tags: Option<Vec<String>>,
+    pub ai_tags: Option<Vec<String>>,
     pub tag_mode: Option<String>,
     pub year: Option<i64>,
     pub camera: Option<String>,
@@ -116,6 +117,7 @@ pub struct CatalogMetrics {
     pub lenses: Vec<CatalogFacetValue>,
     pub people: Vec<CatalogFacetValue>,
     pub tags: Vec<CatalogFacetValue>,
+    pub ai_tags: Vec<CatalogFacetValue>,
     pub ratings: Vec<CatalogFacetValue>,
 }
 
@@ -691,6 +693,49 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, "failed");
+    }
+
+    #[test]
+    fn ai_tag_storage_keeps_rejected_suggestions_out_of_searchable_results() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrate(&connection).unwrap();
+        insert_test_image(&connection);
+        connection
+            .execute(
+                "INSERT INTO tags(id, name, kind) VALUES(1, 'bird', 'ai')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO image_ai_tags(image_id, tag_id, model_id, model_revision, confidence, review_state, source, created_at, updated_at) VALUES(1, 1, 'clip', 'test', 0.9, 'suggested', 'local', 0, 0)",
+                [],
+            )
+            .unwrap();
+
+        let searchable: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM image_ai_tags WHERE image_id = 1 AND review_state <> 'rejected'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(searchable, 1);
+
+        connection
+            .execute(
+                "UPDATE image_ai_tags SET review_state = 'rejected' WHERE image_id = 1",
+                [],
+            )
+            .unwrap();
+        let searchable: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM image_ai_tags WHERE image_id = 1 AND review_state <> 'rejected'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(searchable, 0);
     }
 }
 
@@ -2320,6 +2365,51 @@ pub fn search_catalog_images(
             }
         }
     }
+    if let Some(tags) = query.ai_tags {
+        let cleaned: Vec<String> = tags
+            .into_iter()
+            .map(|tag| tag.trim().to_string())
+            .filter(|tag| !tag.is_empty())
+            .collect();
+        if !cleaned.is_empty() {
+            let use_and = query
+                .tag_mode
+                .as_deref()
+                .map(|mode| mode.eq_ignore_ascii_case("AND"))
+                .unwrap_or(true);
+            if use_and {
+                for tag in cleaned {
+                    sql.push_str(
+                        " AND EXISTS (
+                            SELECT 1 FROM image_ai_tags iat
+                            JOIN tags t ON t.id = iat.tag_id
+                            WHERE iat.image_id = i.id
+                              AND iat.review_state <> 'rejected'
+                              AND LOWER(t.name) LIKE LOWER(?)
+                        )",
+                    );
+                    values.push(SqlValue::Text(format!("%{}%", tag)));
+                }
+            } else {
+                sql.push_str(
+                    " AND EXISTS (
+                        SELECT 1 FROM image_ai_tags iat
+                        JOIN tags t ON t.id = iat.tag_id
+                        WHERE iat.image_id = i.id
+                          AND iat.review_state <> 'rejected'
+                          AND (",
+                );
+                for (index, tag) in cleaned.into_iter().enumerate() {
+                    if index > 0 {
+                        sql.push_str(" OR ");
+                    }
+                    sql.push_str("LOWER(t.name) LIKE LOWER(?)");
+                    values.push(SqlValue::Text(format!("%{}%", tag)));
+                }
+                sql.push_str("))");
+            }
+        }
+    }
     if let Some(text) = query.text.filter(|s| !s.trim().is_empty()) {
         sql.push_str(
             " AND (
@@ -2618,6 +2708,19 @@ pub fn get_catalog_metrics(
         tags: facet_query(
             &conn,
             "SELECT t.name, COUNT(*) FROM image_tags it JOIN tags t ON t.id = it.tag_id JOIN image_versions v ON v.id = it.image_version_id JOIN images i ON i.id = v.image_id WHERE i.status = 'present' AND t.kind <> 'person' GROUP BY t.id ORDER BY COUNT(*) DESC, t.name COLLATE NOCASE LIMIT 75",
+        )?,
+        ai_tags: facet_query(
+            &conn,
+            "SELECT t.name, COUNT(DISTINCT iat.image_id)
+             FROM image_ai_tags iat
+             JOIN tags t ON t.id = iat.tag_id
+             JOIN images i ON i.id = iat.image_id
+             WHERE i.status = 'present'
+               AND t.kind = 'ai'
+               AND iat.review_state <> 'rejected'
+             GROUP BY t.id
+             ORDER BY COUNT(DISTINCT iat.image_id) DESC, t.name COLLATE NOCASE
+             LIMIT 75",
         )?,
         ratings: facet_query(
             &conn,
