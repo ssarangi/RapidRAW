@@ -160,6 +160,14 @@ pub struct CatalogFaceReviewItem {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct CatalogFaceCluster {
+    pub id: i64,
+    pub face_count: i64,
+    pub representative_image_path: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct BackgroundJob {
     pub id: String,
     pub kind: String,
@@ -2590,6 +2598,25 @@ pub fn list_unreviewed_catalog_faces(
                     review_state: row.get(9)?,
                 },
                 image_path: row.get(10)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn list_unreviewed_face_clusters(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<CatalogFaceCluster>, String> {
+    let conn = open_connection(&active_library_path(&state)?)?;
+    let mut statement = conn.prepare("SELECT c.id, COUNT(m.face_id), r.absolute_path || '/' || i.relative_path FROM face_clusters c JOIN face_cluster_members m ON m.cluster_id = c.id JOIN faces f ON f.id = c.representative_face_id JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE c.state = 'unreviewed' GROUP BY c.id ORDER BY COUNT(m.face_id) DESC, c.id").map_err(|error| error.to_string())?;
+    statement
+        .query_map([], |row| {
+            Ok(CatalogFaceCluster {
+                id: row.get(0)?,
+                face_count: row.get(1)?,
+                representative_image_path: row.get(2)?,
             })
         })
         .map_err(|error| error.to_string())?
