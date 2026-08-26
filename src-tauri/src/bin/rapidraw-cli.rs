@@ -18,7 +18,8 @@ fn main() {
         Some("library") if arguments.get(1).map(String::as_str) == Some("inspect") => inspect(&arguments),
         Some("jobs") if arguments.get(1).map(String::as_str) == Some("list") => list_jobs(&arguments),
         Some("faces") if arguments.get(1).map(String::as_str) == Some("status") => face_status(&arguments),
-        _ => Err("Usage: rapidraw-cli library inspect --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli faces status --database <catalog.db>".to_string()),
+        Some("tags") if arguments.get(1).map(String::as_str) == Some("status") => tag_status(&arguments),
+        _ => Err("Usage: rapidraw-cli library inspect --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli faces status --database <catalog.db> | rapidraw-cli tags status --database <catalog.db>".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -47,4 +48,10 @@ fn face_status(arguments: &[String]) -> Result<serde_json::Value, String> {
     let confirmed: i64 = connection.query_row("SELECT COUNT(*) FROM faces WHERE review_state = 'confirmed'", [], |row| row.get(0)).map_err(|error| error.to_string())?;
     let clusters: i64 = connection.query_row("SELECT COUNT(*) FROM face_clusters WHERE state = 'unreviewed'", [], |row| row.get(0)).map_err(|error| error.to_string())?;
     Ok(json!({ "detected": detected, "embedded": embedded, "confirmed": confirmed, "unknownClusters": clusters }))
+}
+
+fn tag_status(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let connection = Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let count = |state: &str| connection.query_row("SELECT COUNT(*) FROM image_ai_tags WHERE review_state = ?1", [state], |row| row.get::<_, i64>(0)).map_err(|error| error.to_string());
+    Ok(json!({ "suggested": count("suggested")?, "accepted": count("accepted")?, "rejected": count("rejected")? }))
 }
