@@ -2429,6 +2429,8 @@ pub fn run() {
             library_db::sync_catalog_paths,
             library_db::search_catalog_images,
             library_db::get_catalog_metrics,
+            library_db::list_catalog_people,
+            library_db::list_catalog_faces,
             tagging::start_background_indexing,
             tagging::clear_ai_tags,
             tagging::clear_all_tags,

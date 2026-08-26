@@ -18,7 +18,7 @@ use crate::file_management::{ImageFile, parse_virtual_path};
 use crate::file_management::{assign_group_ids, read_file_mapped};
 use crate::formats::{is_raw_file, is_supported_image_file};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -117,6 +117,36 @@ pub struct CatalogMetrics {
     pub people: Vec<CatalogFacetValue>,
     pub tags: Vec<CatalogFacetValue>,
     pub ratings: Vec<CatalogFacetValue>,
+}
+
+/// A human-maintained identity. Detection and clustering may propose links to
+/// a person, but the person record is deliberately independent from any
+/// specific model or embedding.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogPerson {
+    pub id: i64,
+    pub display_name: String,
+    pub state: String,
+    pub face_count: i64,
+}
+
+/// A normalized face observation from one source image. Bounding-box values
+/// are stored as fractions of the original image dimensions so they remain
+/// valid when previews are regenerated at different sizes.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogFace {
+    pub id: i64,
+    pub image_id: i64,
+    pub person_id: Option<i64>,
+    pub model_pack_id: String,
+    pub confidence: f64,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub review_state: String,
 }
 
 fn now_secs() -> i64 {
@@ -267,6 +297,60 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_image_tags_tag ON image_tags(tag_id, image_version_id);
+
+        CREATE TABLE IF NOT EXISTS people (
+          id INTEGER PRIMARY KEY,
+          display_name TEXT NOT NULL COLLATE NOCASE,
+          state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active', 'ignored', 'merged')),
+          merged_into_person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(display_name)
+        );
+
+        CREATE TABLE IF NOT EXISTS face_embeddings (
+          id INTEGER PRIMARY KEY,
+          model_pack_id TEXT NOT NULL,
+          dimensions INTEGER NOT NULL CHECK(dimensions > 0),
+          vector BLOB NOT NULL,
+          norm REAL,
+          created_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS faces (
+          id INTEGER PRIMARY KEY,
+          image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+          person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
+          embedding_id INTEGER REFERENCES face_embeddings(id) ON DELETE SET NULL,
+          model_pack_id TEXT NOT NULL,
+          detector_confidence REAL NOT NULL,
+          bbox_x REAL NOT NULL CHECK(bbox_x >= 0 AND bbox_x <= 1),
+          bbox_y REAL NOT NULL CHECK(bbox_y >= 0 AND bbox_y <= 1),
+          bbox_width REAL NOT NULL CHECK(bbox_width > 0 AND bbox_width <= 1),
+          bbox_height REAL NOT NULL CHECK(bbox_height > 0 AND bbox_height <= 1),
+          landmarks_json TEXT,
+          review_state TEXT NOT NULL DEFAULT 'unreviewed' CHECK(review_state IN ('unreviewed', 'confirmed', 'rejected')),
+          source TEXT NOT NULL DEFAULT 'local' CHECK(source IN ('local', 'imported')),
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_faces_image ON faces(image_id);
+        CREATE INDEX IF NOT EXISTS idx_faces_person ON faces(person_id, review_state);
+        CREATE INDEX IF NOT EXISTS idx_faces_review ON faces(review_state, model_pack_id);
+
+        CREATE TABLE IF NOT EXISTS face_scan_state (
+          image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+          model_pack_id TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN ('pending', 'processing', 'complete', 'failed', 'skipped')),
+          model_revision TEXT,
+          error_message TEXT,
+          processed_at INTEGER,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(image_id, model_pack_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_face_scan_state_status ON face_scan_state(status, model_pack_id);
         ",
     )
     .map_err(|e| e.to_string())?;
@@ -277,6 +361,73 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_creates_face_storage_and_records_current_version() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrate(&connection).unwrap();
+
+        for table in ["people", "face_embeddings", "faces", "face_scan_state"] {
+            let exists: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(exists, 1, "missing {table} table");
+        }
+
+        let version: i64 = connection
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn face_schema_enforces_normalized_bounding_boxes() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrate(&connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO libraries(id, name, created_at, updated_at) VALUES('library', 'Test', 0, 0)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'library', '/photos')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0)",
+                [],
+            )
+            .unwrap();
+
+        let error = connection
+            .execute(
+                "INSERT INTO faces(image_id, model_pack_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, created_at, updated_at) VALUES(1, 'test', 0.9, 1.1, 0.1, 0.2, 0.2, 0, 0)",
+                [],
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("CHECK constraint failed"));
+    }
 }
 
 fn library_info(conn: &Connection, db_path: &Path) -> Result<LibraryInfo, String> {
@@ -1694,6 +1845,72 @@ pub fn search_catalog_images(
     }
 
     query_catalog_images(&conn, &sql, values, app_handle)
+}
+
+#[tauri::command]
+pub fn list_catalog_people(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<CatalogPerson>, String> {
+    let db_path = active_library_path(&state)?;
+    let conn = open_connection(&db_path)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT p.id, p.display_name, p.state, COUNT(f.id)
+             FROM people p
+             LEFT JOIN faces f ON f.person_id = p.id AND f.review_state = 'confirmed'
+             WHERE p.state = 'active'
+             GROUP BY p.id
+             ORDER BY COUNT(f.id) DESC, p.display_name COLLATE NOCASE",
+        )
+        .map_err(|error| error.to_string())?;
+    statement
+        .query_map([], |row| {
+            Ok(CatalogPerson {
+                id: row.get(0)?,
+                display_name: row.get(1)?,
+                state: row.get(2)?,
+                face_count: row.get(3)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn list_catalog_faces(
+    image_id: i64,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<CatalogFace>, String> {
+    let db_path = active_library_path(&state)?;
+    let conn = open_connection(&db_path)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT id, image_id, person_id, model_pack_id, detector_confidence,
+                    bbox_x, bbox_y, bbox_width, bbox_height, review_state
+             FROM faces
+             WHERE image_id = ?1
+             ORDER BY detector_confidence DESC, id",
+        )
+        .map_err(|error| error.to_string())?;
+    statement
+        .query_map([image_id], |row| {
+            Ok(CatalogFace {
+                id: row.get(0)?,
+                image_id: row.get(1)?,
+                person_id: row.get(2)?,
+                model_pack_id: row.get(3)?,
+                confidence: row.get(4)?,
+                x: row.get(5)?,
+                y: row.get(6)?,
+                width: row.get(7)?,
+                height: row.get(8)?,
+                review_state: row.get(9)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
 }
 
 fn facet_query(conn: &Connection, sql: &str) -> Result<Vec<CatalogFacetValue>, String> {
