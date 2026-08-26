@@ -120,6 +120,7 @@ export enum Invokes {
   ListBackgroundJobEvents = 'list_background_job_events',
   CancelBackgroundJob = 'cancel_background_job',
   StartFaceDetection = 'start_face_detection',
+  StartCatalogAiTagging = 'start_catalog_ai_tagging',
   ListUnreviewedCatalogFaces = 'list_unreviewed_catalog_faces',
   GenerateAllCommunityPreviews = 'generate_all_community_previews',
   SaveCommunityPreset = 'save_community_preset',

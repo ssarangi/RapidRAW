@@ -20,6 +20,115 @@ use crate::hierarchy::TAG_HIERARCHY;
 use crate::image_processing::ImageMetadata;
 use crate::{AppState, candidates::TAG_CANDIDATES};
 
+#[tauri::command]
+pub async fn start_catalog_ai_tagging(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let db_path = crate::library_db::active_library_path(&state)?;
+    let job_id = crate::library_db::create_background_job(
+        &db_path,
+        "ai_tagging",
+        serde_json::json!({ "modelId": "clip", "modelRevision": "rapidraw-clip-v1" }),
+    )?;
+    let candidates = crate::library_db::list_ai_tag_candidates(&db_path)?;
+    crate::library_db::update_job(
+        &db_path,
+        &job_id,
+        "queued",
+        "Catalog AI tagging queued",
+        0,
+        candidates.len() as i64,
+        None,
+        None,
+    )?;
+    let settings = crate::load_settings(app_handle.clone())?;
+    let tag_count = settings.ai_tag_count.unwrap_or(10) as usize;
+    let custom_tags = settings.custom_ai_tags.clone();
+    let clip_models = crate::ai_processing::get_or_init_clip_models(
+        &app_handle,
+        &state.ai_state,
+        &state.ai_init_lock,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let worker_db_path = db_path.clone();
+    let worker_job_id = job_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let total = candidates.len() as i64;
+        for (index, (image_id, path, modified)) in candidates.into_iter().enumerate() {
+            let current = index as i64 + 1;
+            let _ = crate::library_db::update_job(
+                &worker_db_path,
+                &worker_job_id,
+                "running",
+                "Tagging image",
+                current,
+                total,
+                Some(&path),
+                None,
+            );
+            crate::library_db::mark_ai_tag_analysis_state(
+                &worker_db_path,
+                image_id,
+                modified,
+                "processing",
+                None,
+            )
+            .ok();
+            let result = image::open(&path)
+                .map_err(|error| error.to_string())
+                .and_then(|image| {
+                    generate_tags_with_clip(
+                        &image,
+                        &clip_models.model,
+                        &clip_models.tokenizer,
+                        custom_tags.clone(),
+                        tag_count,
+                    )
+                    .map_err(|error| error.to_string())
+                });
+            match result {
+                Ok(tags) => {
+                    let _ =
+                        crate::library_db::replace_clip_ai_tags(&worker_db_path, image_id, &tags);
+                    let _ = crate::library_db::mark_ai_tag_analysis_state(
+                        &worker_db_path,
+                        image_id,
+                        modified,
+                        "completed",
+                        None,
+                    );
+                }
+                Err(error) => {
+                    let _ = crate::library_db::mark_ai_tag_analysis_state(
+                        &worker_db_path,
+                        image_id,
+                        modified,
+                        "failed",
+                        Some(&error),
+                    );
+                }
+            }
+        }
+        let _ = crate::library_db::update_job(
+            &worker_db_path,
+            &worker_job_id,
+            "completed",
+            "Catalog AI tagging complete",
+            total,
+            total,
+            None,
+            None,
+        );
+    });
+    let _ = app_handle.emit(
+        "catalog-ai-tagging-started",
+        serde_json::json!({ "jobId": job_id }),
+    );
+    Ok(job_id)
+}
+
 pub const COLOR_TAG_PREFIX: &str = "color:";
 pub const USER_TAG_PREFIX: &str = "user:";
 

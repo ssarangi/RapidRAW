@@ -2441,6 +2441,7 @@ pub fn run() {
             library_db::list_background_job_events,
             library_db::cancel_background_job,
             tagging::start_background_indexing,
+            tagging::start_catalog_ai_tagging,
             tagging::clear_ai_tags,
             tagging::clear_all_tags,
             tagging::add_tag_for_paths,
