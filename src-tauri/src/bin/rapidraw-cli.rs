@@ -60,8 +60,21 @@ fn list_roots(arguments: &[String]) -> Result<serde_json::Value, String> {
 fn list_jobs(arguments: &[String]) -> Result<serde_json::Value, String> {
     let connection =
         Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
-    let mut statement = connection.prepare("SELECT id, kind, state, current, total, message FROM background_jobs ORDER BY created_at DESC LIMIT 100").map_err(|error| error.to_string())?;
-    let jobs = statement.query_map([], |row| Ok(json!({ "id": row.get::<_, String>(0)?, "kind": row.get::<_, String>(1)?, "state": row.get::<_, String>(2)?, "current": row.get::<_, i64>(3)?, "total": row.get::<_, i64>(4)?, "message": row.get::<_, String>(5)? }))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let state = arguments
+        .windows(2)
+        .find(|pair| pair[0] == "--state")
+        .map(|pair| pair[1].as_str());
+    let sql = if state.is_some() {
+        "SELECT id, kind, state, current, total, message FROM background_jobs WHERE state = ?1 ORDER BY created_at DESC LIMIT 100"
+    } else {
+        "SELECT id, kind, state, current, total, message FROM background_jobs ORDER BY created_at DESC LIMIT 100"
+    };
+    let mut statement = connection.prepare(sql).map_err(|error| error.to_string())?;
+    let jobs = if let Some(state) = state {
+        statement.query_map([state], |row| Ok(json!({ "id": row.get::<_, String>(0)?, "kind": row.get::<_, String>(1)?, "state": row.get::<_, String>(2)?, "current": row.get::<_, i64>(3)?, "total": row.get::<_, i64>(4)?, "message": row.get::<_, String>(5)? }))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
+    } else {
+        statement.query_map([], |row| Ok(json!({ "id": row.get::<_, String>(0)?, "kind": row.get::<_, String>(1)?, "state": row.get::<_, String>(2)?, "current": row.get::<_, i64>(3)?, "total": row.get::<_, i64>(4)?, "message": row.get::<_, String>(5)? }))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
+    };
     Ok(json!(jobs))
 }
 
