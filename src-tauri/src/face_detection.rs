@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 
@@ -112,6 +113,80 @@ fn normalize_embedding(mut values: Vec<f32>) -> Result<Vec<f32>, String> {
         *value /= norm;
     }
     Ok(values)
+}
+
+fn decode_embedding(bytes: &[u8]) -> Option<Vec<f32>> {
+    if bytes.len() % 4 != 0 {
+        return None;
+    }
+    Some(
+        bytes
+            .chunks_exact(4)
+            .map(|chunk| f32::from_le_bytes(chunk.try_into().expect("exact four-byte chunks")))
+            .collect(),
+    )
+}
+
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() {
+        return -1.0;
+    }
+    left.iter().zip(right).map(|(a, b)| a * b).sum()
+}
+
+fn suggest_people(conn: &rusqlite::Connection) -> Result<(), String> {
+    let mut centroids: HashMap<i64, (Vec<f32>, usize)> = HashMap::new();
+    let mut references = conn.prepare("SELECT f.person_id, e.vector FROM faces f JOIN face_embeddings e ON e.id = f.embedding_id WHERE f.review_state = 'confirmed' AND f.person_id IS NOT NULL AND e.model_pack_id = 'opencv-yunet-sface'").map_err(|error| error.to_string())?;
+    for row in references
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(|error| error.to_string())?
+    {
+        let (person_id, bytes) = row.map_err(|error| error.to_string())?;
+        let Some(vector) = decode_embedding(&bytes) else {
+            continue;
+        };
+        let entry = centroids
+            .entry(person_id)
+            .or_insert_with(|| (vec![0.0; vector.len()], 0));
+        if entry.0.len() != vector.len() {
+            continue;
+        }
+        for (target, value) in entry.0.iter_mut().zip(vector) {
+            *target += value;
+        }
+        entry.1 += 1;
+    }
+    for (vector, count) in centroids.values_mut() {
+        if *count > 0 {
+            for value in vector {
+                *value /= *count as f32;
+            }
+        }
+    }
+    let mut candidates = conn.prepare("SELECT f.id, e.vector FROM faces f JOIN face_embeddings e ON e.id = f.embedding_id WHERE f.review_state = 'unreviewed' AND e.model_pack_id = 'opencv-yunet-sface'").map_err(|error| error.to_string())?;
+    for row in candidates
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(|error| error.to_string())?
+    {
+        let (face_id, bytes) = row.map_err(|error| error.to_string())?;
+        let Some(vector) = decode_embedding(&bytes) else {
+            continue;
+        };
+        let best = centroids
+            .iter()
+            .map(|(person_id, (centroid, _))| (*person_id, cosine_similarity(&vector, centroid)))
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((person_id, similarity)) = best {
+            if similarity >= 0.55 {
+                conn.execute("UPDATE faces SET person_id = ?1, updated_at = strftime('%s','now') WHERE id = ?2", params![person_id, face_id]).map_err(|error| error.to_string())?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn extract_sface_embedding(
@@ -377,6 +452,7 @@ fn run_face_recognition(
         )
         .map_err(|error| error.to_string())?;
     }
+    suggest_people(&conn)?;
     update_job(
         db_path,
         job_id,
