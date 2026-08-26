@@ -54,6 +54,7 @@ pub async fn start_catalog_ai_tagging(
     .map_err(|error| error.to_string())?;
     let worker_db_path = db_path.clone();
     let worker_job_id = job_id.clone();
+    let worker_app_handle = app_handle.clone();
     let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
     state
         .background_job_cancellations
@@ -95,18 +96,22 @@ pub async fn start_catalog_ai_tagging(
                 None,
             )
             .ok();
-            let result = image::open(&path)
+            let result = file_management::get_cached_or_generate_thumbnail_image(
+                &path,
+                &worker_app_handle,
+                None,
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|image| {
+                generate_tags_with_clip(
+                    &image,
+                    &clip_models.model,
+                    &clip_models.tokenizer,
+                    custom_tags.clone(),
+                    tag_count,
+                )
                 .map_err(|error| error.to_string())
-                .and_then(|image| {
-                    generate_tags_with_clip(
-                        &image,
-                        &clip_models.model,
-                        &clip_models.tokenizer,
-                        custom_tags.clone(),
-                        tag_count,
-                    )
-                    .map_err(|error| error.to_string())
-                });
+            });
             match result {
                 Ok(tags) => {
                     let _ =
