@@ -189,6 +189,49 @@ fn suggest_people(conn: &rusqlite::Connection) -> Result<(), String> {
     Ok(())
 }
 
+fn cluster_unknown_faces(conn: &rusqlite::Connection) -> Result<usize, String> {
+    let mut statement = conn.prepare("SELECT f.id, e.vector FROM faces f JOIN face_embeddings e ON e.id = f.embedding_id WHERE f.review_state = 'unreviewed' AND e.model_pack_id = 'opencv-yunet-sface' ORDER BY f.id").map_err(|error| error.to_string())?;
+    let faces: Vec<(i64, Vec<f32>)> = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(|error| error.to_string())?
+        .filter_map(Result::ok)
+        .filter_map(|(id, bytes)| decode_embedding(&bytes).map(|vector| (id, vector)))
+        .collect();
+    conn.execute("DELETE FROM face_clusters WHERE model_pack_id = 'opencv-yunet-sface' AND state = 'unreviewed'", []).map_err(|error| error.to_string())?;
+    let mut assigned = vec![false; faces.len()];
+    let mut clusters = 0;
+    for index in 0..faces.len() {
+        if assigned[index] {
+            continue;
+        }
+        let (representative_id, representative) = &faces[index];
+        let members: Vec<(i64, f32)> = faces
+            .iter()
+            .enumerate()
+            .filter_map(|(candidate_index, (id, vector))| {
+                if !assigned[candidate_index] && cosine_similarity(representative, vector) >= 0.62 {
+                    assigned[candidate_index] = true;
+                    Some((*id, cosine_similarity(representative, vector)))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if members.len() < 2 {
+            continue;
+        }
+        conn.execute("INSERT INTO face_clusters(model_pack_id, representative_face_id, created_at, updated_at) VALUES('opencv-yunet-sface', ?1, strftime('%s','now'), strftime('%s','now'))", [representative_id]).map_err(|error| error.to_string())?;
+        let cluster_id = conn.last_insert_rowid();
+        for (face_id, similarity) in members {
+            conn.execute("INSERT INTO face_cluster_members(cluster_id, face_id, similarity) VALUES(?1, ?2, ?3)", params![cluster_id, face_id, similarity]).map_err(|error| error.to_string())?;
+        }
+        clusters += 1;
+    }
+    Ok(clusters)
+}
+
 fn extract_sface_embedding(
     image: &DynamicImage,
     x: f64,
@@ -413,6 +456,7 @@ fn run_face_recognition(
     )?;
     if faces.is_empty() {
         suggest_people(&conn)?;
+        cluster_unknown_faces(&conn)?;
         return update_job(
             db_path,
             job_id,
@@ -466,6 +510,7 @@ fn run_face_recognition(
         .map_err(|error| error.to_string())?;
     }
     suggest_people(&conn)?;
+    cluster_unknown_faces(&conn)?;
     update_job(
         db_path,
         job_id,
