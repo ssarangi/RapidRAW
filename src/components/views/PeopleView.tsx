@@ -1,21 +1,26 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { ScanFace, Users } from 'lucide-react';
+import { ScanFace, Users, X } from 'lucide-react';
 import Button from '../ui/Button';
 import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
 import { Invokes } from '../ui/AppProperties';
 
 interface FaceItem { face: { id: number; confidence: number; imageId: number }; imagePath: string; }
+interface Person { id: number; displayName: string; }
 
 export default function PeopleView() {
   const [faces, setFaces] = useState<FaceItem[]>([]);
   const [message, setMessage] = useState('');
   const [starting, setStarting] = useState(false);
+  const [people, setPeople] = useState<Person[]>([]);
+  const [name, setName] = useState('');
   const load = async () => {
-    try { setFaces(await invoke<FaceItem[]>(Invokes.ListUnreviewedCatalogFaces)); } catch (error) { setMessage(String(error)); }
+    try { const [nextFaces, nextPeople] = await Promise.all([invoke<FaceItem[]>(Invokes.ListUnreviewedCatalogFaces), invoke<Person[]>(Invokes.ListCatalogPeople)]); setFaces(nextFaces); setPeople(nextPeople); } catch (error) { setMessage(String(error)); }
   };
+  const createPerson = async () => { if (!name.trim()) return; try { await invoke(Invokes.CreateCatalogPerson, { displayName: name }); setName(''); await load(); } catch (error) { setMessage(String(error)); } };
+  const review = async (faceId: number, personId: number | null, reviewState: string) => { try { await invoke(Invokes.ReviewCatalogFace, { faceId, personId, reviewState }); await load(); } catch (error) { setMessage(String(error)); } };
   useEffect(() => { void load(); }, []);
   const scan = async () => {
     setStarting(true); setMessage('Starting face detection. Progress is available in Background Jobs.');
@@ -28,7 +33,8 @@ export default function PeopleView() {
       <Button onClick={() => void scan()} disabled={starting}><ScanFace size={16} />{starting ? 'Starting Scan' : 'Scan Faces'}</Button>
     </div>
     {message && <div className="mb-4 rounded-md border border-border-color bg-bg-primary p-3"><Text variant={TextVariants.small}>{message}</Text></div>}
+    <div className="mb-5 flex flex-wrap gap-2"><input value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void createPerson(); }} placeholder="Add person" className="bg-bg-primary border border-border-color rounded-md px-3 py-2 text-sm" /><Button onClick={() => void createPerson()} disabled={!name.trim()}>Add Person</Button></div>
     {faces.length === 0 ? <div className="min-h-64 flex flex-col items-center justify-center text-center"><Users size={32} className="text-text-secondary mb-3" /><Text variant={TextVariants.heading}>No unknown faces to review</Text><Text variant={TextVariants.small}>Run Scan Faces after installing the YuNet + SFace model pack.</Text></div> :
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">{faces.map((item) => <div key={item.face.id} className="rounded-md border border-border-color bg-bg-primary overflow-hidden"><img src={convertFileSrc(item.imagePath)} className="w-full aspect-square object-cover" alt="Detected face" /><div className="p-2"><Text variant={TextVariants.small}>Unknown face</Text><Text variant={TextVariants.small} color={TextColors.secondary}>{Math.round(item.face.confidence * 100)}% confidence</Text></div></div>)}</div>}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">{faces.map((item) => <div key={item.face.id} className="rounded-md border border-border-color bg-bg-primary overflow-hidden"><img src={convertFileSrc(item.imagePath)} className="w-full aspect-square object-cover" alt="Detected face" /><div className="p-2 space-y-2"><Text variant={TextVariants.small}>Unknown face</Text><Text variant={TextVariants.small} color={TextColors.secondary}>{Math.round(item.face.confidence * 100)}% confidence</Text><select className="w-full bg-surface border border-border-color rounded px-2 py-1 text-xs" defaultValue="" onChange={(event) => { if (event.target.value) void review(item.face.id, Number(event.target.value), 'confirmed'); }}><option value="">Name as...</option>{people.map((person) => <option key={person.id} value={person.id}>{person.displayName}</option>)}</select><button className="text-red-300 hover:text-red-200 text-xs inline-flex items-center gap-1" onClick={() => void review(item.face.id, null, 'rejected')}><X size={13} /> Not a face</button></div></div>)}</div>}
   </div>;
 }
