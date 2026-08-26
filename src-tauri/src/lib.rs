@@ -19,6 +19,7 @@ mod culling;
 mod denoising;
 mod exif_processing;
 mod export_processing;
+mod face_model_registry;
 mod file_management;
 mod focus_stacking;
 mod formats;
@@ -2341,6 +2342,7 @@ pub fn run() {
             app_settings::load_settings,
             app_settings::save_settings,
             app_settings::is_tethering_supported,
+            face_model_registry::list_face_model_packs,
             ai_commands::generate_ai_subject_mask,
             ai_commands::precompute_ai_subject_mask,
             ai_commands::generate_ai_foreground_mask,
