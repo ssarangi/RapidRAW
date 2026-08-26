@@ -869,12 +869,50 @@ The app should offer `Benchmark on this computer` and an advanced `Compare model
 
 ## Implementation Plan
 
+## Headless CLI
+
+RapidRAW should ship a companion binary, `rapidraw-cli`, for batch work, automation, server-side catalog maintenance, and reproducible model evaluation. It is intentionally ImageMagick-like: every operation can run without a window, returns a non-zero exit code on failure, and can emit structured JSON for scripts.
+
+The CLI must call the same Rust services as Tauri commands. It must not duplicate scanner, model, matching, or SQLite logic in a second implementation.
+
+```text
+rapidraw-cli library create --name "Archive" --database /data/archive.db
+rapidraw-cli library add-root --database /data/archive.db /photos/2026
+rapidraw-cli catalog scan --database /data/archive.db --root /photos/2026 --recursive --json-progress
+rapidraw-cli models list --json
+rapidraw-cli models install opencv-yunet-sface
+rapidraw-cli faces detect --database /data/archive.db --model opencv-yunet-sface --root /photos/2026
+rapidraw-cli faces cluster --database /data/archive.db --model opencv-yunet-sface
+rapidraw-cli faces recognize --database /data/archive.db --model opencv-yunet-sface --json-report report.json
+rapidraw-cli people list --database /data/archive.db --json
+rapidraw-cli cull analyze /photos/session --preset portraits --json-report cull-report.json
+```
+
+### CLI Contract
+
+- `--database` is required for catalog, People, and durable AI commands. Filesystem-only operations accept paths directly.
+- `--json` produces a single machine-readable result on stdout. `--json-progress` emits newline-delimited JSON progress events on stdout; diagnostics remain on stderr.
+- `--quiet` suppresses human progress output. `--dry-run` validates scope, model availability, and write access without changing a catalog.
+- `--wait`, `--pause`, `--resume`, `--cancel`, and `jobs` operate on the same durable job records shown in the desktop status bar.
+- Commands that may download models require `--accept-license <pack-id>` where acknowledgement is required. They never download models implicitly.
+- Recognition commands produce suggestions only by default. `--confirm` requires an explicit person identifier and must be auditable in the catalog.
+- Model, scan, benchmark, and culling reports include model revision, source paths, counts, elapsed time, skipped files, and recoverable errors.
+- The command exit status is stable: `0` complete, `1` operational failure, `2` invalid arguments, `3` cancelled, and `4` partial completion.
+
+### CLI Test Strategy
+
+- Unit-test argument parsing and exit-code mapping.
+- Run integration tests against a temporary SQLite catalog and fixture images.
+- Snapshot JSON output schemas so shell automation does not break silently.
+- Exercise cancellation, an unavailable root, a missing model, and a model-license rejection in CI.
+
 ### Phase 0: Catalog Integration
 
 - Land the SQLite catalog work on the active development branch.
 - Introduce stable logical-capture IDs for RAW/JPEG groups.
 - Move catalog writes behind a single writer queue.
 - Add durable job/session tables and schema migrations.
+- Extract catalog operations into services callable by both Tauri and `rapidraw-cli`.
 
 ### Phase 1: AI Registry and Job Manager
 
@@ -882,6 +920,7 @@ The app should offer `Benchmark on this computer` and an advanced `Compare model
 - Implement list, download, download-all, cancel, verify, remove, and benchmark commands.
 - Build persistent background jobs with pause/resume/cancel and throttled status events.
 - Keep existing AI models represented in the same registry over time.
+- Add the CLI shell with `models`, `library`, `catalog`, `jobs`, and JSON progress conventions before face processing.
 
 ### Phase 2: Vertical Face Slice
 
@@ -889,6 +928,7 @@ The app should offer `Benchmark on this computer` and an advanced `Compare model
 - Add face/person schema, face crop cache, matching, and model versioning.
 - Add Scan Faces wizard and background status details.
 - Build Unknown, Suggestions, All People, and Person Detail views.
+- Add equivalent `faces detect`, `faces cluster`, `faces recognize`, and `people` CLI commands.
 
 This first pair proves alignment, persistence, review, model migration, and UI before multiplying adapters.
 
@@ -931,6 +971,7 @@ This first pair proves alignment, persistence, review, model migration, and UI b
 
 - Opening the app or catalog never downloads or initializes face models.
 - Every listed model can be downloaded, verified, cancelled, removed, and benchmarked from the UI.
+- Every catalog, model, face, and culling operation has an equivalent documented `rapidraw-cli` command with stable JSON output.
 - A recognition model can be changed without repeating face detection when stored landmarks are compatible.
 - Model/version changes never silently compare incompatible embeddings.
 - Face indexing and culling run in the background with accurate status, current item, pause, resume, cancel, and error details.
