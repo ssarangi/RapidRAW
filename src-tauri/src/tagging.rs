@@ -130,6 +130,12 @@ pub async fn start_catalog_ai_tagging(
                     .lock()
                     .unwrap()
                     .remove(&worker_job_id);
+                worker_app_handle
+                    .state::<AppState>()
+                    .background_job_pauses
+                    .lock()
+                    .unwrap()
+                    .remove(&worker_job_id);
                 return;
             }
             let current = index as i64 + 1;
@@ -203,6 +209,12 @@ pub async fn start_catalog_ai_tagging(
         worker_app_handle
             .state::<AppState>()
             .background_job_cancellations
+            .lock()
+            .unwrap()
+            .remove(&worker_job_id);
+        worker_app_handle
+            .state::<AppState>()
+            .background_job_pauses
             .lock()
             .unwrap()
             .remove(&worker_job_id);

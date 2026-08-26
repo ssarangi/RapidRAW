@@ -403,6 +403,11 @@ pub fn start_face_recognition(
             .lock()
             .unwrap()
             .remove(&worker_job_id);
+        app.state::<crate::AppState>()
+            .background_job_pauses
+            .lock()
+            .unwrap()
+            .remove(&worker_job_id);
         let _ = app.emit(
             "face-recognition-complete",
             serde_json::json!({ "jobId": worker_job_id }),
