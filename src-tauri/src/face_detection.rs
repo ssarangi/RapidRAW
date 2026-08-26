@@ -298,6 +298,12 @@ pub fn start_face_detection(
         .lock()
         .unwrap()
         .insert(job_id.clone(), cancellation.clone());
+    let pause = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    state
+        .background_job_pauses
+        .lock()
+        .unwrap()
+        .insert(job_id.clone(), pause.clone());
     let app = app_handle.clone();
     let event_job_id = job_id.clone();
     let worker_job_id = job_id.clone();
@@ -308,6 +314,7 @@ pub fn start_face_detection(
             &model_path,
             &worker_job_id,
             &cancellation,
+            &pause,
         );
         if let Err(error) = result {
             let job_state = if error == "Face detection cancelled" {
@@ -550,6 +557,7 @@ fn run_face_detection(
     model_path: &Path,
     job_id: &str,
     cancellation: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pause: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), String> {
     let conn = rusqlite::Connection::open(db_path).map_err(|error| error.to_string())?;
     let mut sql = "SELECT i.id, r.absolute_path, i.relative_path FROM images i JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present'".to_string();
@@ -599,6 +607,19 @@ fn run_face_detection(
         .commit_from_file(model_path)
         .map_err(|error| error.to_string())?;
     for (index, (image_id, root, relative)) in images.into_iter().enumerate() {
+        while pause.load(Ordering::SeqCst) {
+            let _ = update_job(
+                db_path,
+                job_id,
+                "paused",
+                "Face detection paused",
+                index as i64,
+                total,
+                None,
+                None,
+            );
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
         if cancellation.load(Ordering::SeqCst) {
             return Err("Face detection cancelled".to_string());
         }
