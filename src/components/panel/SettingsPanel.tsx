@@ -24,6 +24,7 @@ import {
   Loader2,
   RefreshCw,
   Search,
+  ScanFace,
 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -61,6 +62,7 @@ import { RotateCcw } from 'lucide-react';
 import { useUIStore } from '../../store/useUIStore';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import { useProcessStore } from '../../store/useProcessStore';
+import FaceModelsSettings from '../settings/FaceModelsSettings';
 
 interface ConfirmModalState {
   confirmText: string;
@@ -814,6 +816,7 @@ export default function SettingsPanel({
     () => [
       { id: 'general', label: t('settings.categories.general'), icon: SlidersHorizontal },
       { id: 'library', label: 'Library', icon: Database },
+      { id: 'faces', label: 'Face Models', icon: ScanFace },
       { id: 'processing', label: t('settings.categories.processing'), icon: Cpu },
       { id: 'shortcuts', label: t('settings.categories.shortcuts'), icon: Keyboard },
     ],
@@ -2283,6 +2286,18 @@ export default function SettingsPanel({
                       )}
                     </div>
                   </div>
+                </motion.div>
+              )}
+
+              {activeCategory === 'faces' && (
+                <motion.div
+                  key="faces"
+                  initial={{ opacity: 0, x: 10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -10 }}
+                  transition={{ duration: 0.2 }}
+                >
+                  <FaceModelsSettings onOpenExternal={shellOpen} />
                 </motion.div>
               )}
 

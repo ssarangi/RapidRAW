@@ -375,6 +375,44 @@ export interface CatalogMetrics {
   ratings: CatalogFacetValue[];
 }
 
+export type FaceModelAvailability = 'directDownload' | 'conversionRequired';
+export type FaceModelArtifactFormat = 'onnx' | 'zip' | 'checkpoint';
+
+export interface FaceModelArtifact {
+  fileName: string;
+  format: FaceModelArtifactFormat;
+  sourceUrl: string;
+  sha256?: string | null;
+}
+
+export interface InstalledFaceModelArtifact {
+  fileName: string;
+  sha256: string;
+}
+
+export interface FaceModelPack {
+  id: string;
+  displayName: string;
+  description: string;
+  detector: string;
+  recognizer: string;
+  detectorLandmarks: number;
+  embeddingDimensions?: number | null;
+  availability: FaceModelAvailability;
+  artifacts: FaceModelArtifact[];
+  licenseName: string;
+  licenseUrl: string;
+  licenseAcknowledgementRequired: boolean;
+  modelSourceUrl: string;
+}
+
+export interface FaceModelPackStatus {
+  pack: FaceModelPack;
+  installed: boolean;
+  installPath: string;
+  installedArtifacts: InstalledFaceModelArtifact[];
+}
+
 export interface CatalogSearchQuery {
   rootId?: number | null;
   text?: string | null;
