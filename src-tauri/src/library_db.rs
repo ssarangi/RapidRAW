@@ -168,6 +168,15 @@ pub struct CatalogFaceCluster {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct CatalogAiTagReviewItem {
+    pub id: i64,
+    pub image_path: String,
+    pub tag: String,
+    pub confidence: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct BackgroundJob {
     pub id: String,
     pub kind: String,
@@ -2647,6 +2656,43 @@ pub fn confirm_face_cluster(
         return Err("Face cluster has no reviewable faces".to_string());
     }
     conn.execute("UPDATE face_clusters SET state = 'accepted', updated_at = strftime('%s','now') WHERE id = ?1", [cluster_id]).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_suggested_ai_tags(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<CatalogAiTagReviewItem>, String> {
+    let conn = open_connection(&active_library_path(&state)?)?;
+    let mut statement = conn.prepare("SELECT iat.id, r.absolute_path || '/' || i.relative_path, t.name, iat.confidence FROM image_ai_tags iat JOIN images i ON i.id = iat.image_id JOIN collection_roots r ON r.id = i.root_id JOIN tags t ON t.id = iat.tag_id WHERE i.status = 'present' AND iat.review_state = 'suggested' ORDER BY iat.confidence DESC, iat.id LIMIT 500").map_err(|error| error.to_string())?;
+    statement
+        .query_map([], |row| {
+            Ok(CatalogAiTagReviewItem {
+                id: row.get(0)?,
+                image_path: row.get(1)?,
+                tag: row.get(2)?,
+                confidence: row.get(3)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn review_ai_tag(
+    id: i64,
+    review_state: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    if !matches!(review_state.as_str(), "accepted" | "rejected") {
+        return Err("Invalid AI tag review state".to_string());
+    }
+    let conn = open_connection(&active_library_path(&state)?)?;
+    let changed = conn.execute("UPDATE image_ai_tags SET review_state = ?1, updated_at = strftime('%s','now') WHERE id = ?2", params![review_state, id]).map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("AI tag suggestion was not found".to_string());
+    }
     Ok(())
 }
 
