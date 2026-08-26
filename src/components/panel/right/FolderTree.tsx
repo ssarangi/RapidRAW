@@ -21,17 +21,20 @@ import {
   Briefcase,
   ArrowUpDown,
   Check,
+  MoveRight,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
 import { useState, useMemo, useEffect, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
+import { useDroppable } from '@dnd-kit/core';
 import Text from '../../ui/Text';
 import { TEXT_COLOR_KEYS, TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { useShallow } from 'zustand/react/shallow';
 import { useLibraryStore } from '../../../store/useLibraryStore';
 import { useSettingsStore } from '../../../store/useSettingsStore';
+import { useUIStore } from '../../../store/useUIStore';
 import { AlbumItem, AlbumGroup, Album, Invokes, FolderTreeSort, SortDirection } from '../../ui/AppProperties';
 
 export interface FolderTree {
@@ -58,6 +61,7 @@ interface FolderTreeProps {
 }
 
 interface TreeNodeProps {
+  sectionId: string;
   expandedFolders: Set<string>;
   isExpanded: boolean;
   node: FolderTree;
@@ -69,6 +73,7 @@ interface TreeNodeProps {
   showImageCounts: boolean;
   isInstantTransition: boolean;
   folderIcons: Record<string, string>;
+  isLayoutDragging: boolean;
 }
 
 interface VisibleProps {
@@ -311,6 +316,7 @@ const getAlbumImageCount = (item: any): number => {
 };
 
 function AlbumTreeNode({
+  sectionId,
   item,
   expandedGroups,
   onToggle,
@@ -318,7 +324,9 @@ function AlbumTreeNode({
   onContextMenu,
   selectedAlbumId,
   showImageCounts,
+  isLayoutDragging,
 }: {
+  sectionId: string;
   item: AlbumItem;
   expandedGroups: Set<string>;
   onToggle: (id: string) => void;
@@ -326,24 +334,42 @@ function AlbumTreeNode({
   onContextMenu: (e: any, item: AlbumItem) => void;
   selectedAlbumId: string | null;
   showImageCounts: boolean;
+  isLayoutDragging: boolean;
 }) {
   const isGroup = item.type === 'group';
   const isExpanded = expandedGroups.has(item.id);
   const isSelected = item.id === selectedAlbumId;
   const imageCount = getAlbumImageCount(item);
 
+  const { setNodeRef, isOver, active } = useDroppable({
+    id: `album-${sectionId}-${item.id}`,
+    data: { type: 'album', id: item.id },
+    disabled: isGroup || isLayoutDragging,
+  });
+
+  const isImageDrag = active?.data?.current?.type === 'library-image';
+  const isDropTarget = isOver && isImageDrag && !isGroup;
+
   let ItemIcon = isGroup ? (isExpanded ? FolderOpen : Folder) : AlbumIcon;
   if (item.icon && ALBUM_ICONS[item.icon]) {
     ItemIcon = ALBUM_ICONS[item.icon];
   }
-  const iconKey = item.icon || (isGroup ? (isExpanded ? 'group-open' : 'group-closed') : 'album');
+  if (isDropTarget) {
+    ItemIcon = MoveRight;
+  }
+
+  const iconKey = isDropTarget
+    ? 'drop-target'
+    : item.icon || (isGroup ? (isExpanded ? 'group-open' : 'group-closed') : 'album');
 
   return (
     <Text as="div" color={TextColors.primary} weight={TextWeights.medium}>
       <div
+        ref={setNodeRef}
         className={clsx('flex items-center gap-2 p-1.5 rounded-md transition-colors cursor-pointer', {
-          'bg-surface': isSelected,
-          'hover:bg-card-active': !isSelected,
+          'bg-surface': isSelected && !isDropTarget,
+          'hover:bg-card-active': !isSelected && !isDropTarget,
+          'bg-accent/20': isDropTarget,
         })}
         onClick={() => (isGroup ? onToggle(item.id) : onSelectAlbum(item.id, item.name, (item as Album).images))}
         onContextMenu={(e) => onContextMenu(e, item)}
@@ -356,29 +382,30 @@ function AlbumTreeNode({
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.5 }}
               transition={{ duration: 0.15 }}
-              className="absolute"
+              className="absolute flex items-center justify-center"
             >
               <ItemIcon size={16} />
             </motion.div>
           </AnimatePresence>
         </div>
 
-        <span onDoubleClick={() => isGroup && onToggle(item.id)} className="truncate flex-1 select-none">
-          <span className="truncate">{item.name}</span>
-          {imageCount > 0 && (
-            <Text
-              as="span"
-              variant={TextVariants.small}
-              color={TextColors.secondary}
-              className={clsx(
-                'inline-block ml-1 transition-all ease-in-out duration-300',
-                showImageCounts ? 'opacity-100 translate-x-0' : 'opacity-0 translate-x-2',
-              )}
-            >
-              ({imageCount})
-            </Text>
-          )}
+        <span onDoubleClick={() => isGroup && onToggle(item.id)} className="min-w-0 flex-1 select-none">
+          <span className="block truncate">{item.name}</span>
         </span>
+
+        {imageCount > 0 && (
+          <Text
+            as="span"
+            variant={TextVariants.small}
+            color={TextColors.secondary}
+            className={clsx(
+              'ml-auto min-w-8 shrink-0 text-right tabular-nums transition-opacity ease-in-out duration-300',
+              showImageCounts ? 'opacity-100' : 'opacity-0',
+            )}
+          >
+            {imageCount}
+          </Text>
+        )}
 
         {isGroup && (
           <div
@@ -391,6 +418,7 @@ function AlbumTreeNode({
             {isExpanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
           </div>
         )}
+        {!isGroup && <div className="w-5 h-5 shrink-0" aria-hidden="true" />}
       </div>
 
       <AnimatePresence>
@@ -405,13 +433,14 @@ function AlbumTreeNode({
               <AnimatePresence>
                 {(item as AlbumGroup).children.map((child) => (
                   <motion.div
-                    key={child.id}
+                    key={`${sectionId}-${child.id}`}
                     initial={{ opacity: 0, height: 0, x: -10 }}
                     animate={{ opacity: 1, height: 'auto', x: 0 }}
                     exit={{ opacity: 0, height: 0, x: -10, overflow: 'hidden' }}
                     transition={{ duration: 0.2 }}
                   >
                     <AlbumTreeNode
+                      sectionId={sectionId}
                       item={child}
                       expandedGroups={expandedGroups}
                       onToggle={onToggle}
@@ -419,6 +448,7 @@ function AlbumTreeNode({
                       onContextMenu={onContextMenu}
                       selectedAlbumId={selectedAlbumId}
                       showImageCounts={showImageCounts}
+                      isLayoutDragging={isLayoutDragging}
                     />
                   </motion.div>
                 ))}
@@ -432,6 +462,7 @@ function AlbumTreeNode({
 }
 
 function TreeNode({
+  sectionId,
   expandedFolders,
   isExpanded,
   node,
@@ -443,10 +474,20 @@ function TreeNode({
   showImageCounts,
   isInstantTransition,
   folderIcons,
+  isLayoutDragging,
 }: TreeNodeProps) {
   const hasChildren = node.hasSubdirs || (node.children && node.children.length > 0);
   const isSelected = node.path === selectedPath;
   const isPinned = pinnedFolders.includes(node.path);
+
+  const { setNodeRef, isOver, active } = useDroppable({
+    id: `folder-${sectionId}-${node.path}`,
+    data: { type: 'folder', path: node.path },
+    disabled: isLayoutDragging,
+  });
+
+  const isImageDrag = active?.data?.current?.type === 'library-image';
+  const isDropTarget = isOver && isImageDrag;
 
   const handleFolderIconClick = (e: any) => {
     e.stopPropagation();
@@ -485,27 +526,34 @@ function TreeNode({
 
   const currentFolderIconKey = folderIcons[node.path];
   let ResolvedIcon = isExpanded ? FolderOpen : Folder;
+
   if (currentFolderIconKey && ALBUM_ICONS[currentFolderIconKey]) {
     ResolvedIcon = ALBUM_ICONS[currentFolderIconKey];
   }
-  const iconKey = currentFolderIconKey || (isExpanded ? 'folder-open' : 'folder-closed');
+
+  if (isDropTarget) {
+    ResolvedIcon = MoveRight;
+  }
+
+  const iconKey = isDropTarget ? 'drop-target' : currentFolderIconKey || (isExpanded ? 'folder-open' : 'folder-closed');
 
   return (
     <Text as="div" color={TextColors.primary} weight={TextWeights.medium}>
       <div
+        ref={setNodeRef}
         className={clsx('flex items-center gap-2 p-1.5 rounded-md transition-colors cursor-pointer', {
-          'bg-surface': isSelected,
-          'hover:bg-card-active': !isSelected,
+          'bg-surface': isSelected && !isDropTarget,
+          'hover:bg-card-active': !isSelected && !isDropTarget,
+          'bg-accent/20': isDropTarget,
         })}
         onClick={handleNameClick}
         onContextMenu={(e: any) => onContextMenu(e, node.path, isPinned)}
       >
         <div
           className={clsx(
-            'relative w-5 h-5 flex items-center justify-center p-0.5 rounded-sm transition-colors shrink-0',
+            'relative w-5 h-5 flex items-center justify-center p-0.5 rounded-sm text-text-secondary transition-colors shrink-0',
             {
-              [TEXT_COLOR_KEYS[TextColors.secondary]]: !isExpanded,
-              'hover:bg-surface-hover': !isSelected && hasChildren,
+              'hover:bg-surface-hover': !isSelected && hasChildren && !isDropTarget,
             },
           )}
           onClick={handleFolderIconClick}
@@ -517,29 +565,30 @@ function TreeNode({
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.5 }}
               transition={{ duration: 0.15 }}
-              className="absolute"
+              className="absolute flex items-center justify-center"
             >
               <ResolvedIcon size={16} />
             </motion.div>
           </AnimatePresence>
         </div>
 
-        <span onDoubleClick={handleNameDoubleClick} className="truncate select-none flex-1">
-          <span className="truncate">{node.name}</span>
-          {typeof node.imageCount === 'number' && node.imageCount > 0 && (
-            <Text
-              as="span"
-              variant={TextVariants.small}
-              color={TextColors.secondary}
-              className={clsx(
-                'inline-block ml-1 transition-all ease-in-out duration-300',
-                showImageCounts ? 'opacity-100 translate-x-0' : 'opacity-0 translate-x-2',
-              )}
-            >
-              ({node.imageCount})
-            </Text>
-          )}
+        <span onDoubleClick={handleNameDoubleClick} className="min-w-0 flex-1 select-none">
+          <span className="block truncate">{node.name}</span>
         </span>
+
+        {typeof node.imageCount === 'number' && node.imageCount > 0 && (
+          <Text
+            as="span"
+            variant={TextVariants.small}
+            color={TextColors.secondary}
+            className={clsx(
+              'ml-auto min-w-8 shrink-0 text-right tabular-nums transition-opacity ease-in-out duration-300',
+              showImageCounts ? 'opacity-100' : 'opacity-0',
+            )}
+          >
+            {node.imageCount}
+          </Text>
+        )}
 
         {hasChildren && (
           <Text
@@ -551,6 +600,7 @@ function TreeNode({
             {isExpanded ? <ChevronUp size={16} className="shrink-0" /> : <ChevronDown size={16} className="shrink-0" />}
           </Text>
         )}
+        {!hasChildren && <div className="w-5 h-5 shrink-0" aria-hidden="true" />}
       </div>
 
       <AnimatePresence initial={false}>
@@ -571,11 +621,12 @@ function TreeNode({
                     custom={{ index, total: node.children.length }}
                     exit="exit"
                     initial={isInstantTransition ? 'visible' : 'hidden'}
-                    key={childNode.path}
+                    key={`${sectionId}-${childNode.path}`}
                     layout={isInstantTransition ? false : 'position'}
                     variants={itemVariants}
                   >
                     <TreeNode
+                      sectionId={sectionId}
                       expandedFolders={expandedFolders}
                       isExpanded={expandedFolders.has(childNode.path)}
                       node={childNode}
@@ -587,6 +638,7 @@ function TreeNode({
                       showImageCounts={showImageCounts}
                       isInstantTransition={isInstantTransition}
                       folderIcons={folderIcons}
+                      isLayoutDragging={isLayoutDragging}
                     />
                   </motion.div>
                 ))}
@@ -617,6 +669,9 @@ export default function FolderTree({
       handleSettingsChange: state.handleSettingsChange,
     })),
   );
+
+  const isLayoutDragging = useUIStore((state) => !!state.activeLayoutDragItem);
+
   const {
     folderTrees,
     pinnedFolderTrees,
@@ -858,7 +913,7 @@ export default function FolderTree({
                         <AnimatePresence>
                           {filteredPinnedTrees.map((pinnedTree, index) => (
                             <motion.div
-                              key={pinnedTree.path}
+                              key={`pinned-${pinnedTree.path}`}
                               animate="visible"
                               custom={{ index, total: filteredPinnedTrees.length }}
                               exit="exit"
@@ -875,6 +930,7 @@ export default function FolderTree({
                               }}
                             >
                               <TreeNode
+                                sectionId="pinned"
                                 expandedFolders={effectiveExpandedFolders}
                                 isExpanded={effectiveExpandedFolders.has(pinnedTree.path)}
                                 node={pinnedTree}
@@ -886,6 +942,7 @@ export default function FolderTree({
                                 showImageCounts={showImageCounts && isHovering}
                                 isInstantTransition={isInstantTransition}
                                 folderIcons={folderIcons}
+                                isLayoutDragging={isLayoutDragging}
                               />
                             </motion.div>
                           ))}
@@ -923,7 +980,7 @@ export default function FolderTree({
                         <AnimatePresence>
                           {filteredAlbumTree.map((item: any) => (
                             <motion.div
-                              key={item.id}
+                              key={`albums-${item.id}`}
                               initial={{ opacity: 0, height: 0, x: -15 }}
                               animate={{ opacity: 1, height: 'auto', x: 0 }}
                               exit={{ opacity: 0, height: 0, x: -15, overflow: 'hidden' }}
@@ -931,6 +988,7 @@ export default function FolderTree({
                               layout="position"
                             >
                               <AlbumTreeNode
+                                sectionId="albums"
                                 item={item}
                                 expandedGroups={effectiveExpandedAlbumGroups}
                                 onToggle={toggleAlbumGroup}
@@ -938,6 +996,7 @@ export default function FolderTree({
                                 onContextMenu={onAlbumContextMenu}
                                 selectedAlbumId={activeAlbumId}
                                 showImageCounts={showImageCounts && isHovering}
+                                isLayoutDragging={isLayoutDragging}
                               />
                             </motion.div>
                           ))}
@@ -978,7 +1037,7 @@ export default function FolderTree({
                         <AnimatePresence>
                           {filteredTrees.map((tree: any, index: number) => (
                             <motion.div
-                              key={tree.path}
+                              key={`current-${tree.path}`}
                               animate="visible"
                               custom={{ index, total: filteredTrees.length }}
                               exit="exit"
@@ -995,6 +1054,7 @@ export default function FolderTree({
                               }}
                             >
                               <TreeNode
+                                sectionId="current"
                                 expandedFolders={effectiveExpandedFolders}
                                 isExpanded={effectiveExpandedFolders.has(tree.path)}
                                 node={tree}
@@ -1006,6 +1066,7 @@ export default function FolderTree({
                                 showImageCounts={showImageCounts && isHovering}
                                 isInstantTransition={isInstantTransition}
                                 folderIcons={folderIcons}
+                                isLayoutDragging={isLayoutDragging}
                               />
                             </motion.div>
                           ))}

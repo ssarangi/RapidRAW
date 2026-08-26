@@ -38,6 +38,43 @@
   <url type="homepage">https://github.com/CyberTimon/RapidRAW</url>
 
   <releases>
+    <release version="v1.6.2" date="2026-08-21">
+        <url type="details">https://github.com/CyberTimon/RapidRAW/releases/tag/v1.6.2</url>
+        <description translate="no">
+            <p>New Features</p>
+            <ul>
+                <li>Camera Tethering: Connect cameras over USB for real-time live view, remote capture, camera controls, and automatic ingestion.</li>
+                <li>Focus Stacking: Merge multiple focus-bracketed exposures into a single image with extended front-to-back sharpness.</li>
+                <li>Analog Film Emulations: Built-in, scientifically modeled film profiles powered by spektrafilm in a scene-referred V-Log pipeline.</li>
+                <li>Deconvolution Sharpening: Rewritten sharpening engine featuring multi-scale deconvolution with halo suppression and edge smoothing.</li>
+                <li>Drag &amp; Drop Organization: Select and drag multiple images directly into folders or albums.</li>
+            </ul>
+            <p>Core Improvements</p>
+            <ul>
+                <li>Full EXIF Preservation: Retain and embed complete capture metadata upon export.</li>
+                <li>Touch &amp; Tablet UI: Restored side panel layouts and controls for touch-screen devices.</li>
+                <li>Inpainting Auto-Crop: Added automatic canvas cropping for generative AI inpainting workflows.</li>
+                <li>Stability &amp; Fixes: General bug fixes and overall performance optimizations.</li>
+            </ul>
+        </description>
+    </release>
+    <release version="v1.6.1" date="2026-08-07">
+        <url type="details">https://github.com/CyberTimon/RapidRAW/releases/tag/v1.6.1</url>
+        <description translate="no">
+            <p>New Features</p>
+            <ul>
+                <li>Fully Customizable Workspace: Drag-and-drop panel switcher to reorder panels and build custom split-view layouts.</li>
+                <li>Unified Library &amp; Edit Views: Access editing tools and adjustment panels directly within the library grid without switching views.</li>
+            </ul>
+            <p>Core Improvements</p>
+            <ul>
+                <li>Export Stability &amp; Memory Optimization: Reduced VRAM consumption during exports to prevent out-of-memory crashes on lower-end systems.</li>
+                <li>Display Color Accuracy: Resolved subtle color shift issues on P3 wide-gamut displays (especially Apple Displays).</li>
+                <li>Image-Based LUTs &amp; Batch Presets: Added support for image-based LUT formats (.png, .jpg, .tiff) and batch-importing multiple presets simultaneously.</li>
+                <li>WGPU &amp; Workflow Upgrades: Enabled White Balance picker on the WGPU renderer, added Cmd/Ctrl+L shortcut to copy file paths, and added Catalan language support.</li>
+            </ul>
+        </description>
+    </release>
     <release version="v1.6.0" date="2026-07-26">
         <url type="details">https://github.com/CyberTimon/RapidRAW/releases/tag/v1.6.0</url>
         <description translate="no">

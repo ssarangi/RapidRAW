@@ -345,14 +345,14 @@ export default function MainLibrary(props: MainLibraryProps) {
             </AnimatePresence>
           </div>
 
-          <div className="w-full md:w-1/2 relative overflow-hidden isolate">
-            <div className="absolute inset-0 -z-10 pointer-events-none">
+          <div className="w-full md:w-1/2 relative overflow-hidden isolate rounded-lg md:rounded-l-none md:rounded-r-lg">
+            <div className="absolute inset-0 -z-10 pointer-events-none overflow-hidden rounded-lg md:rounded-l-none md:rounded-r-lg">
               <AnimatePresence>
                 {splashImage && (
                   <motion.img
                     key={splashImage + '-ambient'}
                     src={splashImage}
-                    className="absolute inset-0 w-full h-full object-cover blur-2xl opacity-50 pointer-events-none"
+                    className="absolute inset-0 w-full h-full object-cover blur-2xl opacity-50 pointer-events-none scale-110"
                     aria-hidden="true"
                   />
                 )}
@@ -508,7 +508,7 @@ export default function MainLibrary(props: MainLibraryProps) {
   }
 
   return (
-    <div className="flex-1 flex flex-col h-full min-w-0 bg-bg-secondary rounded-lg overflow-hidden">
+    <div className="relative z-20 flex-1 flex flex-col h-full min-w-0 bg-bg-secondary rounded-lg overflow-visible">
       <header
         className="p-3 shrink-0 flex justify-between items-center border-b border-surface gap-4"
         onMouseEnter={() => setIsProgressHovered(true)}

@@ -10,6 +10,7 @@ import { TextColors, TextVariants, TextWeights } from '../../types/typography';
 import { useProcessStore } from '../../store/useProcessStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { useLibraryStore } from '../../store/useLibraryStore';
+import { useDraggable } from '@dnd-kit/core';
 
 const HORIZONTAL_PADDING = 4;
 const ITEM_GAP = 8;
@@ -79,6 +80,12 @@ const FilmstripThumbnail = memo(
     const isInitialLoad = useRef(true);
 
     const { path, tags, is_edited: isEdited } = imageFile;
+
+    const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+      id: `filmstrip-image-${path}`,
+      data: { type: 'library-image', path },
+    });
+
     const rating = imageRatings?.[path] || 0;
     const colorTag = tags?.find((t: string) => t.startsWith('color:'))?.substring(6);
     const colorLabel = COLOR_LABELS.find((c: Color) => c.name === colorTag);
@@ -163,9 +170,13 @@ const FilmstripThumbnail = memo(
 
     return (
       <div
+        ref={setNodeRef}
+        {...listeners}
+        {...attributes}
         className={clsx(
           'h-full w-full rounded-md overflow-hidden cursor-pointer shrink-0 group relative transition-all duration-150 bg-surface',
           ringClass,
+          isDragging && 'opacity-50 ring-2 ring-accent z-50',
         )}
         onClick={(e: any) => {
           e.stopPropagation();
@@ -173,7 +184,7 @@ const FilmstripThumbnail = memo(
         }}
         onContextMenu={(e: any) => onContextMenu?.(e, path)}
         style={{
-          zIndex: isActive ? 2 : isSelected ? 1 : 'auto',
+          zIndex: isDragging ? 50 : isActive ? 2 : isSelected ? 1 : 'auto',
         }}
         data-tooltip={truncatedTitle}
       >
@@ -596,6 +607,7 @@ interface FilmStripProps {
   multiSelectedPaths: Array<string>;
   onClearSelection?(): void;
   onContextMenu?(event: any, path: string): void;
+  onEmptyAreaContextMenu?(event: any): void;
   onImageSelect?(path: string, event: any): void;
   onRequestThumbnails?(paths: string[]): void;
   selectedImage?: SelectedImage;
@@ -610,6 +622,7 @@ export default function Filmstrip({
   multiSelectedPaths,
   onClearSelection,
   onContextMenu,
+  onEmptyAreaContextMenu,
   onImageSelect,
   onRequestThumbnails,
   selectedImage,
@@ -643,9 +656,7 @@ export default function Filmstrip({
     if (imageList.some((img) => img.path === path)) return path;
     const selected = fullImageList.find((img) => img.path === path);
     if (!selected?.group_id) return path;
-    const primary = imageList.find(
-      (img) => img.group_id === selected.group_id && !img.is_virtual_copy,
-    );
+    const primary = imageList.find((img) => img.group_id === selected.group_id && !img.is_virtual_copy);
     return primary?.path ?? path;
   }, [selectedImage?.path, imageList, fullImageList, groupingMode]);
 
@@ -656,8 +667,15 @@ export default function Filmstrip({
     onImageSelect?.(path, event);
   };
 
+  const handleContextMenu = (e: React.MouseEvent) => {
+    const target = e.target as HTMLElement;
+    if (!target.closest('button')) {
+      onEmptyAreaContextMenu?.(e);
+    }
+  };
+
   return (
-    <div ref={containerRef} className="h-full w-full" onClick={onClearSelection}>
+    <div ref={containerRef} className="h-full w-full" onClick={onClearSelection} onContextMenu={handleContextMenu}>
       {size.height > 0 && size.width > 0 && (
         <FilmstripList
           height={size.height}

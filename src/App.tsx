@@ -4,7 +4,16 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { ClerkProvider } from '@clerk/react';
 import { ToastContainer, toast, Slide } from 'react-toastify';
-import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
+import {
+  DndContext,
+  DragOverlay,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  Modifier,
+  MeasuringStrategy,
+  pointerWithin,
+} from '@dnd-kit/core';
 import clsx from 'clsx';
 
 import TitleBar from './window/TitleBar';
@@ -22,13 +31,14 @@ import CropPanel from './components/panel/right/CropPanel';
 import MasksPanel from './components/panel/right/MasksPanel';
 import AIPanel from './components/panel/right/AIPanel';
 import PresetsPanel from './components/panel/right/PresetsPanel';
+import TetheringPanel from './components/panel/right/TetheringPanel';
 
 import EditorView from './components/views/EditorView';
 import LibraryView from './components/views/LibraryView';
 
 import { ContextMenuProvider } from './context/ContextMenuContext';
 import { useSettingsStore } from './store/useSettingsStore';
-import { useUIStore } from './store/useUIStore';
+import { DEFAULT_BOTTOM_PANEL_HEIGHT, DEFAULT_PANEL_WIDTH, useUIStore } from './store/useUIStore';
 import { useLibraryStore } from './store/useLibraryStore';
 import { useEditorStore } from './store/useEditorStore';
 import { useProcessStore } from './store/useProcessStore';
@@ -94,8 +104,47 @@ const insertChildrenIntoTree = (node: any, targetPath: string, newChildren: any[
   return node;
 };
 
+const imageDragModifier: Modifier = ({ active, activatorEvent, activeNodeRect, transform }) => {
+  if (active?.data?.current?.type === 'library-image' && activatorEvent && activeNodeRect) {
+    const event = activatorEvent as any;
+    const startX = event.clientX ?? event.touches?.[0]?.clientX ?? 0;
+    const startY = event.clientY ?? event.touches?.[0]?.clientY ?? 0;
+
+    if (startX === 0 && startY === 0) return transform;
+
+    const offsetX = startX - activeNodeRect.left - 48;
+    const offsetY = startY - activeNodeRect.top - 48;
+
+    return {
+      ...transform,
+      x: transform.x + offsetX,
+      y: transform.y + offsetY,
+    };
+  }
+  return transform;
+};
+
+function ImageDragOverlayNode({ activeItem }: { activeItem: { path: string; paths: string[] } }) {
+  const url = useProcessStore.getState().thumbnails[activeItem.path];
+  const count = activeItem.paths.length;
+
+  return (
+    <div className="w-24 h-24 rounded-lg shadow-2xl border-2 border-accent relative bg-surface overflow-hidden flex items-center justify-center">
+      {url && <img src={url} className="w-full h-full object-cover" />}
+      {count > 1 && (
+        <div className="absolute top-1 right-1 bg-accent text-button-text text-xs font-bold px-2 py-0.5 rounded-full shadow-md z-10">
+          {count}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const COMPACT_EDITOR_MAX_WIDTH = 900;
+  const ANDROID_PHONE_MAX_WIDTH = 600;
+
+  const [activeImageDragItem, setActiveImageDragItem] = useState<{ path: string; paths: string[] } | null>(null);
 
   const { appSettings, theme, osPlatform, handleSettingsChange } = useSettingsStore(
     useShallow((state) => ({
@@ -117,11 +166,11 @@ function App() {
     leftPanelWidth,
     rightPanelWidth,
     compactEditorPanelHeightOverride,
-    activeRightPanel,
+    activePanel,
     activeLayoutDragItem,
     isSettingsOpen,
     setUI,
-    setRightPanel,
+    setPanel,
     setLayoutDragItem,
     movePanel,
   } = useUIStore(
@@ -136,11 +185,11 @@ function App() {
       leftPanelWidth: state.leftPanelWidth,
       rightPanelWidth: state.rightPanelWidth,
       compactEditorPanelHeightOverride: state.compactEditorPanelHeightOverride,
-      activeRightPanel: state.activeRightPanel,
+      activePanel: state.activePanel,
       activeLayoutDragItem: state.activeLayoutDragItem,
       isSettingsOpen: state.isSettingsOpen,
       setUI: state.setUI,
-      setRightPanel: state.setRightPanel,
+      setPanel: state.setPanel,
       setLayoutDragItem: state.setLayoutDragItem,
       movePanel: state.movePanel,
     })),
@@ -228,8 +277,9 @@ function App() {
 
   const isAndroid = osPlatform === 'android';
   const isPortraitViewport = viewportSize.width > 0 && viewportSize.height > viewportSize.width;
-  const isCompactPortrait =
-    viewportSize.width > 0 && viewportSize.width <= COMPACT_EDITOR_MAX_WIDTH && isPortraitViewport;
+  const compactEditorMaxWidth = isAndroid ? ANDROID_PHONE_MAX_WIDTH : COMPACT_EDITOR_MAX_WIDTH;
+  const isCompactPortrait = viewportSize.width > 0 && viewportSize.width <= compactEditorMaxWidth && isPortraitViewport;
+  const useCompactAndroidPanels = isAndroid && isCompactPortrait;
 
   const compactEditorPanelMinHeight = 220;
   const compactEditorPanelMaxHeight =
@@ -365,6 +415,8 @@ function App() {
     handleBatchDenoise,
     handleSaveDenoisedImage,
     handleSaveCollage,
+    handleStartFocusStack,
+    handleSaveFocusStack,
   } = useProductivityActions(handleLibraryRefresh);
 
   const {
@@ -415,6 +467,7 @@ function App() {
     sortedImageList,
     handleBackToLibrary,
     handleDeleteSelected,
+    handleGoHome,
     handleImageSelect,
     handlePasteFiles,
     handleToggleFullScreen,
@@ -460,12 +513,12 @@ function App() {
 
   useEffect(() => {
     if (
-      (activeRightPanel !== Panel.Masks || !activeMaskContainerId) &&
-      (activeRightPanel !== Panel.Ai || !activeAiPatchContainerId)
+      (activePanel !== Panel.Masks || !activeMaskContainerId) &&
+      (activePanel !== Panel.Ai || !activeAiPatchContainerId)
     ) {
       setEditor({ isMaskControlHovered: false });
     }
-  }, [activeRightPanel, activeMaskContainerId, activeAiPatchContainerId, setEditor]);
+  }, [activePanel, activeMaskContainerId, activeAiPatchContainerId, setEditor]);
 
   useEffect(() => {
     const unlisten = listen('ai-connector-status-update', (event: any) => {
@@ -503,18 +556,38 @@ function App() {
 
       if (stateKey === 'left') {
         let w = startSize + (moveEvent.clientX - startX);
-        if (w < 200) w = 48;
-        else if (w > 600) w = 600;
-        setUI({ leftPanelWidth: Math.round(w) });
+        if (w < 200) {
+          setUI((state) => ({ uiVisibility: { ...state.uiVisibility, leftPanel: false } }));
+        } else {
+          w = Math.min(w, 600);
+          setUI((state) => ({
+            leftPanelWidth: Math.round(w),
+            uiVisibility: { ...state.uiVisibility, leftPanel: true },
+          }));
+        }
       } else if (stateKey === 'right') {
         let w = startSize - (moveEvent.clientX - startX);
-        if (w < 200) w = 48;
-        else if (w > 600) w = 600;
-        setUI({ rightPanelWidth: Math.round(w) });
+        if (w < 200) {
+          setUI((state) => ({ uiVisibility: { ...state.uiVisibility, rightPanel: false } }));
+        } else {
+          w = Math.min(w, 600);
+          setUI((state) => ({
+            rightPanelWidth: Math.round(w),
+            uiVisibility: { ...state.uiVisibility, rightPanel: true },
+          }));
+        }
       } else if (stateKey === 'bottom') {
-        setUI({
-          bottomPanelHeight: Math.round(Math.max(100, Math.min(startSize - (moveEvent.clientY - startY), 400))),
-        });
+        const newHeight = startSize - (moveEvent.clientY - startY);
+        if (newHeight < 100) {
+          setUI((state) => ({
+            uiVisibility: { ...state.uiVisibility, filmstrip: false },
+          }));
+        } else {
+          setUI((state) => ({
+            bottomPanelHeight: Math.round(Math.min(newHeight, 400)),
+            uiVisibility: { ...state.uiVisibility, filmstrip: true },
+          }));
+        }
       } else if (stateKey === 'compact') {
         setUI({
           compactEditorPanelHeightOverride: Math.round(
@@ -540,12 +613,34 @@ function App() {
       window.removeEventListener('pointercancel', stopDrag);
       setIsResizing(false);
     };
+
     document.documentElement.style.cursor =
       stateKey === 'bottom' || stateKey === 'compact' ? 'row-resize' : 'col-resize';
 
     window.addEventListener('pointermove', doDrag, { passive: false });
     window.addEventListener('pointerup', stopDrag);
     window.addEventListener('pointercancel', stopDrag);
+  };
+
+  const createResizeResetHandler = (stateKey: string) => () => {
+    if (stateKey === 'left') {
+      setUI((state) => ({
+        leftPanelWidth: DEFAULT_PANEL_WIDTH,
+        uiVisibility: { ...state.uiVisibility, leftPanel: true },
+      }));
+    } else if (stateKey === 'right') {
+      setUI((state) => ({
+        rightPanelWidth: DEFAULT_PANEL_WIDTH,
+        uiVisibility: { ...state.uiVisibility, rightPanel: true },
+      }));
+    } else if (stateKey === 'bottom') {
+      setUI((state) => ({
+        bottomPanelHeight: DEFAULT_BOTTOM_PANEL_HEIGHT,
+        uiVisibility: { ...state.uiVisibility, filmstrip: true },
+      }));
+    } else if (stateKey === 'compact') {
+      setUI({ compactEditorPanelHeightOverride: null });
+    }
   };
 
   useEffect(() => {
@@ -560,12 +655,12 @@ function App() {
     };
   }, [setUI]);
 
-  const handleRightPanelSelect = useCallback(
+  const handlePanelSelect = useCallback(
     (panelId: Panel) => {
-      setRightPanel(panelId);
+      setPanel(panelId);
       setEditor({ activeMaskId: null, activeAiSubMaskId: null, isWbPickerActive: false });
     },
-    [setRightPanel, setEditor],
+    [setPanel, setEditor],
   );
 
   const handleToggleFolder = useCallback(
@@ -607,16 +702,12 @@ function App() {
           return (
             <FolderTree
               isResizing={isResizing}
-              isVisible={true}
               onContextMenu={handleFolderTreeContextMenu}
               onAlbumContextMenu={handleAlbumTreeContextMenu}
               onSelectAlbum={handleSelectAlbum}
               onFolderSelect={(path) => handleSelectSubfolder(path, false)}
               onToggleFolder={handleToggleFolder}
               onOpenFolder={handleOpenFolder}
-              setIsVisible={(value: boolean) =>
-                setUI((state) => ({ uiVisibility: { ...state.uiVisibility, folderTree: value } }))
-              }
               style={{ width: '100%', height: '100%' }}
               isInstantTransition={isInstantTransition}
             />
@@ -647,6 +738,8 @@ function App() {
           return <AIPanel />;
         case Panel.Presets:
           return <PresetsPanel onNavigateToCommunity={() => setUI({ activeView: 'community' })} />;
+        case Panel.Tethering:
+          return <TetheringPanel onLibraryRefresh={handleLibraryRefresh} onImageSelect={handleImageSelect} />;
         default:
           return null;
       }
@@ -674,7 +767,7 @@ function App() {
   const hasRoots = rootPaths && rootPaths.length > 0;
   const hasMainContent = hasRoots || (activeView === 'editor' && !!selectedImage);
 
-  const shouldHideFolderTree = isAndroid;
+  const shouldHideFolderTree = useCompactAndroidPanels;
   const isWgpuActive =
     activeView === 'editor' &&
     appSettings?.useWgpuRenderer !== false &&
@@ -686,15 +779,57 @@ function App() {
   const handleDragStart = (e: any) => {
     if (e.active.data.current?.type === 'layout-tab') {
       setLayoutDragItem(e.active.data.current.panel as Panel);
+    } else if (e.active.data.current?.type === 'library-image') {
+      const path = e.active.data.current.path;
+      const multiSelected = useLibraryStore.getState().multiSelectedPaths;
+      const paths = multiSelected.includes(path) ? multiSelected : [path];
+      setActiveImageDragItem({ path, paths });
     }
   };
+
   const handleDragEnd = (e: any) => {
     setLayoutDragItem(null);
-    if (e.active.data.current?.type === 'layout-tab' && e.over?.data.current?.type === 'layout-region') {
-      movePanel(e.active.data.current.panel as Panel, e.over.data.current.region as PanelRegion);
+    setActiveImageDragItem(null);
+    const { active, over } = e;
+
+    if (active.data.current?.type === 'layout-tab' && over?.data.current?.type === 'layout-region') {
+      movePanel(active.data.current.panel as Panel, over.data.current.region as PanelRegion);
+    }
+
+    if (active.data.current?.type === 'library-image' && over?.data.current?.type === 'folder') {
+      const targetFolder = over.data.current.path;
+      const sourcePaths = activeImageDragItem?.paths || [active.data.current.path];
+
+      invoke(Invokes.MoveFiles, { sourcePaths, destinationFolder: targetFolder })
+        .then(() => {
+          refreshAllFolderTrees();
+          handleLibraryRefresh();
+          useLibraryStore.getState().setLibrary({ multiSelectedPaths: [] });
+        })
+        .catch((err) => {
+          toast.error(`Failed to move files: ${err}`);
+        });
+    }
+
+    if (active.data.current?.type === 'library-image' && over?.data.current?.type === 'album') {
+      const targetAlbumId = over.data.current.id;
+      const sourcePaths = activeImageDragItem?.paths || [active.data.current.path];
+
+      invoke(Invokes.AddToAlbum, { albumId: targetAlbumId, paths: sourcePaths })
+        .then(() => invoke(Invokes.GetAlbums))
+        .then((updatedTree: any) => {
+          useLibraryStore.getState().setLibrary({ albumTree: updatedTree, multiSelectedPaths: [] });
+          handleLibraryRefresh();
+        })
+        .catch((err) => {
+          toast.error(`Failed to add to album: ${err}`);
+        });
     }
   };
+
   const ActiveOverlayIcon = activeLayoutDragItem ? PANEL_ICONS[activeLayoutDragItem] : null;
+  const effectiveLeftWidth = uiVisibility.leftPanel ? leftPanelWidth : 48;
+  const effectiveRightWidth = uiVisibility.rightPanel ? rightPanelWidth : 48;
 
   return (
     <>
@@ -713,15 +848,17 @@ function App() {
           isWgpuActive ? 'bg-transparent' : 'bg-bg-primary',
         )}
       >
-        <div
-          className={clsx(
-            'shrink-0 overflow-hidden z-50',
-            !isInstantTransition && 'transition-all duration-300 ease-in-out',
-            isFullScreen ? 'max-h-0 opacity-0 pointer-events-none' : 'max-h-[60px] opacity-100',
-          )}
-        >
-          {appSettings?.decorations || (!isWindowFullScreen && <TitleBar />)}
-        </div>
+        {!isAndroid && (
+          <div
+            className={clsx(
+              'shrink-0 overflow-hidden z-50',
+              !isInstantTransition && 'transition-all duration-300 ease-in-out',
+              isFullScreen ? 'max-h-0 opacity-0 pointer-events-none' : 'max-h-15 opacity-100',
+            )}
+          >
+            {appSettings?.decorations || (!isWindowFullScreen && <TitleBar />)}
+          </div>
+        )}
         <div
           className={clsx(
             'flex-1 flex flex-col min-h-0',
@@ -729,16 +866,27 @@ function App() {
             [hasMainContent && (isFullScreen ? 'p-0 gap-0' : 'p-2 gap-2')],
           )}
         >
-          <DndContext sensors={layoutSensors} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+          <DndContext
+            sensors={layoutSensors}
+            onDragStart={handleDragStart}
+            onDragEnd={handleDragEnd}
+            collisionDetection={pointerWithin}
+            measuring={{
+              droppable: {
+                strategy: MeasuringStrategy.Always,
+              },
+            }}
+          >
             <div className="flex flex-row grow h-full min-h-0">
               {!shouldHideFolderTree && hasMainContent && (
                 <SidePanelArea
                   side="left"
-                  width={leftPanelWidth}
+                  width={effectiveLeftWidth}
                   topRegion="leftTop"
                   bottomRegion="leftBottom"
                   renderPanel={renderAppPanel}
-                  onWidthChange={createResizeHandler('left', leftPanelWidth)}
+                  onWidthChange={createResizeHandler('left', effectiveLeftWidth)}
+                  onWidthReset={createResizeResetHandler('left')}
                   isResizing={isResizing}
                 />
               )}
@@ -751,30 +899,46 @@ function App() {
                     onDone={finishExternalEdit}
                   />
                 )}
-                {activeView === 'editor' && selectedImage ? (
-                  <EditorView
-                    transformWrapperRef={transformWrapperRef}
-                    isResizing={isResizing}
-                    isCompactPortrait={isCompactPortrait}
-                    isAndroid={isAndroid}
-                    compactEditorPanelHeight={compactEditorPanelHeight}
-                    compactEditorPanelCollapsedHeight={compactEditorPanelCollapsedHeight}
-                    thumbnailAspectRatio={thumbnailAspectRatio}
-                    sortedImageList={sortedImageList}
-                    createResizeHandler={createResizeHandler}
-                    handleBackToLibrary={handleBackToLibrary}
-                    handleEditorContextMenu={handleEditorContextMenu}
-                    handleThumbnailContextMenu={handleThumbnailContextMenu}
-                    handleImageClick={handleImageClick}
-                    handleClearSelection={handleClearSelection}
-                    handleCopyAdjustments={handleCopyAdjustments}
-                    handlePasteAdjustments={handlePasteAdjustments}
-                    handleRate={handleRate}
-                    handleZoomChange={handleZoomChange}
-                    handleRightPanelSelect={handleRightPanelSelect}
-                    requestThumbnails={requestThumbnails}
-                  />
-                ) : (
+                <div
+                  className={clsx(
+                    'flex-1 flex flex-col min-w-0 h-full',
+                    activeView === 'editor' && selectedImage ? 'flex' : 'hidden',
+                  )}
+                >
+                  {selectedImage && (
+                    <EditorView
+                      transformWrapperRef={transformWrapperRef}
+                      isResizing={isResizing}
+                      isCompactPortrait={isCompactPortrait}
+                      isAndroid={isAndroid}
+                      compactEditorPanelHeight={compactEditorPanelHeight}
+                      compactEditorPanelCollapsedHeight={compactEditorPanelCollapsedHeight}
+                      thumbnailAspectRatio={thumbnailAspectRatio}
+                      sortedImageList={sortedImageList}
+                      createResizeHandler={createResizeHandler}
+                      createResizeResetHandler={createResizeResetHandler}
+                      handleBackToLibrary={handleBackToLibrary}
+                      handleEditorContextMenu={handleEditorContextMenu}
+                      handleThumbnailContextMenu={handleThumbnailContextMenu}
+                      handleMainLibraryContextMenu={handleMainLibraryContextMenu}
+                      handleImageClick={handleImageClick}
+                      handleClearSelection={handleClearSelection}
+                      handleCopyAdjustments={handleCopyAdjustments}
+                      handlePasteAdjustments={handlePasteAdjustments}
+                      handleRate={handleRate}
+                      handleZoomChange={handleZoomChange}
+                      handlePanelSelect={handlePanelSelect}
+                      requestThumbnails={requestThumbnails}
+                      renderAppPanel={renderAppPanel}
+                    />
+                  )}
+                </div>
+                <div
+                  className={clsx(
+                    'flex-1 flex flex-col min-w-0 h-full',
+                    activeView === 'editor' && selectedImage ? 'hidden' : 'flex',
+                  )}
+                >
                   <LibraryView
                     sortedImageList={sortedImageList}
                     groupBadgeInfo={groupBadgeInfo}
@@ -801,7 +965,7 @@ function App() {
                     handleResetAdjustments={handleResetAdjustments}
                     requestThumbnails={requestThumbnails}
                   />
-                )}
+                </div>
                 {isSettingsOpen && appSettings && hasRoots && (
                   <div className="absolute inset-0 z-50 flex bg-bg-secondary rounded-lg">
                     <div className="w-full h-full flex flex-col p-4 lg:p-8 overflow-y-auto custom-scrollbar">
@@ -816,24 +980,26 @@ function App() {
                   </div>
                 )}
               </div>
-              {!isAndroid && hasMainContent && (
+              {!useCompactAndroidPanels && hasMainContent && (
                 <SidePanelArea
                   side="right"
-                  width={rightPanelWidth}
+                  width={effectiveRightWidth}
                   topRegion="rightTop"
                   bottomRegion="rightBottom"
                   renderPanel={renderAppPanel}
-                  onWidthChange={createResizeHandler('right', rightPanelWidth)}
+                  onWidthChange={createResizeHandler('right', effectiveRightWidth)}
+                  onWidthReset={createResizeResetHandler('right')}
                   isResizing={isResizing}
                 />
               )}
             </div>
-            <DragOverlay dropAnimation={{ duration: 150, easing: 'cubic-bezier(0.18, 0.67, 0.6, 1.22)' }}>
+            <DragOverlay modifiers={activeImageDragItem ? [imageDragModifier] : undefined} dropAnimation={null}>
               {activeLayoutDragItem && ActiveOverlayIcon ? (
                 <div className="w-10 h-10 bg-surface shadow-2xl rounded-md flex items-center justify-center text-text-primary ring-1 ring-border-color">
                   <ActiveOverlayIcon size={20} />
                 </div>
               ) : null}
+              {activeImageDragItem ? <ImageDragOverlayNode activeItem={activeImageDragItem} /> : null}
             </DragOverlay>
           </DndContext>
         </div>
@@ -841,6 +1007,8 @@ function App() {
           handleImageSelect={handleImageSelect}
           handleSavePanorama={handleSavePanorama}
           handleStartPanorama={handleStartPanorama}
+          handleStartFocusStack={handleStartFocusStack}
+          handleSaveFocusStack={handleSaveFocusStack}
           handleSaveHdr={handleSaveHdr}
           handleStartHdr={handleStartHdr}
           refreshImageList={handleLibraryRefresh}
