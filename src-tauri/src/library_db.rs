@@ -367,6 +367,33 @@ fn migrate(conn: &Connection) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn insert_test_image(connection: &Connection) {
+        connection
+            .execute(
+                "INSERT INTO libraries(id, name, created_at, updated_at) VALUES('library', 'Test', 0, 0)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'library', '/photos')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0)",
+                [],
+            )
+            .unwrap();
+    }
+
     #[test]
     fn migration_creates_face_storage_and_records_current_version() {
         let connection = Connection::open_in_memory().unwrap();
@@ -395,30 +422,7 @@ mod tests {
     fn face_schema_enforces_normalized_bounding_boxes() {
         let connection = Connection::open_in_memory().unwrap();
         migrate(&connection).unwrap();
-        connection
-            .execute(
-                "INSERT INTO libraries(id, name, created_at, updated_at) VALUES('library', 'Test', 0, 0)",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'library', '/photos')",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
-                [],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0)",
-                [],
-            )
-            .unwrap();
+        insert_test_image(&connection);
 
         let error = connection
             .execute(
@@ -427,6 +431,34 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.to_string().contains("CHECK constraint failed"));
+    }
+
+    #[test]
+    fn confirmed_face_links_are_available_for_person_facets() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrate(&connection).unwrap();
+        insert_test_image(&connection);
+        connection
+            .execute(
+                "INSERT INTO people(id, display_name, created_at, updated_at) VALUES(1, 'Ada', 0, 0)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO faces(image_id, person_id, model_pack_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, review_state, created_at, updated_at) VALUES(1, 1, 'opencv-yunet-sface', 0.9, 0.1, 0.1, 0.2, 0.2, 'confirmed', 0, 0)",
+                [],
+            )
+            .unwrap();
+
+        let face_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM faces f JOIN people p ON p.id = f.person_id WHERE p.display_name = 'Ada' AND f.review_state = 'confirmed'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(face_count, 1);
     }
 }
 
@@ -1770,12 +1802,23 @@ pub fn search_catalog_images(
     if let Some(person) = query.person.filter(|s| !s.trim().is_empty()) {
         sql.push_str(
             " AND EXISTS (
-                SELECT 1 FROM image_tags it
+                SELECT 1
+                FROM image_tags it
                 JOIN tags t ON t.id = it.tag_id
                 WHERE it.image_version_id = v.id AND t.kind = 'person' AND LOWER(t.name) LIKE LOWER(?)
+                UNION ALL
+                SELECT 1
+                FROM faces f
+                JOIN people p ON p.id = f.person_id
+                WHERE f.image_id = i.id
+                  AND f.review_state = 'confirmed'
+                  AND p.state = 'active'
+                  AND LOWER(p.display_name) LIKE LOWER(?)
             )",
         );
-        values.push(SqlValue::Text(format!("%{}%", person.trim())));
+        let like = SqlValue::Text(format!("%{}%", person.trim()));
+        values.push(like.clone());
+        values.push(like);
     }
     if let Some(tags) = query.tags {
         let cleaned: Vec<String> = tags
@@ -1878,6 +1921,44 @@ pub fn list_catalog_people(
 }
 
 #[tauri::command]
+pub fn create_catalog_person(
+    display_name: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<CatalogPerson, String> {
+    let display_name = display_name.trim();
+    if display_name.is_empty() {
+        return Err("Person name cannot be empty".to_string());
+    }
+    let db_path = active_library_path(&state)?;
+    let conn = open_connection(&db_path)?;
+    let now = now_secs();
+    conn.execute(
+        "INSERT INTO people(display_name, state, created_at, updated_at)
+         VALUES(?1, 'active', ?2, ?2)
+         ON CONFLICT(display_name) DO UPDATE SET updated_at = excluded.updated_at",
+        params![display_name, now],
+    )
+    .map_err(|error| error.to_string())?;
+    conn.query_row(
+        "SELECT p.id, p.display_name, p.state, COUNT(f.id)
+         FROM people p
+         LEFT JOIN faces f ON f.person_id = p.id AND f.review_state = 'confirmed'
+         WHERE p.display_name = ?1
+         GROUP BY p.id",
+        [display_name],
+        |row| {
+            Ok(CatalogPerson {
+                id: row.get(0)?,
+                display_name: row.get(1)?,
+                state: row.get(2)?,
+                face_count: row.get(3)?,
+            })
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn list_catalog_faces(
     image_id: i64,
     state: tauri::State<'_, crate::AppState>,
@@ -1911,6 +1992,52 @@ pub fn list_catalog_faces(
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn review_catalog_face(
+    face_id: i64,
+    person_id: Option<i64>,
+    review_state: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    if !matches!(
+        review_state.as_str(),
+        "unreviewed" | "confirmed" | "rejected"
+    ) {
+        return Err("Invalid face review state".to_string());
+    }
+    if review_state == "confirmed" && person_id.is_none() {
+        return Err("A confirmed face must be assigned to a person".to_string());
+    }
+
+    let db_path = active_library_path(&state)?;
+    let conn = open_connection(&db_path)?;
+    if let Some(person_id) = person_id {
+        let is_active: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM people WHERE id = ?1 AND state = 'active'",
+                [person_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if is_active.is_none() {
+            return Err("Selected person is not available".to_string());
+        }
+    }
+    let changed = conn
+        .execute(
+            "UPDATE faces
+             SET person_id = ?1, review_state = ?2, updated_at = ?3
+             WHERE id = ?4",
+            params![person_id, review_state, now_secs(), face_id],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("Face observation was not found".to_string());
+    }
+    Ok(())
 }
 
 fn facet_query(conn: &Connection, sql: &str) -> Result<Vec<CatalogFacetValue>, String> {
@@ -1981,7 +2108,24 @@ pub fn get_catalog_metrics(
         )?,
         people: facet_query(
             &conn,
-            "SELECT t.name, COUNT(*) FROM image_tags it JOIN tags t ON t.id = it.tag_id JOIN image_versions v ON v.id = it.image_version_id JOIN images i ON i.id = v.image_id WHERE i.status = 'present' AND t.kind = 'person' GROUP BY t.id ORDER BY COUNT(*) DESC, t.name COLLATE NOCASE LIMIT 75",
+            "SELECT name, COUNT(DISTINCT image_id)
+             FROM (
+               SELECT p.display_name AS name, f.image_id AS image_id
+               FROM faces f
+               JOIN people p ON p.id = f.person_id
+               JOIN images i ON i.id = f.image_id
+               WHERE i.status = 'present' AND f.review_state = 'confirmed' AND p.state = 'active'
+               UNION ALL
+               SELECT t.name AS name, i.id AS image_id
+               FROM image_tags it
+               JOIN tags t ON t.id = it.tag_id
+               JOIN image_versions v ON v.id = it.image_version_id
+               JOIN images i ON i.id = v.image_id
+               WHERE i.status = 'present' AND t.kind = 'person'
+             )
+             GROUP BY name
+             ORDER BY COUNT(DISTINCT image_id) DESC, name COLLATE NOCASE
+             LIMIT 75",
         )?,
         tags: facet_query(
             &conn,

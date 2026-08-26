@@ -114,6 +114,8 @@ export enum Invokes {
   DownloadFaceModelPack = 'download_face_model_pack',
   ListCatalogPeople = 'list_catalog_people',
   ListCatalogFaces = 'list_catalog_faces',
+  CreateCatalogPerson = 'create_catalog_person',
+  ReviewCatalogFace = 'review_catalog_face',
   GenerateAllCommunityPreviews = 'generate_all_community_previews',
   SaveCommunityPreset = 'save_community_preset',
   SaveTempFile = 'save_temp_file',
