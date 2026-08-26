@@ -411,6 +411,19 @@ fn run_face_recognition(
         None,
         None,
     )?;
+    if faces.is_empty() {
+        suggest_people(&conn)?;
+        return update_job(
+            db_path,
+            job_id,
+            "completed",
+            "Person suggestions refreshed",
+            0,
+            0,
+            None,
+            None,
+        );
+    }
     let _ = ort::init().with_name("RapidRAW-FaceRecognition").commit();
     let mut session = Session::builder()
         .map_err(|error| error.to_string())?
