@@ -118,6 +118,7 @@ export enum Invokes {
   ReviewCatalogFace = 'review_catalog_face',
   ListBackgroundJobs = 'list_background_jobs',
   ListBackgroundJobEvents = 'list_background_job_events',
+  CancelBackgroundJob = 'cancel_background_job',
   GenerateAllCommunityPreviews = 'generate_all_community_previews',
   SaveCommunityPreset = 'save_community_preset',
   SaveTempFile = 'save_temp_file',

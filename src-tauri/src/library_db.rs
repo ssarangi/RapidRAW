@@ -1833,6 +1833,68 @@ pub fn list_background_job_events(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+pub fn cancel_background_job(
+    job_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let db_path = active_library_path(&state)?;
+    let conn = open_connection(&db_path)?;
+    let (kind, job_state): (String, String) = conn
+        .query_row(
+            "SELECT kind, state FROM background_jobs WHERE id = ?1",
+            [&job_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| error.to_string())?;
+    if !matches!(
+        job_state.as_str(),
+        "queued" | "running" | "paused" | "cancelling"
+    ) {
+        return Err("This job is no longer cancellable".to_string());
+    }
+
+    if kind == "catalog_scan" {
+        if state
+            .catalog_scan_control
+            .active_job_id
+            .lock()
+            .unwrap()
+            .as_deref()
+            != Some(&job_id)
+        {
+            return Err("The catalog scan is not active in this application session".to_string());
+        }
+        state
+            .catalog_scan_control
+            .cancelled
+            .store(true, Ordering::SeqCst);
+        *state.catalog_scan_control.paused.lock().unwrap() = false;
+        state.catalog_scan_control.cvar.notify_all();
+    } else if let Some(token) = state
+        .background_job_cancellations
+        .lock()
+        .unwrap()
+        .get(&job_id)
+        .cloned()
+    {
+        token.store(true, Ordering::SeqCst);
+    } else {
+        return Err("This job cannot be cancelled after an application restart".to_string());
+    }
+
+    update_job(
+        &db_path,
+        &job_id,
+        "cancelling",
+        "Cancellation requested",
+        0,
+        0,
+        None,
+        None,
+    )
+}
+
 fn color_label_from_tags(tags: Option<&Vec<String>>) -> Option<String> {
     tags.and_then(|items| {
         items

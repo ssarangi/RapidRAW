@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -454,8 +456,35 @@ pub async fn download_face_model_pack(
             None,
         );
     }
+    let cancellation = job.as_ref().map(|(_, job_id)| {
+        let token = Arc::new(AtomicBool::new(false));
+        state
+            .background_job_cancellations
+            .lock()
+            .unwrap()
+            .insert(job_id.clone(), token.clone());
+        token
+    });
 
     for (index, artifact) in pack.artifacts.iter().enumerate() {
+        if cancellation
+            .as_ref()
+            .is_some_and(|token| token.load(Ordering::SeqCst))
+        {
+            if let Some((db_path, job_id)) = job.as_ref() {
+                let _ = crate::library_db::update_job(
+                    db_path,
+                    job_id,
+                    "cancelled",
+                    "Model download cancelled",
+                    index as i64,
+                    total as i64,
+                    None,
+                    None,
+                );
+            }
+            return Err("Model download cancelled".to_string());
+        }
         if let Some((db_path, job_id)) = job.as_ref() {
             let _ = crate::library_db::update_job(
                 db_path,
@@ -484,6 +513,24 @@ pub async fn download_face_model_pack(
             .error_for_status()
             .map_err(|error| error.to_string())?;
         let bytes = response.bytes().await.map_err(|error| error.to_string())?;
+        if cancellation
+            .as_ref()
+            .is_some_and(|token| token.load(Ordering::SeqCst))
+        {
+            if let Some((db_path, job_id)) = job.as_ref() {
+                let _ = crate::library_db::update_job(
+                    db_path,
+                    job_id,
+                    "cancelled",
+                    "Model download cancelled",
+                    index as i64,
+                    total as i64,
+                    None,
+                    None,
+                );
+            }
+            return Err("Model download cancelled".to_string());
+        }
 
         match artifact.format {
             ModelArtifactFormat::Onnx => {
@@ -535,6 +582,11 @@ pub async fn download_face_model_pack(
             None,
             None,
         );
+        state
+            .background_job_cancellations
+            .lock()
+            .unwrap()
+            .remove(job_id);
     }
 
     let _ = app_handle.emit(

@@ -2311,6 +2311,7 @@ pub fn run() {
             disks_cache_refreshing: AtomicBool::new(false),
             camera_session: Mutex::new(camera_tethering::CameraSession::new()),
             active_library_path: Mutex::new(None),
+            background_job_cancellations: Mutex::new(HashMap::new()),
         })
         .invoke_handler(tauri::generate_handler![
             apply_adjustments,
@@ -2435,6 +2436,7 @@ pub fn run() {
             library_db::review_catalog_face,
             library_db::list_background_jobs,
             library_db::list_background_job_events,
+            library_db::cancel_background_job,
             tagging::start_background_indexing,
             tagging::clear_ai_tags,
             tagging::clear_all_tags,

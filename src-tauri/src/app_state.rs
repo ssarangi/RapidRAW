@@ -226,4 +226,5 @@ pub struct AppState {
     pub disks_cache_refreshing: AtomicBool,
     pub camera_session: Mutex<CameraSession>,
     pub active_library_path: Mutex<Option<PathBuf>>,
+    pub background_job_cancellations: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }

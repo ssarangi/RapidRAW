@@ -292,6 +292,17 @@ export default function BottomBar({
     }
   };
 
+  const handleCancelBackgroundJob = async (jobId: string) => {
+    try {
+      await invoke(Invokes.CancelBackgroundJob, { jobId });
+      setBackgroundJobs((jobs) =>
+        jobs.map((job) => (job.id === jobId ? { ...job, state: 'cancelling', message: 'Cancellation requested' } : job)),
+      );
+    } catch (error) {
+      console.error('Failed to cancel background job:', error);
+    }
+  };
+
   useEffect(() => {
     if (!isCatalogScanModalOpen) return;
     let active = true;
@@ -915,9 +926,16 @@ export default function BottomBar({
                     <div className="max-h-48 overflow-y-auto">
                       {backgroundJobs.map((job) => (
                         <div key={job.id} className="px-3 py-2 border-b border-border-color last:border-b-0">
-                          <div className="flex gap-3 justify-between">
+                          <div className="flex gap-3 justify-between items-center">
                             <Text variant={TextVariants.small}>{job.kind === 'catalog_scan' ? 'Catalog scan' : job.kind}</Text>
-                            <Text variant={TextVariants.small} color={job.state === 'failed' ? TextColors.error : job.state === 'completed' ? TextColors.success : TextColors.accent}>{job.state}</Text>
+                            <div className="flex items-center gap-2">
+                              <Text variant={TextVariants.small} color={job.state === 'failed' ? TextColors.error : job.state === 'completed' ? TextColors.success : TextColors.accent}>{job.state}</Text>
+                              {['queued', 'running', 'paused'].includes(job.state) && (
+                                <button className="p-1 text-red-300 hover:bg-red-500/10 rounded" onClick={() => void handleCancelBackgroundJob(job.id)} data-tooltip="Cancel job">
+                                  <Square size={13} />
+                                </button>
+                              )}
+                            </div>
                           </div>
                           <Text variant={TextVariants.small} color={TextColors.secondary} className="truncate">{job.message}</Text>
                           {job.total > 0 && <Text variant={TextVariants.small} color={TextColors.secondary}>{job.current}/{job.total}</Text>}
