@@ -2434,6 +2434,7 @@ pub fn run() {
             library_db::get_catalog_metrics,
             library_db::list_catalog_people,
             library_db::list_catalog_faces,
+            library_db::list_unreviewed_catalog_faces,
             library_db::create_catalog_person,
             library_db::review_catalog_face,
             library_db::list_background_jobs,

@@ -151,6 +151,13 @@ pub struct CatalogFace {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct CatalogFaceReviewItem {
+    pub face: CatalogFace,
+    pub image_path: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct BackgroundJob {
     pub id: String,
     pub kind: String,
@@ -2363,6 +2370,35 @@ pub fn list_catalog_faces(
                 width: row.get(7)?,
                 height: row.get(8)?,
                 review_state: row.get(9)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn list_unreviewed_catalog_faces(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<CatalogFaceReviewItem>, String> {
+    let conn = open_connection(&active_library_path(&state)?)?;
+    let mut statement = conn.prepare("SELECT f.id, f.image_id, f.person_id, f.model_pack_id, f.detector_confidence, f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height, f.review_state, r.absolute_path || '/' || i.relative_path FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE f.review_state = 'unreviewed' AND i.status = 'present' ORDER BY f.detector_confidence DESC LIMIT 500").map_err(|error| error.to_string())?;
+    statement
+        .query_map([], |row| {
+            Ok(CatalogFaceReviewItem {
+                face: CatalogFace {
+                    id: row.get(0)?,
+                    image_id: row.get(1)?,
+                    person_id: row.get(2)?,
+                    model_pack_id: row.get(3)?,
+                    confidence: row.get(4)?,
+                    x: row.get(5)?,
+                    y: row.get(6)?,
+                    width: row.get(7)?,
+                    height: row.get(8)?,
+                    review_state: row.get(9)?,
+                },
+                image_path: row.get(10)?,
             })
         })
         .map_err(|error| error.to_string())?
