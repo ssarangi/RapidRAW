@@ -2625,6 +2625,32 @@ pub fn list_unreviewed_face_clusters(
 }
 
 #[tauri::command]
+pub fn confirm_face_cluster(
+    cluster_id: i64,
+    person_id: i64,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let conn = open_connection(&active_library_path(&state)?)?;
+    let active: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM people WHERE id = ?1 AND state = 'active'",
+            [person_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if active.is_none() {
+        return Err("Selected person is not available".to_string());
+    }
+    let changed = conn.execute("UPDATE faces SET person_id = ?1, review_state = 'confirmed', updated_at = strftime('%s','now') WHERE review_state = 'unreviewed' AND id IN (SELECT face_id FROM face_cluster_members WHERE cluster_id = ?2)", params![person_id, cluster_id]).map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("Face cluster has no reviewable faces".to_string());
+    }
+    conn.execute("UPDATE face_clusters SET state = 'accepted', updated_at = strftime('%s','now') WHERE id = ?1", [cluster_id]).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 pub fn review_catalog_face(
     face_id: i64,
     person_id: Option<i64>,

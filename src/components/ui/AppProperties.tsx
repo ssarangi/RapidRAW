@@ -124,6 +124,7 @@ export enum Invokes {
   StartCatalogAiTagging = 'start_catalog_ai_tagging',
   ListUnreviewedCatalogFaces = 'list_unreviewed_catalog_faces',
   ListUnreviewedFaceClusters = 'list_unreviewed_face_clusters',
+  ConfirmFaceCluster = 'confirm_face_cluster',
   GenerateAllCommunityPreviews = 'generate_all_community_previews',
   SaveCommunityPreset = 'save_community_preset',
   SaveTempFile = 'save_temp_file',

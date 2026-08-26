@@ -2437,6 +2437,7 @@ pub fn run() {
             library_db::list_catalog_faces,
             library_db::list_unreviewed_catalog_faces,
             library_db::list_unreviewed_face_clusters,
+            library_db::confirm_face_cluster,
             library_db::create_catalog_person,
             library_db::review_catalog_face,
             library_db::list_background_jobs,
