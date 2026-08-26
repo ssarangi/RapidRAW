@@ -22,6 +22,7 @@ fn main() {
         Some("faces") if arguments.get(1).map(String::as_str) == Some("status") => face_status(&arguments),
         Some("faces") if arguments.get(1).map(String::as_str) == Some("clusters") => face_clusters(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("status") => tag_status(&arguments),
+        Some("tags") if arguments.get(1).map(String::as_str) == Some("top") => top_tags(&arguments),
         _ => Err("Usage: rapidraw-cli library inspect|roots --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli faces status --database <catalog.db> | rapidraw-cli tags status --database <catalog.db>".to_string()),
     };
     match result {
@@ -154,4 +155,18 @@ fn tag_status(arguments: &[String]) -> Result<serde_json::Value, String> {
     Ok(
         json!({ "suggested": count("suggested")?, "accepted": count("accepted")?, "rejected": count("rejected")? }),
     )
+}
+
+fn top_tags(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let connection =
+        Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let mut statement = connection.prepare("SELECT t.name, COUNT(DISTINCT iat.image_id) FROM image_ai_tags iat JOIN tags t ON t.id = iat.tag_id WHERE iat.review_state <> 'rejected' GROUP BY t.id ORDER BY COUNT(DISTINCT iat.image_id) DESC, t.name LIMIT 50").map_err(|error| error.to_string())?;
+    let tags = statement
+        .query_map([], |row| {
+            Ok(json!({ "tag": row.get::<_, String>(0)?, "images": row.get::<_, i64>(1)? }))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(json!(tags))
 }
