@@ -501,6 +501,24 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_faces_person ON faces(person_id, review_state);
         CREATE INDEX IF NOT EXISTS idx_faces_review ON faces(review_state, model_pack_id);
 
+        CREATE TABLE IF NOT EXISTS face_clusters (
+          id INTEGER PRIMARY KEY,
+          model_pack_id TEXT NOT NULL,
+          state TEXT NOT NULL DEFAULT 'unreviewed' CHECK(state IN ('unreviewed', 'accepted', 'rejected')),
+          representative_face_id INTEGER REFERENCES faces(id) ON DELETE SET NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS face_cluster_members (
+          cluster_id INTEGER NOT NULL REFERENCES face_clusters(id) ON DELETE CASCADE,
+          face_id INTEGER NOT NULL REFERENCES faces(id) ON DELETE CASCADE,
+          similarity REAL,
+          PRIMARY KEY(cluster_id, face_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_face_cluster_members_face ON face_cluster_members(face_id);
+
         CREATE TABLE IF NOT EXISTS face_scan_state (
           image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
           model_pack_id TEXT NOT NULL,
@@ -617,7 +635,14 @@ mod tests {
         let connection = Connection::open_in_memory().unwrap();
         migrate(&connection).unwrap();
 
-        for table in ["people", "face_embeddings", "faces", "face_scan_state"] {
+        for table in [
+            "people",
+            "face_embeddings",
+            "faces",
+            "face_scan_state",
+            "face_clusters",
+            "face_cluster_members",
+        ] {
             let exists: i64 = connection
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
