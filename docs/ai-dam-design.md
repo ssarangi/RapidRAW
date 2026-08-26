@@ -906,6 +906,19 @@ rapidraw-cli cull analyze /photos/session --preset portraits --json-report cull-
 - Snapshot JSON output schemas so shell automation does not break silently.
 - Exercise cancellation, an unavailable root, a missing model, and a model-license rejection in CI.
 
+## Batch Analysis Execution
+
+Every AI analysis feature, including tagging, faces, wildlife classification, embeddings, and culling features, runs as a durable batch job. A UI action only enqueues work and returns immediately.
+
+- Enumerate candidate images in a short-lived database read transaction, then process bounded batches rather than holding a SQLite reader or writer for the full collection.
+- Use a bounded worker pool sized by configurable CPU/GPU limits. Image decode, inference, and database writes are separate stages connected by bounded queues, so a fast scanner cannot exhaust memory while inference is slower.
+- Serialize catalog writes through the existing writer boundary in small transactions. Each batch commits independently; a restart resumes or retries only unfinished items.
+- Persist per-image analysis state keyed by image revision and model revision. Never recompute an unchanged successful item unless the user explicitly requests reanalysis.
+- Throttle status events by time and batch boundaries, not by image. The UI receives job state, completed/total, current item, rate, ETA when reliable, and aggregated failures without rendering on every file.
+- UI updates must be non-blocking: no synchronous filesystem or database calls on the render path, no modal progress loops, and no image decoding solely for status display. Preview thumbnails use the existing thumbnail queue with a bounded request rate.
+- Pause stops dequeuing new work; cancel drains or abandons pending work at safe checkpoints; already committed results remain durable. Jobs expose retry-failed and retry-all modes.
+- Remote/NAS access runs through the isolated, timeout-aware discovery path. A stuck filesystem call must not occupy the database writer, UI thread, or all analysis workers.
+
 ### Phase 0: Catalog Integration
 
 - Land the SQLite catalog work on the active development branch.
