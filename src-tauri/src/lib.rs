@@ -2433,6 +2433,8 @@ pub fn run() {
             library_db::list_catalog_faces,
             library_db::create_catalog_person,
             library_db::review_catalog_face,
+            library_db::list_background_jobs,
+            library_db::list_background_job_events,
             tagging::start_background_indexing,
             tagging::clear_ai_tags,
             tagging::clear_all_tags,

@@ -18,7 +18,7 @@ use crate::file_management::{ImageFile, parse_virtual_path};
 use crate::file_management::{assign_group_ids, read_file_mapped};
 use crate::formats::{is_raw_file, is_supported_image_file};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -149,6 +149,34 @@ pub struct CatalogFace {
     pub review_state: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundJob {
+    pub id: String,
+    pub kind: String,
+    pub state: String,
+    pub root_id: Option<i64>,
+    pub current: i64,
+    pub total: i64,
+    pub current_item: Option<String>,
+    pub message: String,
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundJobEvent {
+    pub id: i64,
+    pub job_id: String,
+    pub state: String,
+    pub message: String,
+    pub current: i64,
+    pub total: i64,
+    pub created_at: i64,
+}
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -163,6 +191,63 @@ fn active_library_path(state: &tauri::State<'_, crate::AppState>) -> Result<Path
         .unwrap()
         .clone()
         .ok_or_else(|| "No active RapidRAW library is open".to_string())
+}
+
+fn record_job_event(
+    conn: &Connection,
+    job_id: &str,
+    state: &str,
+    message: &str,
+    current: i64,
+    total: i64,
+) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO background_job_events(job_id, state, message, current, total, created_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6)",
+        params![job_id, state, message, current, total, now_secs()],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn update_job(
+    db_path: &Path,
+    job_id: &str,
+    state: &str,
+    message: &str,
+    current: i64,
+    total: i64,
+    current_item: Option<&str>,
+    error: Option<&str>,
+) -> Result<(), String> {
+    let conn = open_connection(db_path)?;
+    let now = now_secs();
+    conn.execute(
+        "UPDATE background_jobs
+         SET state = ?2, message = ?3, current = ?4, total = ?5, current_item = ?6, error = ?7,
+             updated_at = ?8, completed_at = CASE WHEN ?2 IN ('completed', 'cancelled', 'failed') THEN ?8 ELSE NULL END
+         WHERE id = ?1",
+        params![job_id, state, message, current, total, current_item, error, now],
+    )
+    .map_err(|error| error.to_string())?;
+    record_job_event(&conn, job_id, state, message, current, total)
+}
+
+fn create_catalog_scan_job(
+    conn: &Connection,
+    root_id: i64,
+    recursive: bool,
+) -> Result<String, String> {
+    let id = Uuid::new_v4().to_string();
+    let now = now_secs();
+    conn.execute(
+        "INSERT INTO background_jobs(id, kind, state, root_id, payload_json, message, created_at, updated_at)
+         VALUES(?1, 'catalog_scan', 'queued', ?2, ?3, 'Queued catalog scan', ?4, ?4)",
+        params![id, root_id, serde_json::json!({ "recursive": recursive }).to_string(), now],
+    )
+    .map_err(|error| error.to_string())?;
+    record_job_event(conn, &id, "queued", "Queued catalog scan", 0, 0)?;
+    Ok(id)
 }
 
 fn open_connection(path: &Path) -> Result<Connection, String> {
@@ -351,6 +436,34 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_face_scan_state_status ON face_scan_state(status, model_pack_id);
+
+        CREATE TABLE IF NOT EXISTS background_jobs (
+          id TEXT PRIMARY KEY,
+          kind TEXT NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('queued', 'running', 'paused', 'cancelling', 'cancelled', 'completed', 'failed')),
+          root_id INTEGER REFERENCES collection_roots(id) ON DELETE SET NULL,
+          payload_json TEXT NOT NULL DEFAULT '{}',
+          current INTEGER NOT NULL DEFAULT 0,
+          total INTEGER NOT NULL DEFAULT 0,
+          current_item TEXT,
+          message TEXT NOT NULL DEFAULT '',
+          error TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          completed_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_background_jobs_state ON background_jobs(state, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS background_job_events (
+          id INTEGER PRIMARY KEY,
+          job_id TEXT NOT NULL REFERENCES background_jobs(id) ON DELETE CASCADE,
+          state TEXT NOT NULL,
+          message TEXT NOT NULL,
+          current INTEGER NOT NULL DEFAULT 0,
+          total INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_background_job_events_job ON background_job_events(job_id, id DESC);
         ",
     )
     .map_err(|e| e.to_string())?;
@@ -460,6 +573,22 @@ mod tests {
             .unwrap();
         assert_eq!(face_count, 1);
     }
+
+    #[test]
+    fn recovery_marks_incomplete_jobs_failed() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrate(&connection).unwrap();
+        connection.execute("INSERT INTO background_jobs(id, kind, state, payload_json, message, created_at, updated_at) VALUES('job', 'catalog_scan', 'running', '{}', 'Scanning', 0, 0)", []).unwrap();
+        recover_interrupted_jobs(&connection).unwrap();
+        let state: String = connection
+            .query_row(
+                "SELECT state FROM background_jobs WHERE id = 'job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "failed");
+    }
 }
 
 fn library_info(conn: &Connection, db_path: &Path) -> Result<LibraryInfo, String> {
@@ -474,6 +603,16 @@ fn library_info(conn: &Connection, db_path: &Path) -> Result<LibraryInfo, String
         db_path: db_path.to_string_lossy().into_owned(),
         schema_version: SCHEMA_VERSION,
     })
+}
+
+fn recover_interrupted_jobs(conn: &Connection) -> Result<(), String> {
+    let now = now_secs();
+    conn.execute(
+        "UPDATE background_jobs SET state = 'failed', message = 'Interrupted by application restart', error = 'The application stopped before this job completed', updated_at = ?1, completed_at = ?1 WHERE state IN ('running', 'paused', 'cancelling')",
+        [now],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn default_library_dir(app_handle: &AppHandle, library_id: &str) -> Result<PathBuf, String> {
@@ -527,6 +666,7 @@ pub fn open_library(
     }
     let conn = open_connection(&db_path)?;
     migrate(&conn)?;
+    recover_interrupted_jobs(&conn)?;
     let info = library_info(&conn, &db_path)?;
     *state.active_library_path.lock().unwrap() = Some(db_path);
     Ok(info)
@@ -559,6 +699,7 @@ pub fn get_active_library(
     }
     let conn = open_connection(&path)?;
     migrate(&conn)?;
+    recover_interrupted_jobs(&conn)?;
     library_info(&conn, &path).map(Some)
 }
 
@@ -1425,7 +1566,22 @@ pub fn start_catalog_scan(
             |row| row.get::<_, String>(0),
         )
         .map_err(|e| e.to_string())?;
+    let job_id = {
+        let conn = open_connection(&db_path)?;
+        create_catalog_scan_job(&conn, root_id, recursive)?
+    };
     control.begin(root_id)?;
+    *control.active_job_id.lock().unwrap() = Some(job_id.clone());
+    update_job(
+        &db_path,
+        &job_id,
+        "running",
+        "Starting catalog scan",
+        0,
+        0,
+        None,
+        None,
+    )?;
     let _ = app_handle.emit(
         "catalog-scan-progress",
         CatalogScanProgress {
@@ -1446,18 +1602,49 @@ pub fn start_catalog_scan(
             root_id,
             recursive,
             &app_for_task,
-            db_path,
+            db_path.clone(),
             control.clone(),
             |progress| {
+                let state = if progress.message == "Indexing paused" {
+                    "paused"
+                } else {
+                    "running"
+                };
+                let _ = update_job(
+                    &db_path,
+                    &job_id,
+                    state,
+                    &progress.message,
+                    progress.current as i64,
+                    progress.total as i64,
+                    progress.current_path.as_deref(),
+                    None,
+                );
                 let _ = app_for_task.emit("catalog-scan-progress", progress);
             },
         );
         control.finish(root_id);
         match result {
             Ok(scan) => {
+                let _ = update_job(
+                    &db_path,
+                    &job_id,
+                    "completed",
+                    "Catalog scan complete",
+                    scan.scanned as i64,
+                    scan.scanned as i64,
+                    None,
+                    None,
+                );
                 let _ = app_for_task.emit("catalog-scan-complete", scan);
             }
             Err(err) => {
+                let state = if err == "Catalog scan cancelled" {
+                    "cancelled"
+                } else {
+                    "failed"
+                };
+                let _ = update_job(&db_path, &job_id, state, &err, 0, 0, None, Some(&err));
                 let _ = app_for_task.emit(
                     "catalog-scan-error",
                     serde_json::json!({ "rootId": root_id, "error": err }),
@@ -1480,6 +1667,24 @@ pub fn pause_catalog_scan(state: tauri::State<'_, crate::AppState>) -> Result<()
         return Err("No catalog scan is running".to_string());
     }
     *state.catalog_scan_control.paused.lock().unwrap() = true;
+    if let Some(job_id) = state
+        .catalog_scan_control
+        .active_job_id
+        .lock()
+        .unwrap()
+        .clone()
+    {
+        update_job(
+            &active_library_path(&state)?,
+            &job_id,
+            "paused",
+            "Indexing paused",
+            0,
+            0,
+            None,
+            None,
+        )?;
+    }
     Ok(())
 }
 
@@ -1496,6 +1701,24 @@ pub fn resume_catalog_scan(state: tauri::State<'_, crate::AppState>) -> Result<(
     }
     *state.catalog_scan_control.paused.lock().unwrap() = false;
     state.catalog_scan_control.cvar.notify_all();
+    if let Some(job_id) = state
+        .catalog_scan_control
+        .active_job_id
+        .lock()
+        .unwrap()
+        .clone()
+    {
+        update_job(
+            &active_library_path(&state)?,
+            &job_id,
+            "running",
+            "Resuming catalog scan",
+            0,
+            0,
+            None,
+            None,
+        )?;
+    }
     Ok(())
 }
 
@@ -1516,7 +1739,78 @@ pub fn cancel_catalog_scan(state: tauri::State<'_, crate::AppState>) -> Result<(
         .store(true, Ordering::SeqCst);
     *state.catalog_scan_control.paused.lock().unwrap() = false;
     state.catalog_scan_control.cvar.notify_all();
+    if let Some(job_id) = state
+        .catalog_scan_control
+        .active_job_id
+        .lock()
+        .unwrap()
+        .clone()
+    {
+        update_job(
+            &active_library_path(&state)?,
+            &job_id,
+            "cancelling",
+            "Cancelling catalog scan",
+            0,
+            0,
+            None,
+            None,
+        )?;
+    }
     Ok(())
+}
+
+fn read_background_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<BackgroundJob> {
+    Ok(BackgroundJob {
+        id: row.get(0)?,
+        kind: row.get(1)?,
+        state: row.get(2)?,
+        root_id: row.get(3)?,
+        current: row.get(4)?,
+        total: row.get(5)?,
+        current_item: row.get(6)?,
+        message: row.get(7)?,
+        error: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
+#[tauri::command]
+pub fn list_background_jobs(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<BackgroundJob>, String> {
+    let conn = open_connection(&active_library_path(&state)?)?;
+    let mut statement = conn.prepare("SELECT id, kind, state, root_id, current, total, current_item, message, error, created_at, updated_at FROM background_jobs ORDER BY CASE WHEN state IN ('running', 'paused', 'cancelling') THEN 0 ELSE 1 END, updated_at DESC LIMIT 100").map_err(|error| error.to_string())?;
+    statement
+        .query_map([], read_background_job)
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn list_background_job_events(
+    job_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<BackgroundJobEvent>, String> {
+    let conn = open_connection(&active_library_path(&state)?)?;
+    let mut statement = conn.prepare("SELECT id, job_id, state, message, current, total, created_at FROM background_job_events WHERE job_id = ?1 ORDER BY id DESC LIMIT 200").map_err(|error| error.to_string())?;
+    statement
+        .query_map([job_id], |row| {
+            Ok(BackgroundJobEvent {
+                id: row.get(0)?,
+                job_id: row.get(1)?,
+                state: row.get(2)?,
+                message: row.get(3)?,
+                current: row.get(4)?,
+                total: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
 }
 
 fn color_label_from_tags(tags: Option<&Vec<String>>) -> Option<String> {

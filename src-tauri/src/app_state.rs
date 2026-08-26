@@ -109,6 +109,7 @@ pub struct ThumbnailManager {
 
 pub struct CatalogScanControl {
     pub active_root_id: Mutex<Option<i64>>,
+    pub active_job_id: Mutex<Option<String>>,
     pub paused: Mutex<bool>,
     pub cancelled: AtomicBool,
     pub cvar: Condvar,
@@ -118,6 +119,7 @@ impl CatalogScanControl {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             active_root_id: Mutex::new(None),
+            active_job_id: Mutex::new(None),
             paused: Mutex::new(false),
             cancelled: AtomicBool::new(false),
             cvar: Condvar::new(),
@@ -141,7 +143,9 @@ impl CatalogScanControl {
         if *active_root_id == Some(root_id) {
             *active_root_id = None;
             *self.paused.lock().unwrap() = false;
+            *self.active_job_id.lock().unwrap() = None;
             self.cancelled.store(false, Ordering::SeqCst);
+            *self.active_job_id.lock().unwrap() = None;
             self.cvar.notify_all();
         }
     }
