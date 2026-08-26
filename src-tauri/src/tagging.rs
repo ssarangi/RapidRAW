@@ -54,9 +54,28 @@ pub async fn start_catalog_ai_tagging(
     .map_err(|error| error.to_string())?;
     let worker_db_path = db_path.clone();
     let worker_job_id = job_id.clone();
+    let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    state
+        .background_job_cancellations
+        .lock()
+        .unwrap()
+        .insert(job_id.clone(), cancellation.clone());
     tauri::async_runtime::spawn_blocking(move || {
         let total = candidates.len() as i64;
         for (index, (image_id, path, modified)) in candidates.into_iter().enumerate() {
+            if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = crate::library_db::update_job(
+                    &worker_db_path,
+                    &worker_job_id,
+                    "cancelled",
+                    "Catalog AI tagging cancelled",
+                    index as i64,
+                    total,
+                    None,
+                    None,
+                );
+                return;
+            }
             let current = index as i64 + 1;
             let _ = crate::library_db::update_job(
                 &worker_db_path,
