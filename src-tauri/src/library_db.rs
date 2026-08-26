@@ -2067,6 +2067,56 @@ pub fn cancel_background_job(
     )
 }
 
+#[tauri::command]
+pub fn pause_background_job(
+    job_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let token = state
+        .background_job_pauses
+        .lock()
+        .unwrap()
+        .get(&job_id)
+        .cloned()
+        .ok_or_else(|| "This job cannot be paused after an application restart".to_string())?;
+    token.store(true, Ordering::SeqCst);
+    update_job(
+        &active_library_path(&state)?,
+        &job_id,
+        "paused",
+        "Pause requested",
+        0,
+        0,
+        None,
+        None,
+    )
+}
+
+#[tauri::command]
+pub fn resume_background_job(
+    job_id: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let token = state
+        .background_job_pauses
+        .lock()
+        .unwrap()
+        .get(&job_id)
+        .cloned()
+        .ok_or_else(|| "This job cannot be resumed after an application restart".to_string())?;
+    token.store(false, Ordering::SeqCst);
+    update_job(
+        &active_library_path(&state)?,
+        &job_id,
+        "running",
+        "Resume requested",
+        0,
+        0,
+        None,
+        None,
+    )
+}
+
 fn color_label_from_tags(tags: Option<&Vec<String>>) -> Option<String> {
     tags.and_then(|items| {
         items

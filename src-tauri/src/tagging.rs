@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokenizers::Tokenizer;
 use tokio::task::JoinHandle;
@@ -90,9 +91,28 @@ pub async fn start_catalog_ai_tagging(
         .lock()
         .unwrap()
         .insert(job_id.clone(), cancellation.clone());
+    let pause = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    state
+        .background_job_pauses
+        .lock()
+        .unwrap()
+        .insert(job_id.clone(), pause.clone());
     tauri::async_runtime::spawn_blocking(move || {
         let total = candidates.len() as i64;
         for (index, (image_id, path, modified)) in candidates.into_iter().enumerate() {
+            while pause.load(std::sync::atomic::Ordering::SeqCst) {
+                let _ = crate::library_db::update_job(
+                    &worker_db_path,
+                    &worker_job_id,
+                    "paused",
+                    "AI tagging paused",
+                    index as i64,
+                    total,
+                    None,
+                    None,
+                );
+                std::thread::sleep(Duration::from_millis(200));
+            }
             if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
                 let _ = crate::library_db::update_job(
                     &worker_db_path,

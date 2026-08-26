@@ -302,6 +302,9 @@ export default function BottomBar({
       console.error('Failed to cancel background job:', error);
     }
   };
+  const handlePauseBackgroundJob = async (jobId: string, resume: boolean) => {
+    try { await invoke(resume ? Invokes.ResumeBackgroundJob : Invokes.PauseBackgroundJob, { jobId }); setBackgroundJobs((jobs) => jobs.map((job) => job.id === jobId ? { ...job, state: resume ? 'running' : 'paused', message: resume ? 'Resume requested' : 'Pause requested' } : job)); } catch (error) { console.error('Failed to update background job:', error); }
+  };
 
   useEffect(() => {
     if (!isCatalogScanModalOpen) return;
@@ -930,6 +933,7 @@ export default function BottomBar({
                             <Text variant={TextVariants.small}>{job.kind === 'catalog_scan' ? 'Catalog scan' : job.kind}</Text>
                             <div className="flex items-center gap-2">
                               <Text variant={TextVariants.small} color={job.state === 'failed' ? TextColors.error : job.state === 'completed' ? TextColors.success : TextColors.accent}>{job.state}</Text>
+                              {['running', 'paused'].includes(job.state) && <button className="p-1 text-text-secondary hover:bg-bg-primary rounded" onClick={() => void handlePauseBackgroundJob(job.id, job.state === 'paused')} data-tooltip={job.state === 'paused' ? 'Resume job' : 'Pause job'}>{job.state === 'paused' ? <Play size={13} /> : <Pause size={13} />}</button>}
                               {['queued', 'running', 'paused'].includes(job.state) && (
                                 <button className="p-1 text-red-300 hover:bg-red-500/10 rounded" onClick={() => void handleCancelBackgroundJob(job.id)} data-tooltip="Cancel job">
                                   <Square size={13} />
