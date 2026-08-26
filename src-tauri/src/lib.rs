@@ -19,6 +19,7 @@ mod culling;
 mod denoising;
 mod exif_processing;
 mod export_processing;
+mod face_detection;
 mod face_model_registry;
 mod file_management;
 mod focus_stacking;
@@ -2346,6 +2347,7 @@ pub fn run() {
             face_model_registry::list_face_model_packs,
             face_model_registry::list_face_model_pack_statuses,
             face_model_registry::download_face_model_pack,
+            face_detection::start_face_detection,
             ai_commands::generate_ai_subject_mask,
             ai_commands::precompute_ai_subject_mask,
             ai_commands::generate_ai_foreground_mask,

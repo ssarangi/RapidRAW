@@ -274,6 +274,19 @@ fn pack_dir(app_handle: &AppHandle, pack_id: &str) -> Result<PathBuf, String> {
     Ok(face_models_dir(app_handle)?.join(pack_id))
 }
 
+pub(crate) fn installed_face_model_path(
+    app_handle: &AppHandle,
+    pack_id: &str,
+    file_name: &str,
+) -> Result<PathBuf, String> {
+    let path = pack_dir(app_handle, pack_id)?.join(file_name);
+    if path.exists() {
+        Ok(path)
+    } else {
+        Err(format!("Face model {pack_id} is not installed"))
+    }
+}
+
 fn installed_manifest_path(pack_dir: &Path) -> PathBuf {
     pack_dir.join("rapidraw-face-model.json")
 }

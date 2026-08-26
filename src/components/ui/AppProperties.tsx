@@ -119,6 +119,7 @@ export enum Invokes {
   ListBackgroundJobs = 'list_background_jobs',
   ListBackgroundJobEvents = 'list_background_job_events',
   CancelBackgroundJob = 'cancel_background_job',
+  StartFaceDetection = 'start_face_detection',
   GenerateAllCommunityPreviews = 'generate_all_community_previews',
   SaveCommunityPreset = 'save_community_preset',
   SaveTempFile = 'save_temp_file',

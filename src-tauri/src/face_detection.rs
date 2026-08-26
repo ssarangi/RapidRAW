@@ -1,0 +1,279 @@
+use std::path::Path;
+use std::sync::atomic::Ordering;
+
+use image::{DynamicImage, imageops::FilterType};
+use ndarray::Array4;
+use ort::session::Session;
+use ort::value::Tensor;
+use rusqlite::params;
+use tauri::{AppHandle, Emitter};
+
+use crate::library_db::{active_library_path, create_background_job, update_job};
+
+const YUNET_MODEL: &str = "face_detection_yunet_2023mar.onnx";
+const INPUT_SIZE: u32 = 320;
+
+#[derive(Debug, Clone)]
+struct Detection {
+    confidence: f32,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    landmarks: [[f32; 2]; 5],
+}
+
+fn intersection_over_union(a: &Detection, b: &Detection) -> f32 {
+    let left = a.x.max(b.x);
+    let top = a.y.max(b.y);
+    let right = (a.x + a.width).min(b.x + b.width);
+    let bottom = (a.y + a.height).min(b.y + b.height);
+    let intersection = (right - left).max(0.0) * (bottom - top).max(0.0);
+    intersection / (a.width * a.height + b.width * b.height - intersection).max(f32::EPSILON)
+}
+
+fn detect_yunet(image: DynamicImage, session: &mut Session) -> Result<Vec<Detection>, String> {
+    let (original_width, original_height) = (image.width(), image.height());
+    if original_width == 0 || original_height == 0 {
+        return Ok(Vec::new());
+    }
+    let resized = image
+        .resize_exact(INPUT_SIZE, INPUT_SIZE, FilterType::Triangle)
+        .to_rgb8();
+    let mut input = Array4::<f32>::zeros((1, 3, INPUT_SIZE as usize, INPUT_SIZE as usize));
+    for (x, y, pixel) in resized.enumerate_pixels() {
+        input[[0, 0, y as usize, x as usize]] = pixel[2] as f32;
+        input[[0, 1, y as usize, x as usize]] = pixel[1] as f32;
+        input[[0, 2, y as usize, x as usize]] = pixel[0] as f32;
+    }
+    let outputs = session
+        .run(ort::inputs![
+            Tensor::from_array(input).map_err(|error| error.to_string())?
+        ])
+        .map_err(|error| error.to_string())?;
+    let values = outputs[0]
+        .try_extract_array::<f32>()
+        .map_err(|error| error.to_string())?
+        .to_owned();
+    let rows = values
+        .into_dimensionality::<ndarray::Ix3>()
+        .map_err(|error| format!("Unexpected YuNet output shape: {error}"))?;
+    let mut candidates = Vec::new();
+    for row in rows.index_axis(ndarray::Axis(0), 0).outer_iter() {
+        if row.len() < 15 || row[14] < 0.7 {
+            continue;
+        }
+        let scale_x = original_width as f32 / INPUT_SIZE as f32;
+        let scale_y = original_height as f32 / INPUT_SIZE as f32;
+        let x = (row[0] * scale_x).max(0.0);
+        let y = (row[1] * scale_y).max(0.0);
+        let width = (row[2] * scale_x).min(original_width as f32 - x).max(0.0);
+        let height = (row[3] * scale_y).min(original_height as f32 - y).max(0.0);
+        if width < 4.0 || height < 4.0 {
+            continue;
+        }
+        let mut landmarks = [[0.0; 2]; 5];
+        for index in 0..5 {
+            landmarks[index] = [
+                row[4 + index * 2] * scale_x / original_width as f32,
+                row[5 + index * 2] * scale_y / original_height as f32,
+            ];
+        }
+        candidates.push(Detection {
+            confidence: row[14],
+            x: x / original_width as f32,
+            y: y / original_height as f32,
+            width: width / original_width as f32,
+            height: height / original_height as f32,
+            landmarks,
+        });
+    }
+    candidates.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
+    let mut accepted = Vec::new();
+    for candidate in candidates {
+        if accepted
+            .iter()
+            .all(|existing| intersection_over_union(existing, &candidate) < 0.3)
+        {
+            accepted.push(candidate);
+        }
+    }
+    Ok(accepted)
+}
+
+#[tauri::command]
+pub fn start_face_detection(
+    root_id: Option<i64>,
+    app_handle: AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<String, String> {
+    let db_path = active_library_path(&state)?;
+    let model_path = crate::face_model_registry::installed_face_model_path(
+        &app_handle,
+        "opencv-yunet-sface",
+        YUNET_MODEL,
+    )?;
+    let job_id = create_background_job(
+        &db_path,
+        "face_detection",
+        serde_json::json!({ "rootId": root_id, "modelPackId": "opencv-yunet-sface" }),
+    )?;
+    let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    state
+        .background_job_cancellations
+        .lock()
+        .unwrap()
+        .insert(job_id.clone(), cancellation.clone());
+    let app = app_handle.clone();
+    let event_job_id = job_id.clone();
+    let worker_job_id = job_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = run_face_detection(
+            &db_path,
+            root_id,
+            &model_path,
+            &worker_job_id,
+            &cancellation,
+        );
+        if let Err(error) = result {
+            let job_state = if error == "Face detection cancelled" {
+                "cancelled"
+            } else {
+                "failed"
+            };
+            let _ = update_job(
+                &db_path,
+                &worker_job_id,
+                job_state,
+                &error,
+                0,
+                0,
+                None,
+                Some(&error),
+            );
+        }
+        let _ = app.emit(
+            "face-detection-complete",
+            serde_json::json!({ "jobId": event_job_id }),
+        );
+    });
+    Ok(job_id)
+}
+
+fn run_face_detection(
+    db_path: &Path,
+    root_id: Option<i64>,
+    model_path: &Path,
+    job_id: &str,
+    cancellation: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(), String> {
+    let conn = rusqlite::Connection::open(db_path).map_err(|error| error.to_string())?;
+    let mut sql = "SELECT i.id, r.absolute_path, i.relative_path FROM images i JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present'".to_string();
+    if root_id.is_some() {
+        sql.push_str(" AND i.root_id = ?1");
+    }
+    let mut statement = conn.prepare(&sql).map_err(|error| error.to_string())?;
+    let images: Vec<(i64, String, String)> = if let Some(root_id) = root_id {
+        statement
+            .query_map([root_id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|error| error.to_string())?
+    } else {
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<_, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    let total = images.len() as i64;
+    update_job(
+        db_path,
+        job_id,
+        "running",
+        "Loading YuNet face detector",
+        0,
+        total,
+        None,
+        None,
+    )?;
+    let _ = ort::init().with_name("RapidRAW-FaceDetection").commit();
+    let mut session = Session::builder()
+        .map_err(|error| error.to_string())?
+        .commit_from_file(model_path)
+        .map_err(|error| error.to_string())?;
+    for (index, (image_id, root, relative)) in images.into_iter().enumerate() {
+        if cancellation.load(Ordering::SeqCst) {
+            return Err("Face detection cancelled".to_string());
+        }
+        let path = Path::new(&root).join(&relative);
+        let current = index as i64 + 1;
+        let _ = update_job(
+            db_path,
+            job_id,
+            "running",
+            "Detecting faces",
+            current,
+            total,
+            Some(&path.to_string_lossy()),
+            None,
+        );
+        let detections = match image::open(&path) {
+            Ok(image) => detect_yunet(image, &mut session)?,
+            Err(_) => continue,
+        };
+        conn.execute("DELETE FROM faces WHERE image_id = ?1 AND model_pack_id = 'opencv-yunet-sface' AND source = 'local' AND review_state = 'unreviewed'", [image_id]).map_err(|error| error.to_string())?;
+        for detection in detections {
+            conn.execute("INSERT INTO faces(image_id, model_pack_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, landmarks_json, review_state, source, created_at, updated_at) VALUES(?1, 'opencv-yunet-sface', ?2, ?3, ?4, ?5, ?6, ?7, 'unreviewed', 'local', strftime('%s','now'), strftime('%s','now'))", params![image_id, detection.confidence, detection.x, detection.y, detection.width, detection.height, serde_json::to_string(&detection.landmarks).map_err(|error| error.to_string())?]).map_err(|error| error.to_string())?;
+        }
+    }
+    update_job(
+        db_path,
+        job_id,
+        "completed",
+        "Face detection complete",
+        total,
+        total,
+        None,
+        None,
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn overlap_measure_is_high_for_same_face() {
+        let face = Detection {
+            confidence: 0.9,
+            x: 0.1,
+            y: 0.1,
+            width: 0.3,
+            height: 0.3,
+            landmarks: [[0.0; 2]; 5],
+        };
+        let overlapping = Detection {
+            confidence: 0.8,
+            x: 0.12,
+            y: 0.12,
+            width: 0.3,
+            height: 0.3,
+            landmarks: [[0.0; 2]; 5],
+        };
+        assert!(intersection_over_union(&face, &overlapping) > 0.3);
+    }
+}
