@@ -23,7 +23,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { useTranslation } from 'react-i18next';
 
 import Filmstrip from './Filmstrip';
-import { GLOBAL_KEYS, ImageFile, Invokes, SelectedImage, ThumbnailAspectRatio } from '../ui/AppProperties';
+import { BackgroundJob, GLOBAL_KEYS, ImageFile, Invokes, SelectedImage, ThumbnailAspectRatio } from '../ui/AppProperties';
 import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
 import { useEditorStore } from '../../store/useEditorStore';
@@ -235,6 +235,8 @@ export default function BottomBar({
 
   const [isFilterExpanded, setIsFilterExpanded] = useState(false);
   const [isCatalogScanModalOpen, setIsCatalogScanModalOpen] = useState(false);
+  const [backgroundJobs, setBackgroundJobs] = useState<BackgroundJob[]>([]);
+  const [backgroundJobsError, setBackgroundJobsError] = useState<string | null>(null);
   const { catalogScan, catalogScanThumbnail } = useProcessStore(
     useShallow((state) => ({
       catalogScan: state.catalogScan,
@@ -289,6 +291,28 @@ export default function BottomBar({
       console.error('Failed to cancel catalog scan:', err);
     }
   };
+
+  useEffect(() => {
+    if (!isCatalogScanModalOpen) return;
+    let active = true;
+    const loadJobs = async () => {
+      try {
+        const jobs = await invoke<BackgroundJob[]>(Invokes.ListBackgroundJobs);
+        if (active) {
+          setBackgroundJobs(jobs);
+          setBackgroundJobsError(null);
+        }
+      } catch (error) {
+        if (active) setBackgroundJobsError(String(error));
+      }
+    };
+    void loadJobs();
+    const timer = window.setInterval(() => void loadJobs(), 1500);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [isCatalogScanModalOpen]);
 
   useEffect(() => {
     if (isZoomReady && !isDraggingSlider.current) {
@@ -595,7 +619,7 @@ export default function BottomBar({
             </div>
           </div>
 
-          {(catalogScan.isActive || catalogScan.error) && (
+          {(catalogScan.isActive || catalogScan.error || isLibraryView) && (
             <>
               <div className="h-5 w-px bg-surface"></div>
               <button
@@ -621,7 +645,9 @@ export default function BottomBar({
                       ? `Indexing paused ${catalogScan.current}/${catalogScan.total || '?'}`
                       : catalogScan.total > 0
                         ? `Indexing collection ${catalogScan.current}/${catalogScan.total}${catalogScanFileName ? ` · ${catalogScanFileName}` : ''}`
-                        : 'Preparing collection indexing'}
+                        : backgroundJobs.length > 0
+                          ? `${backgroundJobs.filter((job) => ['running', 'paused', 'cancelling'].includes(job.state)).length} active background jobs`
+                          : 'Background jobs'}
                 </Text>
                 {catalogScanPercent !== null && (
                   <span className="text-[11px] text-text-secondary tabular-nums shrink-0">{catalogScanPercent}%</span>
@@ -763,7 +789,7 @@ export default function BottomBar({
             >
               <div className="flex items-start justify-between gap-4 mb-4">
                 <div>
-                  <Text variant={TextVariants.heading}>Collection Indexing</Text>
+                  <Text variant={TextVariants.heading}>Background Jobs</Text>
                   <Text variant={TextVariants.small} color={TextColors.secondary}>
                     {catalogScan.rootPath || 'No active collection'}
                   </Text>
@@ -874,6 +900,32 @@ export default function BottomBar({
                       </div>
                     </div>
                   </div>
+                </div>
+
+                <div className="rounded-md border border-border-color bg-bg-primary overflow-hidden">
+                  <div className="px-3 py-2 border-b border-border-color flex justify-between items-center">
+                    <Text variant={TextVariants.label}>Recent Jobs</Text>
+                    <Text variant={TextVariants.small} color={TextColors.secondary}>{backgroundJobs.length}</Text>
+                  </div>
+                  {backgroundJobsError ? (
+                    <Text variant={TextVariants.small} className="p-3 text-red-300">{backgroundJobsError}</Text>
+                  ) : backgroundJobs.length === 0 ? (
+                    <Text variant={TextVariants.small} className="p-3">No catalog jobs have run in this library.</Text>
+                  ) : (
+                    <div className="max-h-48 overflow-y-auto">
+                      {backgroundJobs.map((job) => (
+                        <div key={job.id} className="px-3 py-2 border-b border-border-color last:border-b-0">
+                          <div className="flex gap-3 justify-between">
+                            <Text variant={TextVariants.small}>{job.kind === 'catalog_scan' ? 'Catalog scan' : job.kind}</Text>
+                            <Text variant={TextVariants.small} color={job.state === 'failed' ? TextColors.error : job.state === 'completed' ? TextColors.success : TextColors.accent}>{job.state}</Text>
+                          </div>
+                          <Text variant={TextVariants.small} color={TextColors.secondary} className="truncate">{job.message}</Text>
+                          {job.total > 0 && <Text variant={TextVariants.small} color={TextColors.secondary}>{job.current}/{job.total}</Text>}
+                          {job.error && <Text variant={TextVariants.small} className="text-red-300 truncate">{job.error}</Text>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             </motion.div>

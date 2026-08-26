@@ -419,6 +419,30 @@ export interface FaceModelPackStatus {
   installedArtifacts: InstalledFaceModelArtifact[];
 }
 
+export interface BackgroundJob {
+  id: string;
+  kind: string;
+  state: 'queued' | 'running' | 'paused' | 'cancelling' | 'cancelled' | 'completed' | 'failed';
+  rootId?: number | null;
+  current: number;
+  total: number;
+  currentItem?: string | null;
+  message: string;
+  error?: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface BackgroundJobEvent {
+  id: number;
+  jobId: string;
+  state: string;
+  message: string;
+  current: number;
+  total: number;
+  createdAt: number;
+}
+
 export interface CatalogSearchQuery {
   rootId?: number | null;
   text?: string | null;
