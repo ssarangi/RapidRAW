@@ -954,6 +954,16 @@ This first pair proves alignment, persistence, review, model migration, and UI b
 - Persist cull sessions and build Grid, Loupe, and Compare review views.
 - Keep results non-destructive.
 
+### Visual Tagging And Wildlife Identification
+
+- Add RAM++ as the first local broad-tagging adapter for concepts such as animal, bird, tree, lake, mountain, car, sky, and activity phrases. Store its results as AI tags with model/version/confidence provenance; never overwrite manual tags.
+- Use Tag2Text only as an optional captioning companion, not as the canonical keyword source.
+- Add BioCLIP as the biology-specific classifier. It should receive either the whole image or an automatically detected animal/bird crop and return ranked taxonomic candidates.
+- For bird photography, run bird detection/cropping before species classification. Present top-k common and scientific names with confidence, taxonomy, and an explicit `Uncertain` outcome; do not silently apply species tags below a calibrated threshold.
+- Support regional candidate lists derived from capture GPS/date, but preserve a global mode and clearly mark regional filtering as a ranking aid rather than proof of identification.
+- Evaluate a packaged ONNX BioCLIP export or a sidecar adapter first. The Rust core should consume a stable embedding/classifier interface so a specialist bird model can later replace it for a chosen geography.
+- Add taxonomy fields to the catalog (`kingdom` through `species`, common name, model version, confidence, review state) and expose them as searchable facets and smart collections.
+
 ### Phase 6: Culling Personalization
 
 - Record pairwise decisions and overrides.
