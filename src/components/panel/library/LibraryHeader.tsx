@@ -790,6 +790,14 @@ export function CatalogAiTaggingButton() {
   );
 }
 
+export function CatalogAiTagReviewButton() {
+  const [items, setItems] = useState<Array<{ id: number; tag: string }>>([]);
+  const [open, setOpen] = useState(false);
+  const load = async () => setItems(await invoke(Invokes.ListSuggestedAiTags));
+  const review = async (id: number, reviewState: 'accepted' | 'rejected') => { await invoke(Invokes.ReviewAiTag, { id, reviewState }); await load(); };
+  return <div className="relative"><Button className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center" onClick={() => { setOpen(!open); if (!open) void load(); }} data-tooltip="Review AI tag suggestions"><Tags className="w-5 h-5" /></Button>{open && <div className="absolute right-0 mt-2 w-72 max-h-80 overflow-y-auto z-50 bg-surface border border-border-color rounded-md shadow-xl p-3"><Text variant={TextVariants.small}>AI tag suggestions</Text>{items.length === 0 ? <Text variant={TextVariants.small} color={TextColors.secondary}>No suggestions to review</Text> : items.map((item) => <div key={item.id} className="flex items-center justify-between gap-2 py-2 border-b border-border-color/40"><Text variant={TextVariants.small}>{item.tag}</Text><div className="flex gap-1"><button className="text-green-300 text-xs" onClick={() => void review(item.id, 'accepted')}>Accept</button><button className="text-red-300 text-xs" onClick={() => void review(item.id, 'rejected')}>Reject</button></div></div>)}</div>}</div>;
+}
+
 const groupingOptionKeys = [
   { key: 'off' as GroupingMode, labelKey: 'library.header.viewOptions.groupOff' as const },
   { key: 'raw' as GroupingMode, labelKey: 'library.header.viewOptions.groupPreferRaw' as const },
