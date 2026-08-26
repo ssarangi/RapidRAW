@@ -18,7 +18,7 @@ use crate::file_management::{ImageFile, parse_virtual_path};
 use crate::file_management::{assign_group_ids, read_file_mapped};
 use crate::formats::{is_raw_file, is_supported_image_file};
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -505,6 +505,20 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           PRIMARY KEY(image_id, tag_id, model_id, model_revision)
         );
         CREATE INDEX IF NOT EXISTS idx_image_ai_tags_tag ON image_ai_tags(tag_id, review_state, confidence DESC);
+
+        CREATE TABLE IF NOT EXISTS image_ai_analysis_state (
+          image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+          analysis_kind TEXT NOT NULL,
+          model_id TEXT NOT NULL,
+          model_revision TEXT NOT NULL,
+          image_modified_at INTEGER NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('pending', 'processing', 'completed', 'failed', 'skipped')),
+          error_message TEXT,
+          processed_at INTEGER,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(image_id, analysis_kind, model_id, model_revision, image_modified_at)
+        );
+        CREATE INDEX IF NOT EXISTS idx_image_ai_analysis_pending ON image_ai_analysis_state(analysis_kind, model_id, state);
         ",
     )
     .map_err(|e| e.to_string())?;
