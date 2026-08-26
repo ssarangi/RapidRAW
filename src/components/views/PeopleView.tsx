@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { ScanFace, Users, X } from 'lucide-react';
+import { ScanFace, ScanSearch, Users, X } from 'lucide-react';
 import Button from '../ui/Button';
 import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
@@ -14,6 +14,7 @@ export default function PeopleView() {
   const [faces, setFaces] = useState<FaceItem[]>([]);
   const [message, setMessage] = useState('');
   const [starting, setStarting] = useState(false);
+  const [recognizing, setRecognizing] = useState(false);
   const [people, setPeople] = useState<Person[]>([]);
   const [name, setName] = useState('');
   const load = async () => {
@@ -27,10 +28,15 @@ export default function PeopleView() {
     try { await invoke(Invokes.StartFaceDetection, { rootId: null }); } catch (error) { setMessage(String(error)); }
     finally { setStarting(false); }
   };
+  const recognize = async () => {
+    setRecognizing(true); setMessage('Starting face recognition. Progress is available in Background Jobs.');
+    try { await invoke(Invokes.StartFaceRecognition, { rootId: null }); } catch (error) { setMessage(String(error)); }
+    finally { setRecognizing(false); }
+  };
   return <div className="flex-1 overflow-y-auto p-5">
     <div className="flex flex-wrap justify-between gap-4 mb-6">
       <div><Text variant={TextVariants.title} color={TextColors.accent}>People</Text><Text variant={TextVariants.small}>Review detected faces and build your local people library.</Text></div>
-      <Button onClick={() => void scan()} disabled={starting}><ScanFace size={16} />{starting ? 'Starting Scan' : 'Scan Faces'}</Button>
+      <div className="flex gap-2"><Button onClick={() => void recognize()} disabled={recognizing}><ScanSearch size={16} />{recognizing ? 'Starting Recognition' : 'Recognize Faces'}</Button><Button onClick={() => void scan()} disabled={starting}><ScanFace size={16} />{starting ? 'Starting Scan' : 'Scan Faces'}</Button></div>
     </div>
     {message && <div className="mb-4 rounded-md border border-border-color bg-bg-primary p-3"><Text variant={TextVariants.small}>{message}</Text></div>}
     <div className="mb-5 flex flex-wrap gap-2"><input value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void createPerson(); }} placeholder="Add person" className="bg-bg-primary border border-border-color rounded-md px-3 py-2 text-sm" /><Button onClick={() => void createPerson()} disabled={!name.trim()}>Add Person</Button></div>
