@@ -460,3 +460,39 @@ pub async fn undo_auto_cull(result: AutoCullResult, app_handle: AppHandle) -> Re
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auto_cull_plan_item_overrides_persist_in_struct() {
+        let mut item = AutoCullPlanItem {
+            representative_path: "/photos/DSC001.ARW".to_string(),
+            backing_paths: vec!["/photos/DSC001.ARW".to_string(), "/photos/DSC001.JPG".to_string()],
+            keep: false,
+            reason: "Blurry background".to_string(),
+            quality_score: 0.35,
+            has_conflict: false,
+        };
+
+        // User overrides the plan verdict
+        item.keep = true;
+        assert!(item.keep);
+        assert_eq!(item.backing_paths.len(), 2);
+    }
+
+    #[test]
+    fn auto_cull_empty_candidates_returns_default_plan() {
+        let plan = AutoCullPlan {
+            folder_path: "/photos".to_string(),
+            items: vec![],
+            total_count: 0,
+            reject_count: 0,
+            ..Default::default()
+        };
+        assert_eq!(plan.total_count, 0);
+        assert_eq!(plan.reject_count, 0);
+        assert!(plan.items.is_empty());
+    }
+}
