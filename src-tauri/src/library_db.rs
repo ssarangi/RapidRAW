@@ -601,6 +601,14 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         );
         CREATE INDEX IF NOT EXISTS idx_image_ai_tags_tag ON image_ai_tags(tag_id, review_state, confidence DESC);
 
+        CREATE TABLE IF NOT EXISTS smart_collections (
+          id INTEGER PRIMARY KEY,
+          name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+          query_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS image_ai_analysis_state (
           image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
           analysis_kind TEXT NOT NULL,
@@ -669,6 +677,7 @@ mod tests {
             "face_scan_state",
             "face_clusters",
             "face_cluster_members",
+            "smart_collections",
         ] {
             let exists: i64 = connection
                 .query_row(
