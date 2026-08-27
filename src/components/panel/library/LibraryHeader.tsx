@@ -611,7 +611,7 @@ export function CatalogSearchDropdown() {
     const tags = form.tags.split(',').map((tag) => tag.trim()).filter(Boolean);
     const aiTags = form.aiTags.split(',').map((tag) => tag.trim()).filter(Boolean);
     const query: CatalogSearchQuery = { rootId: activeRoot?.id ?? null, text: form.text.trim() || null, year: form.year ? Number(form.year) : null, camera: form.camera || null, lens: form.lens || null, person: form.person || null, tags: tags.length ? tags : null, aiTags: aiTags.length ? aiTags : null, tagMode: tags.length > 1 ? 'AND' : null, minRating: form.minRating ? Number(form.minRating) : null, limit: 20_000 };
-    try { await invoke(Invokes.SaveSmartCollection, { name, queryJson: JSON.stringify(query) }); setCollectionName(''); toast.success('Smart collection saved.'); } catch (error) { toast.error(`Failed to save smart collection: ${error}`); }
+    try { await invoke(Invokes.SaveSmartCollection, { name, queryJson: JSON.stringify(query) }); window.dispatchEvent(new Event('smart-collections-changed')); setCollectionName(''); toast.success('Smart collection saved.'); } catch (error) { toast.error(`Failed to save smart collection: ${error}`); }
   };
 
   return (
@@ -847,6 +847,7 @@ export function SmartCollectionsDropdown() {
     try {
       await invoke(Invokes.DeleteSmartCollection, { id: collection.id });
       setCollections((current) => current.filter((candidate) => candidate.id !== collection.id));
+      window.dispatchEvent(new Event('smart-collections-changed'));
     } catch (error) {
       toast.error(`Failed to delete smart collection: ${error}`);
     }

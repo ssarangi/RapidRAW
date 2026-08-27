@@ -46,11 +46,13 @@ import {
   Album,
   CatalogFolderNode,
   CatalogRoot,
+  CatalogSearchQuery,
   ImageFile,
   Invokes,
   FolderTreeSort,
   LibraryViewMode,
   SortDirection,
+  SmartCollection,
 } from '../../ui/AppProperties';
 
 export interface FolderTree {
@@ -741,6 +743,8 @@ export default function FolderTree({
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
   const [catalogFolderTrees, setCatalogFolderTrees] = useState<Record<number, CatalogFolderNode>>({});
   const [loadingCatalogTreeIds, setLoadingCatalogTreeIds] = useState<Set<number>>(new Set());
+  const [smartCollections, setSmartCollections] = useState<SmartCollection[]>([]);
+  const [isLoadingSmartCollections, setIsLoadingSmartCollections] = useState(false);
   const pinnedFolders = appSettings?.pinnedFolders || [];
   const openSections = appSettings?.openTreeSections ?? ['pinned', 'current'];
   const showImageCounts = appSettings?.enableFolderImageCounts ?? false;
@@ -928,6 +932,28 @@ export default function FolderTree({
     });
   }, [librarySource.type, catalogRoots]);
 
+  const loadSmartCollections = async () => {
+    if (librarySource.type !== 'catalog') {
+      setSmartCollections([]);
+      return;
+    }
+    setIsLoadingSmartCollections(true);
+    try {
+      setSmartCollections(await invoke<SmartCollection[]>(Invokes.ListSmartCollections));
+    } catch (error) {
+      console.error('Failed to load smart collections:', error);
+    } finally {
+      setIsLoadingSmartCollections(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadSmartCollections();
+    const refresh = () => { void loadSmartCollections(); };
+    window.addEventListener('smart-collections-changed', refresh);
+    return () => window.removeEventListener('smart-collections-changed', refresh);
+  }, [librarySource.type]);
+
   const resolveCatalogFolderSelection = (path: string) => {
     const match = /^LibraryFolder:(\d+):(.*)$/.exec(path);
     if (!match) return null;
@@ -976,6 +1002,41 @@ export default function FolderTree({
     const selection = resolveCatalogFolderSelection(path);
     if (!selection) return;
     handleBrowseCatalogRoot(selection.root, selection.relativePath);
+  };
+
+  const handleSmartCollectionSelect = async (collection: SmartCollection) => {
+    let query: CatalogSearchQuery;
+    try {
+      query = JSON.parse(collection.queryJson) as CatalogSearchQuery;
+    } catch {
+      toast.error(`Smart collection "${collection.name}" has an invalid query.`);
+      return;
+    }
+    useLibraryStore.getState().setLibrary({ isViewLoading: true });
+    try {
+      const files = await invoke<ImageFile[]>(Invokes.SearchCatalogImages, { query });
+      const imageRatings: Record<string, number> = {};
+      files.forEach((file) => { imageRatings[file.path] = file.rating || 0; });
+      const root = catalogRoots.find((candidate) => candidate.id === query.rootId) || catalogRoots[0] || null;
+      useLibraryStore.getState().setLibrary({
+        rootPaths: root ? [root.absolutePath] : useLibraryStore.getState().rootPaths,
+        currentFolderPath: `Library: ${collection.name}`,
+        activeAlbumId: null,
+        activeCatalogRootId: root?.id ?? null,
+        imageList: files,
+        imageRatings,
+        multiSelectedPaths: [],
+        libraryActivePath: null,
+        libraryScrollTop: 0,
+      });
+      useLibraryStore.getState().setSearchCriteria({ text: '', tags: [], mode: 'OR' });
+      useUIStore.getState().setUI({ activeView: 'library' });
+    } catch (error) {
+      console.error('Failed to apply smart collection:', error);
+      toast.error(`Failed to apply smart collection: ${error}`);
+    } finally {
+      useLibraryStore.getState().setLibrary({ isViewLoading: false });
+    }
   };
 
   const handleCatalogContextMenu = (event: any) => {
@@ -1214,6 +1275,23 @@ export default function FolderTree({
                     </motion.div>
                   )}
                 </AnimatePresence>
+              </>
+            )}
+
+            {librarySource.type === 'catalog' && (
+              <>
+                <div><SectionHeader title="Smart Collections" isOpen={true} onToggle={() => {}} /></div>
+                <div className="pt-1 pb-2">
+                  {isLoadingSmartCollections ? (
+                    <Text as="div" variant={TextVariants.small} className="flex items-center gap-2 p-2 text-text-secondary"><Loader2 size={14} className="animate-spin" />Loading collections</Text>
+                  ) : smartCollections.length === 0 ? (
+                    <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="p-2">No saved searches</Text>
+                  ) : smartCollections.map((collection) => (
+                    <button key={collection.id} className="w-full flex items-center gap-2 p-2 rounded-md text-left text-text-secondary hover:bg-surface hover:text-text-primary" onClick={() => void handleSmartCollectionSelect(collection)}>
+                      <Star size={15} className="shrink-0" /><span className="truncate">{collection.name}</span>
+                    </button>
+                  ))}
+                </div>
               </>
             )}
 
