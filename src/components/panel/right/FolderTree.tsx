@@ -25,6 +25,7 @@ import {
   Database,
   RefreshCw,
   Loader2,
+  BarChart3,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
@@ -1004,7 +1005,7 @@ export default function FolderTree({
     >
       <div className="p-3 flex justify-between items-center shrink-0 border-b border-surface">
         <Text variant={TextVariants.title}>{t('library.folders.sourcesTitle', 'Sources')}</Text>
-        {librarySource.type === 'catalog' && <button className="p-2 rounded-md text-text-secondary hover:bg-surface hover:text-text-primary" onClick={() => useUIStore.getState().setUI({ activeView: 'people' })} data-tooltip="People"><Users size={17} /></button>}
+        {librarySource.type === 'catalog' && <div className="flex items-center"><button className="p-2 rounded-md text-text-secondary hover:bg-surface hover:text-text-primary" onClick={() => useUIStore.getState().setUI({ activeView: 'people' })} data-tooltip="People"><Users size={17} /></button><button className="p-2 rounded-md text-text-secondary hover:bg-surface hover:text-text-primary" onClick={() => useUIStore.getState().setUI({ activeView: 'insights' })} data-tooltip="Insights"><BarChart3 size={17} /></button></div>}
       </div>
 
       <div className="p-2 flex flex-col flex-1 min-h-0">

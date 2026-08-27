@@ -2,6 +2,7 @@ import { useShallow } from 'zustand/react/shallow';
 
 import CommunityPage from '../panel/CommunityPage';
 import PeopleView from './PeopleView';
+import InsightsView from './InsightsView';
 import MainLibrary from '../panel/MainLibrary';
 import BottomBar from '../panel/BottomBar';
 
@@ -121,7 +122,7 @@ export default function LibraryView({
   return (
     <div className="flex flex-row grow h-full min-h-0">
       <div className="flex-1 flex flex-col min-w-0 gap-2">
-        {activeView === 'people' ? <PeopleView /> : activeView === 'community' ? (
+        {activeView === 'people' ? <PeopleView /> : activeView === 'insights' ? <InsightsView /> : activeView === 'community' ? (
           <CommunityPage
             onBackToLibrary={() => setUI({ activeView: 'library' })}
             supportedTypes={supportedTypes}
