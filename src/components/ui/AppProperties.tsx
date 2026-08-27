@@ -112,6 +112,8 @@ export enum Invokes {
   ListFaceModelPacks = 'list_face_model_packs',
   ListFaceModelPackStatuses = 'list_face_model_pack_statuses',
   DownloadFaceModelPack = 'download_face_model_pack',
+  ListVisualModelPackStatuses = 'list_visual_model_pack_statuses',
+  DownloadVisualModelPack = 'download_visual_model_pack',
   ListCatalogPeople = 'list_catalog_people',
   ListSmartCollections = 'list_smart_collections',
   SaveSmartCollection = 'save_smart_collection',
@@ -436,6 +438,24 @@ export interface FaceModelPackStatus {
   installed: boolean;
   installPath: string;
   installedArtifacts: InstalledFaceModelArtifact[];
+}
+
+export interface VisualModelPack {
+  id: string;
+  displayName: string;
+  description: string;
+  task: string;
+  availability: 'directDownload' | 'bundleRequired';
+  artifacts: Array<{ fileName: string; sourceUrl: string }>;
+  licenseName: string;
+  licenseUrl: string;
+  modelSourceUrl: string;
+}
+
+export interface VisualModelPackStatus {
+  pack: VisualModelPack;
+  installed: boolean;
+  installPath: string;
 }
 
 export interface BackgroundJob {

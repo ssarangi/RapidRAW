@@ -43,6 +43,7 @@ mod preset_converter;
 mod raw_processing;
 mod tagging;
 mod tagging_utils;
+mod visual_model_registry;
 mod window_customizer;
 
 use std::collections::{HashMap, hash_map::DefaultHasher};
@@ -2348,6 +2349,8 @@ pub fn run() {
             face_model_registry::list_face_model_packs,
             face_model_registry::list_face_model_pack_statuses,
             face_model_registry::download_face_model_pack,
+            visual_model_registry::list_visual_model_pack_statuses,
+            visual_model_registry::download_visual_model_pack,
             face_detection::start_face_detection,
             face_detection::start_face_recognition,
             ai_commands::generate_ai_subject_mask,

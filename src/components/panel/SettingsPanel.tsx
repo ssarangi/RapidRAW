@@ -63,6 +63,7 @@ import { useUIStore } from '../../store/useUIStore';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import { useProcessStore } from '../../store/useProcessStore';
 import FaceModelsSettings from '../settings/FaceModelsSettings';
+import VisualModelsSettings from '../settings/VisualModelsSettings';
 
 interface ConfirmModalState {
   confirmText: string;
@@ -817,6 +818,7 @@ export default function SettingsPanel({
       { id: 'general', label: t('settings.categories.general'), icon: SlidersHorizontal },
       { id: 'library', label: 'Library', icon: Database },
       { id: 'faces', label: 'Face Models', icon: ScanFace },
+      { id: 'visual-ai', label: 'Visual AI', icon: ImageIcon },
       { id: 'processing', label: t('settings.categories.processing'), icon: Cpu },
       { id: 'shortcuts', label: t('settings.categories.shortcuts'), icon: Keyboard },
     ],
@@ -2298,6 +2300,12 @@ export default function SettingsPanel({
                   transition={{ duration: 0.2 }}
                 >
                   <FaceModelsSettings onOpenExternal={shellOpen} />
+                </motion.div>
+              )}
+
+              {activeCategory === 'visual-ai' && (
+                <motion.div key="visual-ai" initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -10 }} transition={{ duration: 0.2 }}>
+                  <VisualModelsSettings onOpenExternal={shellOpen} />
                 </motion.div>
               )}
 
