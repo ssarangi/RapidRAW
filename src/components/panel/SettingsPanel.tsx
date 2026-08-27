@@ -1304,13 +1304,13 @@ export default function SettingsPanel({
               </Text>
             </div>
 
-            <div className="relative flex w-full min-[1200px]:w-112.5 p-2 bg-surface rounded-md">
+            <div className="relative flex w-full max-w-full min-[1200px]:w-[45rem] min-[1200px]:max-w-[calc(100%-13rem)] overflow-x-auto overflow-y-hidden p-2 bg-surface rounded-md custom-scrollbar">
               {settingCategories.map((category) => (
                 <button
                   key={category.id}
                   onClick={() => setActiveCategory(category.id)}
                   className={clsx(
-                    'relative flex-1 flex items-center justify-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors',
+                    'relative shrink-0 min-w-max flex items-center justify-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors',
                     {
                       'text-text-primary hover:bg-surface': activeCategory !== category.id,
                       'text-button-text': activeCategory === category.id,

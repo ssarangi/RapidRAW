@@ -15,7 +15,27 @@ export default function VisualModelsSettings({ onOpenExternal }: VisualModelsSet
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [removeModelId, setRemoveModelId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const refresh = useCallback(async () => { setLoading(true); try { setStatuses(await invoke<VisualModelPackStatus[]>(Invokes.ListVisualModelPackStatuses)); setError(null); } catch (reason) { setError(String(reason)); } finally { setLoading(false); } }, []);
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    try {
+      // VisualModelPackStatus is flattened by the Rust serializer. Accept the
+      // nested shape too so this stays compatible if the command contract is
+      // corrected server-side.
+      const rawStatuses = await invoke<Array<VisualModelPackStatus & { id?: string }>>(
+        Invokes.ListVisualModelPackStatuses,
+      );
+      setStatuses(
+        rawStatuses
+          .filter((status): status is VisualModelPackStatus & { id: string } => Boolean(status?.pack?.id || status?.id))
+          .map((status) => (status.pack ? status : { ...status, pack: status } as VisualModelPackStatus)),
+      );
+      setError(null);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
   useEffect(() => { void refresh(); }, [refresh]);
   const download = async (status: VisualModelPackStatus) => { setDownloadingId(status.pack.id); setError(null); try { await invoke(Invokes.DownloadVisualModelPack, { packId: status.pack.id }); await refresh(); } catch (reason) { setError(`Could not download ${status.pack.displayName}: ${String(reason)}`); } finally { setDownloadingId(null); } };
   const installBundle = async (status: VisualModelPackStatus) => {
