@@ -936,7 +936,7 @@ export default function BottomBar({
                       {backgroundJobs.map((job) => (
                         <div key={job.id} className="px-3 py-2 border-b border-border-color last:border-b-0">
                           <div className="flex gap-3 justify-between items-center">
-                            <Text variant={TextVariants.small}>{({ catalog_scan: 'Catalog scan', model_download: 'Model download', ram_plus_tagging: 'RAM++ tagging', ai_tagging: 'AI tagging', face_detection: 'Face detection', face_recognition: 'Face recognition' } as Record<string, string>)[job.kind] || job.kind}</Text>
+                            <Text variant={TextVariants.small}>{({ catalog_scan: 'Catalog scan', model_download: 'Model download', ram_plus_tagging: 'RAM++ tagging', ai_tagging: 'AI tagging', face_detection: 'Face detection', face_recognition: 'Face recognition', raw_denoise: 'RAW AI denoise', rgb_denoise: 'RGB AI denoise', deblur: 'AI deblur', upscale: 'AI upscale' } as Record<string, string>)[job.kind] || job.kind}</Text>
                             <div className="flex items-center gap-2">
                               <Text variant={TextVariants.small} color={job.state === 'failed' ? TextColors.error : job.state === 'completed' ? TextColors.success : TextColors.accent}>{job.state}</Text>
                               {job.kind !== 'model_download' && ['running', 'paused'].includes(job.state) && <button className="p-1 text-text-secondary hover:bg-bg-primary rounded" onClick={() => void handlePauseBackgroundJob(job.id, job.state === 'paused')} data-tooltip={job.state === 'paused' ? 'Resume job' : 'Pause job'}>{job.state === 'paused' ? <Play size={13} /> : <Pause size={13} />}</button>}
