@@ -72,6 +72,7 @@ use imageproc::hough::{LineDetectionOptions, detect_lines};
 use imgref::ImgRef;
 use mozjpeg_rs::{Encoder, Preset};
 use rgb::{FromSlice, RGBA8};
+use rayon::prelude::*;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -468,7 +469,7 @@ fn process_preview_job(
     );
 
     let mask_bitmaps: Vec<ImageBuffer<Luma<u8>, Vec<u8>>> = mask_definitions
-        .iter()
+        .par_iter()
         .filter_map(|def| {
             get_cached_or_generate_mask(
                 &state,
