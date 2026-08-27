@@ -484,19 +484,6 @@ pub fn start_image_restoration(
         }),
     )?;
 
-    let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    state
-        .background_job_cancellations
-        .lock()
-        .unwrap()
-        .insert(job_id.clone(), cancellation.clone());
-
-    let pause = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    state
-        .background_job_pauses
-        .lock()
-        .unwrap()
-        .insert(job_id.clone(), pause.clone());
     let job_control = crate::app_state::BackgroundJobControl::new();
     state
         .background_job_controls
@@ -509,15 +496,15 @@ pub fn start_image_restoration(
     let worker_recipe = recipe.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let _permit = tauri::async_runtime::block_on(app.state::<crate::AppState>().ai_job_semaphore.clone().acquire_owned()).ok();
+        let ai_semaphore = app.state::<crate::AppState>().ai_job_semaphore.clone();
         let result = run_restoration_worker(
             &db_path,
             image_id,
             &worker_recipe,
             &worker_job_id,
-            &cancellation,
             &job_control,
             &app,
+            ai_semaphore,
         );
 
         if let Err(error) = result {
@@ -539,16 +526,6 @@ pub fn start_image_restoration(
         }
 
         app.state::<crate::AppState>()
-            .background_job_cancellations
-            .lock()
-            .unwrap()
-            .remove(&worker_job_id);
-        app.state::<crate::AppState>()
-            .background_job_pauses
-            .lock()
-            .unwrap()
-            .remove(&worker_job_id);
-        app.state::<crate::AppState>()
             .background_job_controls
             .lock()
             .unwrap()
@@ -568,9 +545,9 @@ fn run_restoration_worker(
     image_id: i64,
     recipe: &RestorationRecipe,
     job_id: &str,
-    cancellation: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
     _app_handle: &tauri::AppHandle,
+    ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 ) -> Result<(), String> {
     let conn = rusqlite::Connection::open(db_path).map_err(|e| e.to_string())?;
 
@@ -598,7 +575,7 @@ fn run_restoration_worker(
         None,
     );
 
-    if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+    if *job_control.cancellation_receiver().borrow() {
         return Err("Restoration cancelled".to_string());
     }
 
@@ -709,7 +686,8 @@ fn run_restoration_worker(
                                 .as_bayer_array()
                                 .map(|level| level.clamp(0.0, u16::MAX as f32) as u16);
 
-                            match run_rawnind_restoration_tiled(
+                            let _permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
+                            let result = run_rawnind_restoration_tiled(
                                 raw_data,
                                 raw_image.width,
                                 raw_image.height,
@@ -720,7 +698,9 @@ fn run_restoration_worker(
                                 recipe.tile_size,
                                 recipe.tile_overlap,
                                 recipe.denoise_strength,
-                            ) {
+                            );
+                            drop(_permit);
+                            match result {
                                 Ok(res) => res,
                                 Err(e) => {
                                     let error_msg = format!("RawNIND inference failed: {}", e);
@@ -750,13 +730,16 @@ fn run_restoration_worker(
                                 }
                             };
 
-                            match run_neural_restoration_tiled(
+                            let _permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
+                            let result = run_neural_restoration_tiled(
                                 &img,
                                 &mut session,
                                 recipe.tile_size,
                                 recipe.tile_overlap,
                                 recipe.denoise_strength,
-                            ) {
+                            );
+                            drop(_permit);
+                            match result {
                                 Ok(res) => res,
                                 Err(e) => {
                                     let error_msg = format!("Neural inference failed: {}", e);
@@ -806,7 +789,7 @@ fn run_restoration_worker(
     // Apply microcontrast enhancement and detail sharpening on restored image
     let enhanced = apply_microcontrast(&restored, recipe.microcontrast_strength, recipe.detail_recovery);
 
-    if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+    if *job_control.cancellation_receiver().borrow() {
         let _ = fs::remove_file(&temp_output);
         let _ = conn.execute(
             "UPDATE image_derivatives SET state = 'cancelled', updated_at = ?1 WHERE id = ?2",

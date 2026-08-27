@@ -2,8 +2,6 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -469,21 +467,14 @@ pub async fn download_face_model_pack(
             None,
         );
     }
-    let cancellation = job.as_ref().map(|(_, job_id)| {
-        let token = Arc::new(AtomicBool::new(false));
-        state
-            .background_job_cancellations
-            .lock()
-            .unwrap()
-            .insert(job_id.clone(), token.clone());
-        token
-    });
+    let job_control = crate::app_state::BackgroundJobControl::new();
+    if let Some((_, job_id)) = job.as_ref() {
+        state.background_job_controls.lock().unwrap().insert(job_id.clone(), job_control.clone());
+    }
 
     for (index, artifact) in pack.artifacts.iter().enumerate() {
-        if cancellation
-            .as_ref()
-            .is_some_and(|token| token.load(Ordering::SeqCst))
-        {
+        let is_runnable = job_control.wait_until_runnable().await;
+        if !is_runnable || *job_control.cancellation_receiver().borrow() {
             if let Some((db_path, job_id)) = job.as_ref() {
                 let _ = crate::library_db::update_job(
                     db_path,
@@ -495,9 +486,11 @@ pub async fn download_face_model_pack(
                     None,
                     None,
                 );
+                state.background_job_controls.lock().unwrap().remove(job_id);
             }
             return Err("Model download cancelled".to_string());
         }
+
         if let Some((db_path, job_id)) = job.as_ref() {
             let _ = crate::library_db::update_job(
                 db_path,
@@ -520,30 +513,57 @@ pub async fn download_face_model_pack(
                 stage: format!("Downloading {}", artifact.file_name),
             },
         );
-        let response = reqwest::get(&artifact.source_url)
-            .await
-            .map_err(|error| error.to_string())?
-            .error_for_status()
-            .map_err(|error| error.to_string())?;
-        let bytes = response.bytes().await.map_err(|error| error.to_string())?;
-        if cancellation
-            .as_ref()
-            .is_some_and(|token| token.load(Ordering::SeqCst))
-        {
-            if let Some((db_path, job_id)) = job.as_ref() {
-                let _ = crate::library_db::update_job(
-                    db_path,
-                    job_id,
-                    "cancelled",
-                    "Model download cancelled",
-                    index as i64,
-                    total as i64,
-                    None,
-                    None,
-                );
+        let response = tokio::select! {
+            res = reqwest::get(&artifact.source_url) => {
+                res.map_err(|error| error.to_string())?
+                   .error_for_status()
+                   .map_err(|error| error.to_string())?
             }
-            return Err("Model download cancelled".to_string());
-        }
+            _ = async {
+                let mut rx = job_control.cancellation_receiver();
+                rx.wait_for(|c| *c).await.unwrap();
+            } => {
+                if let Some((db_path, job_id)) = job.as_ref() {
+                    let _ = crate::library_db::update_job(
+                        db_path,
+                        job_id,
+                        "cancelled",
+                        "Model download cancelled",
+                        index as i64,
+                        total as i64,
+                        None,
+                        None,
+                    );
+                    state.background_job_controls.lock().unwrap().remove(job_id);
+                }
+                return Err("Model download cancelled".to_string());
+            }
+        };
+
+        let bytes = tokio::select! {
+            res = response.bytes() => {
+                res.map_err(|error| error.to_string())?
+            }
+            _ = async {
+                let mut rx = job_control.cancellation_receiver();
+                rx.wait_for(|c| *c).await.unwrap();
+            } => {
+                if let Some((db_path, job_id)) = job.as_ref() {
+                    let _ = crate::library_db::update_job(
+                        db_path,
+                        job_id,
+                        "cancelled",
+                        "Model download cancelled",
+                        index as i64,
+                        total as i64,
+                        None,
+                        None,
+                    );
+                    state.background_job_controls.lock().unwrap().remove(job_id);
+                }
+                return Err("Model download cancelled".to_string());
+            }
+        };
 
         match artifact.format {
             ModelArtifactFormat::Onnx => {
@@ -596,7 +616,7 @@ pub async fn download_face_model_pack(
             None,
         );
         state
-            .background_job_cancellations
+            .background_job_controls
             .lock()
             .unwrap()
             .remove(job_id);

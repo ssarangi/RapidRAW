@@ -193,10 +193,6 @@ pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, Ap
     if candidates.is_empty() { crate::library_db::update_job(&db_path, &job_id, "completed", "All catalog images already have RAM++ tags", 0, 0, None, None)?; return Ok(job_id); }
     let models = load_ram_plus_models(&app_handle).map_err(|error| { let _ = crate::library_db::update_job(&db_path, &job_id, "failed", "Unable to load RAM++", 0, candidates.len() as i64, None, Some(&error)); error })?;
     let tag_count = crate::load_settings(app_handle.clone())?.ai_tag_count.unwrap_or(20) as usize;
-    let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let pause = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    state.background_job_cancellations.lock().unwrap().insert(job_id.clone(), cancellation.clone());
-    state.background_job_pauses.lock().unwrap().insert(job_id.clone(), pause.clone());
     let job_control = crate::app_state::BackgroundJobControl::new();
     state.background_job_controls.lock().unwrap().insert(job_id.clone(), job_control.clone());
     let worker_state = app_handle.clone();
@@ -205,7 +201,7 @@ pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, Ap
     let worker_job_id = job_id.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let _permit = tauri::async_runtime::block_on(worker_state.state::<AppState>().ai_job_semaphore.clone().acquire_owned()).ok();
+        let ai_semaphore = worker_state.state::<AppState>().ai_job_semaphore.clone();
         // BioCLIP is optional, but loading it must not block the Tauri command/UI thread.
         let bioclip_models = load_bioclip_models(&species_app_handle);
         let total = candidates.len() as i64;
@@ -215,7 +211,7 @@ pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, Ap
                 cleanup_tag_job(&worker_state, &worker_job_id);
                 return;
             }
-            if cancellation.load(std::sync::atomic::Ordering::SeqCst) { let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "cancelled", "RAM++ tagging cancelled", index as i64, total, Some(&path), None); cleanup_tag_job(&worker_state, &worker_job_id); return; }
+            if *job_control.cancellation_receiver().borrow() { let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "cancelled", "RAM++ tagging cancelled", index as i64, total, Some(&path), None); cleanup_tag_job(&worker_state, &worker_job_id); return; }
             let current = index as i64 + 1;
             let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "running", "RAM++ tagging image", current, total, Some(&path), None);
             let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(&worker_db_path, image_id, modified, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, "processing", None);
@@ -223,7 +219,9 @@ pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, Ap
             let image_res = crate::file_management::get_cached_or_generate_thumbnail_image(&path, &worker_state, None).map_err(|error| error.to_string());
             match image_res {
                 Ok(image) => {
+                    let _permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
                     let result = generate_tags_with_ram_plus(&image, &models, tag_count);
+                    drop(_permit);
                     match result {
                         Ok(tags) => {
                             let _ = crate::library_db::replace_ai_tags_for_model(&worker_db_path, image_id, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, &tags);
@@ -235,7 +233,10 @@ pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, Ap
                             });
                             if has_bird_or_wildlife {
                                 if let Ok(bioclip) = &bioclip_models {
-                                    if let Ok((taxon, confidence)) = run_bioclip_inference(&image, bioclip) {
+                                    let _permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
+                                    let inference_result = run_bioclip_inference(&image, bioclip);
+                                    drop(_permit);
+                                    if let Ok((taxon, confidence)) = inference_result {
                                         // Cosine similarity is not a calibrated probability. Keep a conservative
                                         // review threshold and preserve the raw similarity in the catalog.
                                         if confidence >= 0.25 {
@@ -276,8 +277,6 @@ pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, Ap
 }
 
 fn cleanup_tag_job(app_handle: &AppHandle, job_id: &str) {
-    app_handle.state::<AppState>().background_job_cancellations.lock().unwrap().remove(job_id);
-    app_handle.state::<AppState>().background_job_pauses.lock().unwrap().remove(job_id);
     app_handle.state::<AppState>().background_job_controls.lock().unwrap().remove(job_id);
 }
 
@@ -345,28 +344,17 @@ pub async fn start_catalog_ai_tagging(
     let worker_db_path = db_path.clone();
     let worker_job_id = job_id.clone();
     let worker_app_handle = app_handle.clone();
-    let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    state
-        .background_job_cancellations
-        .lock()
-        .unwrap()
-        .insert(job_id.clone(), cancellation.clone());
-    state
-        .background_job_pauses
-        .lock()
-        .unwrap()
-        .insert(job_id.clone(), Arc::new(std::sync::atomic::AtomicBool::new(false)));
     let job_control = crate::app_state::BackgroundJobControl::new();
     state.background_job_controls.lock().unwrap().insert(job_id.clone(), job_control.clone());
     tauri::async_runtime::spawn_blocking(move || {
-        let _permit = tauri::async_runtime::block_on(worker_app_handle.state::<AppState>().ai_job_semaphore.clone().acquire_owned()).ok();
+        let ai_semaphore = worker_app_handle.state::<AppState>().ai_job_semaphore.clone();
         let total = candidates.len() as i64;
         for (index, (image_id, path, modified)) in candidates.into_iter().enumerate() {
             if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
                 let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "cancelled", "Catalog AI tagging cancelled", index as i64, total, None, None);
                 return;
             }
-            if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+            if *job_control.cancellation_receiver().borrow() {
                 let _ = crate::library_db::update_job(
                     &worker_db_path,
                     &worker_job_id,
@@ -377,18 +365,7 @@ pub async fn start_catalog_ai_tagging(
                     None,
                     None,
                 );
-                worker_app_handle
-                    .state::<AppState>()
-                    .background_job_cancellations
-                    .lock()
-                    .unwrap()
-                    .remove(&worker_job_id);
-                worker_app_handle
-                    .state::<AppState>()
-                    .background_job_pauses
-                    .lock()
-                    .unwrap()
-                    .remove(&worker_job_id);
+                cleanup_tag_job(&worker_app_handle, &worker_job_id);
                 return;
             }
             let current = index as i64 + 1;
@@ -417,14 +394,17 @@ pub async fn start_catalog_ai_tagging(
             )
             .map_err(|error| error.to_string())
             .and_then(|image| {
-                generate_tags_with_clip(
+                let _permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
+                let res = generate_tags_with_clip(
                     &image,
                     &clip_models.model,
                     &clip_models.tokenizer,
                     custom_tags.clone(),
                     tag_count,
                 )
-                .map_err(|error| error.to_string())
+                .map_err(|error| error.to_string());
+                drop(_permit);
+                res
             });
             match result {
                 Ok(tags) => {
@@ -459,18 +439,7 @@ pub async fn start_catalog_ai_tagging(
             None,
             None,
         );
-        worker_app_handle
-            .state::<AppState>()
-            .background_job_cancellations
-            .lock()
-            .unwrap()
-            .remove(&worker_job_id);
-        worker_app_handle
-            .state::<AppState>()
-            .background_job_pauses
-            .lock()
-            .unwrap()
-            .remove(&worker_job_id);
+        cleanup_tag_job(&worker_app_handle, &worker_job_id);
     });
     let _ = app_handle.emit(
         "catalog-ai-tagging-started",

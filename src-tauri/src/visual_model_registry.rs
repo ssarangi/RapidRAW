@@ -1,8 +1,6 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -167,7 +165,7 @@ fn fail_download_job(
             None,
             Some(&error),
         );
-        state.background_job_cancellations.lock().unwrap().remove(job_id);
+        state.background_job_controls.lock().unwrap().remove(job_id);
     }
     error
 }
@@ -216,27 +214,23 @@ pub async fn download_visual_model_pack(
             None,
         );
     }
-    let cancellation = job.as_ref().map(|(_, job_id)| {
-        let token = Arc::new(AtomicBool::new(false));
-        state
-            .background_job_cancellations
-            .lock()
-            .unwrap()
-            .insert(job_id.clone(), token.clone());
-        token
-    });
+    let job_control = crate::app_state::BackgroundJobControl::new();
+    if let Some((_, job_id)) = job.as_ref() {
+        state.background_job_controls.lock().unwrap().insert(job_id.clone(), job_control.clone());
+    }
+
     for (index, artifact) in pack.artifacts.iter().enumerate() {
         let current = index as i64;
-        if cancellation
-            .as_ref()
-            .is_some_and(|token| token.load(Ordering::SeqCst))
-        {
+        
+        let is_runnable = job_control.wait_until_runnable().await;
+        if !is_runnable || *job_control.cancellation_receiver().borrow() {
             if let Some((db_path, job_id)) = job.as_ref() {
                 let _ = crate::library_db::update_job(db_path, job_id, "cancelled", "Model download cancelled", current, total, None, None);
-                state.background_job_cancellations.lock().unwrap().remove(job_id);
+                state.background_job_controls.lock().unwrap().remove(job_id);
             }
             return Err("Model download cancelled".to_string());
         }
+
         if let Some((db_path, job_id)) = job.as_ref() {
             let _ = crate::library_db::update_job(
                 db_path,
@@ -249,30 +243,51 @@ pub async fn download_visual_model_pack(
                 None,
             );
         }
-        let response = reqwest::get(&artifact.source_url)
-            .await
-            .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?
-            .error_for_status()
-            .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
-        if cancellation
-            .as_ref()
-            .is_some_and(|token| token.load(Ordering::SeqCst))
-        {
-            if let Some((db_path, job_id)) = job.as_ref() {
-                let _ = crate::library_db::update_job(db_path, job_id, "cancelled", "Model download cancelled", current, total, None, None);
-                state.background_job_cancellations.lock().unwrap().remove(job_id);
-            }
-            return Err("Model download cancelled".to_string());
-        }
-        if bytes.is_empty() {
-            return Err(fail_download_job(&job, &state, format!("Downloaded {} was empty", artifact.file_name), current, total));
-        }
+        
         let target = directory.join(&artifact.file_name);
         let temporary = target.with_extension("download");
+
+        let response = tokio::select! {
+            res = reqwest::get(&artifact.source_url) => {
+                res.map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?
+                   .error_for_status()
+                   .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?
+            }
+            _ = async {
+                let mut rx = job_control.cancellation_receiver();
+                rx.wait_for(|c| *c).await.unwrap();
+            } => {
+                let _ = fs::remove_file(&temporary);
+                if let Some((db_path, job_id)) = job.as_ref() {
+                    let _ = crate::library_db::update_job(db_path, job_id, "cancelled", "Model download cancelled", current, total, None, None);
+                    state.background_job_controls.lock().unwrap().remove(job_id);
+                }
+                return Err("Model download cancelled".to_string());
+            }
+        };
+
+        let bytes = tokio::select! {
+            res = response.bytes() => {
+                res.map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?
+            }
+            _ = async {
+                let mut rx = job_control.cancellation_receiver();
+                rx.wait_for(|c| *c).await.unwrap();
+            } => {
+                let _ = fs::remove_file(&temporary);
+                if let Some((db_path, job_id)) = job.as_ref() {
+                    let _ = crate::library_db::update_job(db_path, job_id, "cancelled", "Model download cancelled", current, total, None, None);
+                    state.background_job_controls.lock().unwrap().remove(job_id);
+                }
+                return Err("Model download cancelled".to_string());
+            }
+        };
+
+        if bytes.is_empty() {
+            let _ = fs::remove_file(&temporary);
+            return Err(fail_download_job(&job, &state, format!("Downloaded {} was empty", artifact.file_name), current, total));
+        }
+        
         let mut file = fs::File::create(&temporary).map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
         file.write_all(&bytes).map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
         file.sync_all().map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
@@ -285,7 +300,7 @@ pub async fn download_visual_model_pack(
         .map_err(|error| fail_download_job(&job, &state, error.to_string(), total, total))?;
     if let Some((db_path, job_id)) = job.as_ref() {
         let _ = crate::library_db::update_job(db_path, job_id, "completed", "Model download complete", total, total, None, None);
-        state.background_job_cancellations.lock().unwrap().remove(job_id);
+        state.background_job_controls.lock().unwrap().remove(job_id);
     }
     Ok(VisualModelPackStatus { installed: true, install_path: directory.to_string_lossy().into_owned(), pack })
 }

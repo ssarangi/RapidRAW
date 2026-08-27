@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::Ordering;
 
 use image::{DynamicImage, imageops::FilterType};
 use ndarray::Array4;
@@ -292,18 +291,6 @@ pub fn start_face_detection(
         "face_detection",
         serde_json::json!({ "rootId": root_id, "modelPackId": "opencv-yunet-sface" }),
     )?;
-    let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    state
-        .background_job_cancellations
-        .lock()
-        .unwrap()
-        .insert(job_id.clone(), cancellation.clone());
-    let pause = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    state
-        .background_job_pauses
-        .lock()
-        .unwrap()
-        .insert(job_id.clone(), pause.clone());
     let job_control = crate::app_state::BackgroundJobControl::new();
     state
         .background_job_controls
@@ -314,14 +301,14 @@ pub fn start_face_detection(
     let event_job_id = job_id.clone();
     let worker_job_id = job_id.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let _permit = tauri::async_runtime::block_on(app.state::<crate::AppState>().ai_job_semaphore.clone().acquire_owned()).ok();
+        let ai_semaphore = app.state::<crate::AppState>().ai_job_semaphore.clone();
         let result = run_face_detection(
             &db_path,
             root_id,
             &model_path,
             &worker_job_id,
-            &cancellation,
             &job_control,
+            ai_semaphore,
         );
         if let Err(error) = result {
             let job_state = if error == "Face detection cancelled" {
@@ -340,16 +327,6 @@ pub fn start_face_detection(
                 Some(&error),
             );
         }
-        app.state::<crate::AppState>()
-            .background_job_cancellations
-            .lock()
-            .unwrap()
-            .remove(&worker_job_id);
-        app.state::<crate::AppState>()
-            .background_job_pauses
-            .lock()
-            .unwrap()
-            .remove(&worker_job_id);
         app.state::<crate::AppState>()
             .background_job_controls
             .lock()
@@ -380,18 +357,6 @@ pub fn start_face_recognition(
         "face_recognition",
         serde_json::json!({ "rootId": root_id, "modelPackId": "opencv-yunet-sface" }),
     )?;
-    let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    state
-        .background_job_cancellations
-        .lock()
-        .unwrap()
-        .insert(job_id.clone(), cancellation.clone());
-    let pause = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    state
-        .background_job_pauses
-        .lock()
-        .unwrap()
-        .insert(job_id.clone(), pause.clone());
     let job_control = crate::app_state::BackgroundJobControl::new();
     state
         .background_job_controls
@@ -401,14 +366,14 @@ pub fn start_face_recognition(
     let app = app_handle.clone();
     let worker_job_id = job_id.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let _permit = tauri::async_runtime::block_on(app.state::<crate::AppState>().ai_job_semaphore.clone().acquire_owned()).ok();
+        let ai_semaphore = app.state::<crate::AppState>().ai_job_semaphore.clone();
         let result = run_face_recognition(
             &db_path,
             root_id,
             &model_path,
             &worker_job_id,
-            &cancellation,
             &job_control,
+            ai_semaphore,
         );
         if let Err(error) = result {
             let job_state = if error == "Face recognition cancelled" {
@@ -428,16 +393,6 @@ pub fn start_face_recognition(
             );
         }
         app.state::<crate::AppState>()
-            .background_job_cancellations
-            .lock()
-            .unwrap()
-            .remove(&worker_job_id);
-        app.state::<crate::AppState>()
-            .background_job_pauses
-            .lock()
-            .unwrap()
-            .remove(&worker_job_id);
-        app.state::<crate::AppState>()
             .background_job_controls
             .lock()
             .unwrap()
@@ -455,8 +410,8 @@ fn run_face_recognition(
     root_id: Option<i64>,
     model_path: &Path,
     job_id: &str,
-    cancellation: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
+    ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 ) -> Result<(), String> {
     let conn = rusqlite::Connection::open(db_path).map_err(|error| error.to_string())?;
     let mut sql = "SELECT f.id, r.absolute_path, i.relative_path, f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present' AND f.model_pack_id = 'opencv-yunet-sface' AND f.review_state <> 'rejected' AND f.embedding_id IS NULL".to_string();
@@ -531,7 +486,7 @@ fn run_face_recognition(
         if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
             return Err("Face recognition cancelled".to_string());
         }
-        if cancellation.load(Ordering::SeqCst) {
+        if *job_control.cancellation_receiver().borrow() {
             return Err("Face recognition cancelled".to_string());
         }
         let path = Path::new(&root).join(&relative);
@@ -550,7 +505,10 @@ fn run_face_recognition(
             Ok(image) => image,
             Err(_) => continue,
         };
-        let embedding = match extract_sface_embedding(&image, x, y, width, height, &mut session) {
+        let _permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
+        let embedding_result = extract_sface_embedding(&image, x, y, width, height, &mut session);
+        drop(_permit);
+        let embedding = match embedding_result {
             Ok(embedding) => embedding,
             Err(_) => continue,
         };
@@ -585,8 +543,8 @@ fn run_face_detection(
     root_id: Option<i64>,
     model_path: &Path,
     job_id: &str,
-    cancellation: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
+    ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 ) -> Result<(), String> {
     let conn = rusqlite::Connection::open(db_path).map_err(|error| error.to_string())?;
     let mut sql = "SELECT i.id, r.absolute_path, i.relative_path FROM images i JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present'".to_string();
@@ -639,7 +597,7 @@ fn run_face_detection(
         if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
             return Err("Face detection cancelled".to_string());
         }
-        if cancellation.load(Ordering::SeqCst) {
+        if *job_control.cancellation_receiver().borrow() {
             return Err("Face detection cancelled".to_string());
         }
         let path = Path::new(&root).join(&relative);
@@ -655,7 +613,12 @@ fn run_face_detection(
             None,
         );
         let detections = match image::open(&path) {
-            Ok(image) => detect_yunet(image, &mut session)?,
+            Ok(image) => {
+                let _permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
+                let res = detect_yunet(image, &mut session)?;
+                drop(_permit);
+                res
+            },
             Err(_) => continue,
         };
         conn.execute("DELETE FROM faces WHERE image_id = ?1 AND model_pack_id = 'opencv-yunet-sface' AND source = 'local' AND review_state = 'unreviewed'", [image_id]).map_err(|error| error.to_string())?;

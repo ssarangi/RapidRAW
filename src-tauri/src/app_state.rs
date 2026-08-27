@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex};
 
@@ -34,8 +34,8 @@ impl BackgroundJobControl {
         Arc::new(Self { cancel_tx, pause_tx })
     }
 
-    pub fn cancel(&self) { let _ = self.cancel_tx.send(true); }
-    pub fn set_paused(&self, paused: bool) { let _ = self.pause_tx.send(paused); }
+    pub fn cancel(&self) { self.cancel_tx.send_modify(|v| *v = true); }
+    pub fn set_paused(&self, paused: bool) { self.pause_tx.send_modify(|v| *v = paused); }
     pub fn cancellation_receiver(&self) -> watch::Receiver<bool> { self.cancel_tx.subscribe() }
     pub fn pause_receiver(&self) -> watch::Receiver<bool> { self.pause_tx.subscribe() }
 
@@ -149,22 +149,16 @@ pub struct ThumbnailManager {
     pub io_gate: Mutex<()>,
 }
 
-pub struct CatalogScanControl {
+pub struct CatalogScanState {
     pub active_root_id: Mutex<Option<i64>>,
     pub active_job_id: Mutex<Option<String>>,
-    pub paused: Mutex<bool>,
-    pub cancelled: AtomicBool,
-    pub cvar: Condvar,
 }
 
-impl CatalogScanControl {
+impl CatalogScanState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             active_root_id: Mutex::new(None),
             active_job_id: Mutex::new(None),
-            paused: Mutex::new(false),
-            cancelled: AtomicBool::new(false),
-            cvar: Condvar::new(),
         })
     }
 
@@ -174,9 +168,6 @@ impl CatalogScanControl {
             return Err("A catalog scan is already running".to_string());
         }
         *active_root_id = Some(root_id);
-        *self.paused.lock().unwrap() = false;
-        self.cancelled.store(false, Ordering::SeqCst);
-        self.cvar.notify_all();
         Ok(())
     }
 
@@ -184,11 +175,7 @@ impl CatalogScanControl {
         let mut active_root_id = self.active_root_id.lock().unwrap();
         if *active_root_id == Some(root_id) {
             *active_root_id = None;
-            *self.paused.lock().unwrap() = false;
             *self.active_job_id.lock().unwrap() = None;
-            self.cancelled.store(false, Ordering::SeqCst);
-            *self.active_job_id.lock().unwrap() = None;
-            self.cvar.notify_all();
         }
     }
 }
@@ -263,13 +250,80 @@ pub struct AppState {
     pub decoded_image_cache: Mutex<DecodedImageCache>,
     pub thumbnail_manager: Arc<ThumbnailManager>,
     pub metadata_manager: Arc<MetadataManager>,
-    pub catalog_scan_control: Arc<CatalogScanControl>,
+    pub catalog_scan_state: Arc<CatalogScanState>,
     pub disks_cache: Mutex<Option<Disks>>,
     pub disks_cache_refreshing: AtomicBool,
     pub camera_session: Mutex<CameraSession>,
     pub active_library_path: Mutex<Option<PathBuf>>,
-    pub background_job_cancellations: Mutex<HashMap<String, Arc<AtomicBool>>>,
-    pub background_job_pauses: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub background_job_controls: Mutex<HashMap<String, Arc<BackgroundJobControl>>>,
     pub ai_job_semaphore: Arc<Semaphore>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wait_until_runnable_initially_true() {
+        let control = BackgroundJobControl::new();
+        assert!(control.wait_until_runnable().await);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wait_until_runnable_pause_then_resume() {
+        let control = BackgroundJobControl::new();
+        control.set_paused(true);
+
+        let ctrl = control.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            ctrl.set_paused(false);
+        });
+
+        // Should block until resumed
+        assert!(control.wait_until_runnable().await);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wait_until_runnable_cancel_while_paused() {
+        let control = BackgroundJobControl::new();
+        control.set_paused(true);
+
+        let ctrl = control.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            ctrl.cancel();
+        });
+
+        // Cancelled jobs should return false
+        assert!(!control.wait_until_runnable().await);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wait_until_runnable_cancel_without_pause() {
+        let control = BackgroundJobControl::new();
+        control.cancel();
+        assert!(!control.wait_until_runnable().await);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_wait_until_runnable_cancel_then_unpause() {
+        let control = BackgroundJobControl::new();
+        control.cancel();
+        control.set_paused(false);
+        // Cancel is permanent
+        assert!(!control.wait_until_runnable().await);
+    }
+
+    #[tokio::test]
+    async fn test_terminal_job_cleanup() {
+        let controls = std::sync::Mutex::new(std::collections::HashMap::new());
+        let job_id = "test-job-id".to_string();
+        controls.lock().unwrap().insert(job_id.clone(), BackgroundJobControl::new());
+
+        controls.lock().unwrap().remove(&job_id);
+
+        assert!(!controls.lock().unwrap().contains_key(&job_id));
+    }
 }

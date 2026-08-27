@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{Datelike, NaiveDateTime};
@@ -13,7 +12,6 @@ use uuid::Uuid;
 use walkdir::WalkDir;
 
 use crate::app_settings::load_settings;
-use crate::app_state::CatalogScanControl;
 use crate::file_management::{ImageFile, parse_virtual_path};
 use crate::file_management::{assign_group_ids, read_file_mapped};
 use crate::formats::{is_raw_file, is_supported_image_file};
@@ -1704,39 +1702,36 @@ fn upsert_folder(
 }
 
 fn wait_for_catalog_scan_control(
-    control: &Arc<CatalogScanControl>,
+    job_control: &Arc<crate::app_state::BackgroundJobControl>,
     root_id: i64,
     root_path: &str,
     current: usize,
     total: usize,
     on_progress: &mut impl FnMut(CatalogScanProgress),
 ) -> Result<(), String> {
-    if control.cancelled.load(Ordering::SeqCst) {
+    if *job_control.cancellation_receiver().borrow() {
         return Err("Catalog scan cancelled".to_string());
     }
 
-    let mut paused = control.paused.lock().unwrap();
-    let mut emitted_pause = false;
-    while *paused {
-        if control.cancelled.load(Ordering::SeqCst) {
-            return Err("Catalog scan cancelled".to_string());
-        }
-        if !emitted_pause {
-            on_progress(CatalogScanProgress {
-                root_id,
-                root_path: root_path.to_string(),
-                current,
-                total,
-                current_path: None,
-                camera: None,
-                lens: None,
-                year: None,
-                message: "Indexing paused".to_string(),
-            });
-            emitted_pause = true;
-        }
-        paused = control.cvar.wait(paused).unwrap();
+    if *job_control.pause_receiver().borrow() {
+        on_progress(CatalogScanProgress {
+            root_id,
+            root_path: root_path.to_string(),
+            current,
+            total,
+            current_path: None,
+            camera: None,
+            lens: None,
+            year: None,
+            message: "Indexing paused".to_string(),
+        });
     }
+
+    let is_runnable = tokio::runtime::Handle::current().block_on(job_control.wait_until_runnable());
+    if !is_runnable {
+        return Err("Catalog scan cancelled".to_string());
+    }
+
 
     Ok(())
 }
@@ -1746,7 +1741,7 @@ fn scan_library_root_impl<F>(
     recursive: bool,
     app_handle: &AppHandle,
     db_path: PathBuf,
-    control: Arc<CatalogScanControl>,
+    job_control: Arc<crate::app_state::BackgroundJobControl>,
     mut on_progress: F,
 ) -> Result<ScanResult, String>
 where
@@ -1813,7 +1808,7 @@ where
 
     for path in paths {
         wait_for_catalog_scan_control(
-            &control,
+            &job_control,
             root_id,
             &root_path_str,
             scanned,
@@ -1962,7 +1957,7 @@ where
     }
 
     wait_for_catalog_scan_control(
-        &control,
+        &job_control,
         root_id,
         &root_path_str,
         scanned,
@@ -2007,17 +2002,18 @@ pub fn scan_library_root(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<ScanResult, String> {
     let db_path = active_library_path(&state)?;
-    let control = state.catalog_scan_control.clone();
-    control.begin(root_id)?;
+    let state_control = state.catalog_scan_state.clone();
+    state_control.begin(root_id)?;
+    let job_control = crate::app_state::BackgroundJobControl::new();
     let result = scan_library_root_impl(
         root_id,
         recursive,
         &app_handle,
         db_path,
-        control.clone(),
+        job_control,
         |_| {},
     );
-    control.finish(root_id);
+    state_control.finish(root_id);
     result
 }
 
@@ -2029,7 +2025,7 @@ pub fn start_catalog_scan(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<(), String> {
     let db_path = active_library_path(&state)?;
-    let control = state.catalog_scan_control.clone();
+    let state_control = state.catalog_scan_state.clone();
     let root_path = open_connection(&db_path)?
         .query_row(
             "SELECT absolute_path FROM collection_roots WHERE id = ?1",
@@ -2041,8 +2037,11 @@ pub fn start_catalog_scan(
         let conn = open_connection(&db_path)?;
         create_catalog_scan_job(&conn, root_id, recursive)?
     };
-    control.begin(root_id)?;
-    *control.active_job_id.lock().unwrap() = Some(job_id.clone());
+    state_control.begin(root_id)?;
+    *state_control.active_job_id.lock().unwrap() = Some(job_id.clone());
+    let job_control = crate::app_state::BackgroundJobControl::new();
+    state.background_job_controls.lock().unwrap().insert(job_id.clone(), job_control.clone());
+    
     update_job(
         &db_path,
         &job_id,
@@ -2074,7 +2073,7 @@ pub fn start_catalog_scan(
             recursive,
             &app_for_task,
             db_path.clone(),
-            control.clone(),
+            job_control,
             |progress| {
                 let state = if progress.message == "Indexing paused" {
                     "paused"
@@ -2094,7 +2093,7 @@ pub fn start_catalog_scan(
                 let _ = app_for_task.emit("catalog-scan-progress", progress);
             },
         );
-        control.finish(root_id);
+        state_control.finish(root_id);
         match result {
             Ok(scan) => {
                 let _ = update_job(
@@ -2129,7 +2128,7 @@ pub fn start_catalog_scan(
 #[tauri::command]
 pub fn pause_catalog_scan(state: tauri::State<'_, crate::AppState>) -> Result<(), String> {
     if state
-        .catalog_scan_control
+        .catalog_scan_state
         .active_root_id
         .lock()
         .unwrap()
@@ -2137,14 +2136,16 @@ pub fn pause_catalog_scan(state: tauri::State<'_, crate::AppState>) -> Result<()
     {
         return Err("No catalog scan is running".to_string());
     }
-    *state.catalog_scan_control.paused.lock().unwrap() = true;
     if let Some(job_id) = state
-        .catalog_scan_control
+        .catalog_scan_state
         .active_job_id
         .lock()
         .unwrap()
         .clone()
     {
+        if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
+            control.set_paused(true);
+        }
         update_job(
             &active_library_path(&state)?,
             &job_id,
@@ -2162,7 +2163,7 @@ pub fn pause_catalog_scan(state: tauri::State<'_, crate::AppState>) -> Result<()
 #[tauri::command]
 pub fn resume_catalog_scan(state: tauri::State<'_, crate::AppState>) -> Result<(), String> {
     if state
-        .catalog_scan_control
+        .catalog_scan_state
         .active_root_id
         .lock()
         .unwrap()
@@ -2170,15 +2171,16 @@ pub fn resume_catalog_scan(state: tauri::State<'_, crate::AppState>) -> Result<(
     {
         return Err("No catalog scan is running".to_string());
     }
-    *state.catalog_scan_control.paused.lock().unwrap() = false;
-    state.catalog_scan_control.cvar.notify_all();
     if let Some(job_id) = state
-        .catalog_scan_control
+        .catalog_scan_state
         .active_job_id
         .lock()
         .unwrap()
         .clone()
     {
+        if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
+            control.set_paused(false);
+        }
         update_job(
             &active_library_path(&state)?,
             &job_id,
@@ -2196,7 +2198,7 @@ pub fn resume_catalog_scan(state: tauri::State<'_, crate::AppState>) -> Result<(
 #[tauri::command]
 pub fn cancel_catalog_scan(state: tauri::State<'_, crate::AppState>) -> Result<(), String> {
     if state
-        .catalog_scan_control
+        .catalog_scan_state
         .active_root_id
         .lock()
         .unwrap()
@@ -2204,24 +2206,21 @@ pub fn cancel_catalog_scan(state: tauri::State<'_, crate::AppState>) -> Result<(
     {
         return Err("No catalog scan is running".to_string());
     }
-    state
-        .catalog_scan_control
-        .cancelled
-        .store(true, Ordering::SeqCst);
-    *state.catalog_scan_control.paused.lock().unwrap() = false;
-    state.catalog_scan_control.cvar.notify_all();
     if let Some(job_id) = state
-        .catalog_scan_control
+        .catalog_scan_state
         .active_job_id
         .lock()
         .unwrap()
         .clone()
     {
+        if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
+            control.cancel();
+        }
         update_job(
             &active_library_path(&state)?,
             &job_id,
             "cancelling",
-            "Cancelling catalog scan",
+            "Cancellation requested",
             0,
             0,
             None,
@@ -2307,7 +2306,7 @@ pub fn cancel_background_job(
 
     if kind == "catalog_scan" {
         if state
-            .catalog_scan_control
+            .catalog_scan_state
             .active_job_id
             .lock()
             .unwrap()
@@ -2316,23 +2315,10 @@ pub fn cancel_background_job(
         {
             return Err("The catalog scan is not active in this application session".to_string());
         }
-        state
-            .catalog_scan_control
-            .cancelled
-            .store(true, Ordering::SeqCst);
-        *state.catalog_scan_control.paused.lock().unwrap() = false;
-        state.catalog_scan_control.cvar.notify_all();
-    } else if let Some(token) = state
-        .background_job_cancellations
-        .lock()
-        .unwrap()
-        .get(&job_id)
-        .cloned()
-    {
-        token.store(true, Ordering::SeqCst);
-        if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
-            control.cancel();
-        }
+    }
+    
+    if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
+        control.cancel();
     } else {
         return Err("This job cannot be cancelled after an application restart".to_string());
     }
@@ -2367,7 +2353,7 @@ pub fn pause_background_job(
     }
     if kind == "catalog_scan" {
         if state
-            .catalog_scan_control
+            .catalog_scan_state
             .active_job_id
             .lock()
             .unwrap()
@@ -2376,7 +2362,9 @@ pub fn pause_background_job(
         {
             return Err("The catalog scan is not active in this application session".to_string());
         }
-        *state.catalog_scan_control.paused.lock().unwrap() = true;
+        if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
+            control.set_paused(true);
+        }
         return update_job(
             &db_path,
             &job_id,
@@ -2388,16 +2376,10 @@ pub fn pause_background_job(
             None,
         );
     }
-    let token = state
-        .background_job_pauses
-        .lock()
-        .unwrap()
-        .get(&job_id)
-        .cloned()
-        .ok_or_else(|| "This job cannot be paused after an application restart".to_string())?;
-    token.store(true, Ordering::SeqCst);
     if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
         control.set_paused(true);
+    } else {
+        return Err("This job cannot be paused after an application restart".to_string());
     }
     update_job(
         &db_path,
@@ -2429,7 +2411,7 @@ pub fn resume_background_job(
     }
     if kind == "catalog_scan" {
         if state
-            .catalog_scan_control
+            .catalog_scan_state
             .active_job_id
             .lock()
             .unwrap()
@@ -2438,8 +2420,9 @@ pub fn resume_background_job(
         {
             return Err("The catalog scan is not active in this application session".to_string());
         }
-        *state.catalog_scan_control.paused.lock().unwrap() = false;
-        state.catalog_scan_control.cvar.notify_all();
+        if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
+            control.set_paused(false);
+        }
         return update_job(
             &db_path,
             &job_id,
@@ -2451,16 +2434,10 @@ pub fn resume_background_job(
             None,
         );
     }
-    let token = state
-        .background_job_pauses
-        .lock()
-        .unwrap()
-        .get(&job_id)
-        .cloned()
-        .ok_or_else(|| "This job cannot be resumed after an application restart".to_string())?;
-    token.store(false, Ordering::SeqCst);
     if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
         control.set_paused(false);
+    } else {
+        return Err("This job cannot be resumed after an application restart".to_string());
     }
     update_job(
         &db_path,
@@ -3831,3 +3808,6 @@ pub fn review_species(
 
     Ok(())
 }
+
+
+
