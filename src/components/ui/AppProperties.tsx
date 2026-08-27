@@ -122,6 +122,7 @@ export enum Invokes {
   ListCullSessionDecisions = 'list_cull_session_decisions',
   ListCatalogFaces = 'list_catalog_faces',
   CreateCatalogPerson = 'create_catalog_person',
+  MergeCatalogPeople = 'merge_catalog_people',
   ReviewCatalogFace = 'review_catalog_face',
   ListBackgroundJobs = 'list_background_jobs',
   ListBackgroundJobEvents = 'list_background_job_events',

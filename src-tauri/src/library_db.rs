@@ -2998,6 +2998,34 @@ pub fn create_catalog_person(
 }
 
 #[tauri::command]
+pub fn merge_catalog_people(
+    source_person_id: i64,
+    target_person_id: i64,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    if source_person_id == target_person_id {
+        return Err("Choose two different people to merge".to_string());
+    }
+    let mut connection = open_connection(&active_library_path(&state)?)?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let source_exists: Option<i64> = transaction
+        .query_row("SELECT id FROM people WHERE id = ?1 AND state = 'active'", [source_person_id], |row| row.get(0))
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let target_exists: Option<i64> = transaction
+        .query_row("SELECT id FROM people WHERE id = ?1 AND state = 'active'", [target_person_id], |row| row.get(0))
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if source_exists.is_none() || target_exists.is_none() {
+        return Err("Both people must be active catalog people".to_string());
+    }
+    transaction.execute("UPDATE faces SET person_id = ?1, updated_at = strftime('%s','now') WHERE person_id = ?2", params![target_person_id, source_person_id]).map_err(|error| error.to_string())?;
+    transaction.execute("UPDATE people SET state = 'merged', merged_into_person_id = ?1, updated_at = strftime('%s','now') WHERE id = ?2", params![target_person_id, source_person_id]).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 pub fn list_catalog_faces(
     image_id: i64,
     state: tauri::State<'_, crate::AppState>,
