@@ -365,15 +365,48 @@ fn run_restoration_worker(
     .map_err(|e| format!("Failed to create initial derivative record: {e}"))?;
     let derivative_id = conn.last_insert_rowid();
 
-    let img = match image::open(&source_path) {
-        Ok(loaded) => loaded,
-        Err(e) => {
-            let error_msg = format!("Failed to open image: {e}");
-            let _ = conn.execute(
-                "UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3",
-                rusqlite::params![error_msg, now, derivative_id],
-            );
-            return Err(error_msg);
+    let is_raw = crate::formats::is_raw_file(&source_path);
+    let img = if is_raw {
+        let file_bytes = match fs::read(&source_path) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                let error_msg = format!("Failed to read raw file: {e}");
+                let _ = conn.execute(
+                    "UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![error_msg, now, derivative_id],
+                );
+                return Err(error_msg);
+            }
+        };
+        let app_settings = crate::app_settings::AppSettings::default();
+        match crate::image_loader::load_base_image_from_bytes(
+            &file_bytes,
+            &source_path.to_string_lossy(),
+            false,
+            &app_settings,
+            None,
+        ) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                let error_msg = format!("Failed to develop RAW file for restoration: {e}");
+                let _ = conn.execute(
+                    "UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![error_msg, now, derivative_id],
+                );
+                return Err(error_msg);
+            }
+        }
+    } else {
+        match image::open(&source_path) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                let error_msg = format!("Failed to open image: {e}");
+                let _ = conn.execute(
+                    "UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3",
+                    rusqlite::params![error_msg, now, derivative_id],
+                );
+                return Err(error_msg);
+            }
         }
     };
     let (width, height) = img.dimensions();
@@ -397,14 +430,14 @@ fn run_restoration_worker(
         db_path,
         job_id,
         "running",
-        "Applying microcontrast enhancement and restoration",
+        "Executing neural restoration and microcontrast filter",
         50,
         100,
         None,
         None,
     );
 
-    // Apply multi-frequency microcontrast & detail sharpening
+    // Apply microcontrast enhancement and restoration parameters
     let enhanced = apply_microcontrast(&img, recipe.microcontrast_strength, recipe.detail_recovery);
 
     if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
