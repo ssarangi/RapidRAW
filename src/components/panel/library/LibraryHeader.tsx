@@ -938,6 +938,20 @@ export function CatalogAiTaggingButton() {
   );
 }
 
+export function CatalogRamPlusTaggingButton() {
+  const [isStarting, setIsStarting] = useState(false);
+  const librarySource = useLibraryStore((state) => state.librarySource);
+  const isCatalogAvailable = librarySource.type === 'catalog';
+  const startTagging = async () => {
+    if (!isCatalogAvailable) { toast.info('Open or create a SQLite library first.'); return; }
+    setIsStarting(true);
+    try { await invoke<string>(Invokes.StartCatalogRamPlusTagging); toast.info('RAM++ tagging started. Progress is available in Background Jobs.'); }
+    catch (error) { console.error('Failed to start RAM++ tagging:', error); toast.error(`Failed to start RAM++ tagging: ${error}`); }
+    finally { setIsStarting(false); }
+  };
+  return <Button className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center" disabled={isStarting || !isCatalogAvailable} onClick={() => void startTagging()} data-tooltip={isCatalogAvailable ? 'Analyze catalog with RAM++ broad tags' : 'Open a SQLite library to analyze catalog images'}>{isStarting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Tags className="w-5 h-5" />}</Button>;
+}
+
 export function CatalogAiTagReviewButton() {
   const [items, setItems] = useState<Array<{ id: number; tag: string; imagePath: string; confidence: number }>>([]);
   const [open, setOpen] = useState(false);

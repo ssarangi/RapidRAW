@@ -339,10 +339,18 @@ pub(crate) fn create_background_job(
 }
 
 pub(crate) fn list_ai_tag_candidates(db_path: &Path) -> Result<Vec<(i64, String, i64)>, String> {
+    list_ai_tag_candidates_for_model(db_path, "clip", "rapidraw-clip-v1")
+}
+
+pub(crate) fn list_ai_tag_candidates_for_model(
+    db_path: &Path,
+    model_id: &str,
+    model_revision: &str,
+) -> Result<Vec<(i64, String, i64)>, String> {
     let conn = open_connection(db_path)?;
-    let mut statement = conn.prepare("SELECT i.id, r.absolute_path || '/' || i.relative_path, i.modified_at FROM images i JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present' AND NOT EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'clip' AND s.model_revision = 'rapidraw-clip-v1' AND s.image_modified_at = i.modified_at AND s.state = 'completed') ORDER BY i.id").map_err(|error| error.to_string())?;
+    let mut statement = conn.prepare("SELECT i.id, r.absolute_path || '/' || i.relative_path, i.modified_at FROM images i JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present' AND NOT EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = ?1 AND s.model_revision = ?2 AND s.image_modified_at = i.modified_at AND s.state = 'completed') ORDER BY i.id").map_err(|error| error.to_string())?;
     statement
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .query_map(params![model_id, model_revision], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
@@ -355,8 +363,20 @@ pub(crate) fn mark_ai_tag_analysis_state(
     state: &str,
     error_message: Option<&str>,
 ) -> Result<(), String> {
+    mark_ai_tag_analysis_state_for_model(db_path, image_id, image_modified_at, "clip", "rapidraw-clip-v1", state, error_message)
+}
+
+pub(crate) fn mark_ai_tag_analysis_state_for_model(
+    db_path: &Path,
+    image_id: i64,
+    image_modified_at: i64,
+    model_id: &str,
+    model_revision: &str,
+    state: &str,
+    error_message: Option<&str>,
+) -> Result<(), String> {
     let conn = open_connection(db_path)?;
-    conn.execute("INSERT INTO image_ai_analysis_state(image_id, analysis_kind, model_id, model_revision, image_modified_at, state, error_message, processed_at, updated_at) VALUES(?1, 'tagging', 'clip', 'rapidraw-clip-v1', ?2, ?3, ?4, CASE WHEN ?3 IN ('completed', 'failed') THEN strftime('%s','now') ELSE NULL END, strftime('%s','now')) ON CONFLICT(image_id, analysis_kind, model_id, model_revision, image_modified_at) DO UPDATE SET state = excluded.state, error_message = excluded.error_message, processed_at = excluded.processed_at, updated_at = excluded.updated_at", params![image_id, image_modified_at, state, error_message]).map_err(|error| error.to_string())?;
+    conn.execute("INSERT INTO image_ai_analysis_state(image_id, analysis_kind, model_id, model_revision, image_modified_at, state, error_message, processed_at, updated_at) VALUES(?1, 'tagging', ?2, ?3, ?4, ?5, ?6, CASE WHEN ?5 IN ('completed', 'failed') THEN strftime('%s','now') ELSE NULL END, strftime('%s','now')) ON CONFLICT(image_id, analysis_kind, model_id, model_revision, image_modified_at) DO UPDATE SET state = excluded.state, error_message = excluded.error_message, processed_at = excluded.processed_at, updated_at = excluded.updated_at", params![image_id, model_id, model_revision, image_modified_at, state, error_message]).map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -365,9 +385,19 @@ pub(crate) fn replace_clip_ai_tags(
     image_id: i64,
     tags: &[crate::tagging::ScoredTag],
 ) -> Result<(), String> {
+    replace_ai_tags_for_model(db_path, image_id, "clip", "rapidraw-clip-v1", tags)
+}
+
+pub(crate) fn replace_ai_tags_for_model(
+    db_path: &Path,
+    image_id: i64,
+    model_id: &str,
+    model_revision: &str,
+    tags: &[crate::tagging::ScoredTag],
+) -> Result<(), String> {
     let mut conn = open_connection(db_path)?;
     let tx = conn.transaction().map_err(|error| error.to_string())?;
-    tx.execute("DELETE FROM image_ai_tags WHERE image_id = ?1 AND model_id = 'clip' AND model_revision = 'rapidraw-clip-v1'", [image_id]).map_err(|error| error.to_string())?;
+    tx.execute("DELETE FROM image_ai_tags WHERE image_id = ?1 AND model_id = ?2 AND model_revision = ?3", params![image_id, model_id, model_revision]).map_err(|error| error.to_string())?;
     for tag in tags {
         tx.execute(
             "INSERT OR IGNORE INTO tags(name, kind) VALUES(?1, 'ai')",
@@ -381,7 +411,7 @@ pub(crate) fn replace_clip_ai_tags(
                 |row| row.get(0),
             )
             .map_err(|error| error.to_string())?;
-        tx.execute("INSERT INTO image_ai_tags(image_id, tag_id, model_id, model_revision, confidence, review_state, source, created_at, updated_at) VALUES(?1, ?2, 'clip', 'rapidraw-clip-v1', ?3, 'suggested', 'local', strftime('%s','now'), strftime('%s','now'))", params![image_id, tag_id, tag.confidence]).map_err(|error| error.to_string())?;
+        tx.execute("INSERT INTO image_ai_tags(image_id, tag_id, model_id, model_revision, confidence, review_state, source, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, 'suggested', 'local', strftime('%s','now'), strftime('%s','now'))", params![image_id, tag_id, model_id, model_revision, tag.confidence]).map_err(|error| error.to_string())?;
     }
     tx.commit().map_err(|error| error.to_string())
 }

@@ -131,6 +131,7 @@ export enum Invokes {
   StartFaceDetection = 'start_face_detection',
   StartFaceRecognition = 'start_face_recognition',
   StartCatalogAiTagging = 'start_catalog_ai_tagging',
+  StartCatalogRamPlusTagging = 'start_catalog_ram_plus_tagging',
   ListUnreviewedCatalogFaces = 'list_unreviewed_catalog_faces',
   ListUnreviewedFaceClusters = 'list_unreviewed_face_clusters',
   ConfirmFaceCluster = 'confirm_face_cluster',

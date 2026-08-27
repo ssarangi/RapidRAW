@@ -27,6 +27,94 @@ pub struct ScoredTag {
     pub confidence: f32,
 }
 
+const RAM_PLUS_MODEL_ID: &str = "ram-plus";
+const RAM_PLUS_MODEL_REVISION: &str = "onnx-v1";
+const RAM_PLUS_INPUT_SIZE: u32 = 384;
+
+struct RamPlusModels {
+    model: Mutex<Session>,
+    tags: Vec<String>,
+    thresholds: Vec<f32>,
+}
+
+fn load_ram_plus_models(app_handle: &AppHandle) -> std::result::Result<Arc<RamPlusModels>, String> {
+    let model_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "ram-plus-onnx", "model.onnx")?;
+    let tags_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "ram-plus-onnx", "tags.txt")?;
+    let thresholds_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "ram-plus-onnx", "thresholds.txt")?;
+    let tags = fs::read_to_string(tags_path).map_err(|error| error.to_string())?.lines().map(str::trim).filter(|tag| !tag.is_empty()).map(str::to_string).collect::<Vec<_>>();
+    let thresholds = fs::read_to_string(thresholds_path).map_err(|error| error.to_string())?.lines().map(str::trim).filter_map(|value| value.parse::<f32>().ok()).collect::<Vec<_>>();
+    if tags.is_empty() || tags.len() != thresholds.len() { return Err("RAM++ tag metadata is invalid or incomplete".to_string()); }
+    let model = Session::builder().map_err(|error| error.to_string())?.commit_from_file(model_path).map_err(|error| error.to_string())?;
+    Ok(Arc::new(RamPlusModels { model: Mutex::new(model), tags, thresholds }))
+}
+
+fn ram_plus_input(image: &DynamicImage) -> Array<f32, ndarray::Dim<[usize; 4]>> {
+    let image = image.resize_exact(RAM_PLUS_INPUT_SIZE, RAM_PLUS_INPUT_SIZE, FilterType::Triangle).to_rgb8();
+    let mean = [0.485, 0.456, 0.406];
+    let std = [0.229, 0.224, 0.225];
+    let mut input = Array::zeros((1, 3, RAM_PLUS_INPUT_SIZE as usize, RAM_PLUS_INPUT_SIZE as usize));
+    for (x, y, pixel) in image.enumerate_pixels() {
+        for channel in 0..3 { input[[0, channel, y as usize, x as usize]] = (pixel[channel] as f32 / 255.0 - mean[channel]) / std[channel]; }
+    }
+    input
+}
+
+fn generate_tags_with_ram_plus(image: &DynamicImage, models: &RamPlusModels, max_tags: usize) -> std::result::Result<Vec<ScoredTag>, String> {
+    let input = Tensor::from_array(ram_plus_input(image)).map_err(|error| error.to_string())?;
+    let mut session = models.model.lock().unwrap();
+    let output = session.run(ort::inputs![input]).map_err(|error| error.to_string())?;
+    let logits = output[0].try_extract_array::<f32>().map_err(|error| error.to_string())?.iter().copied().collect::<Vec<_>>();
+    if logits.len() != models.tags.len() { return Err(format!("RAM++ output has {} logits but {} tags", logits.len(), models.tags.len())); }
+    let mut results = logits.into_iter().zip(models.tags.iter().zip(models.thresholds.iter())).filter_map(|(logit, (tag, threshold))| {
+        let confidence = 1.0 / (1.0 + (-logit.clamp(-30.0, 30.0)).exp());
+        (confidence > *threshold).then(|| ScoredTag { name: tag.clone(), confidence })
+    }).collect::<Vec<_>>();
+    results.sort_by(|left, right| right.confidence.total_cmp(&left.confidence));
+    results.truncate(max_tags);
+    Ok(results)
+}
+
+#[tauri::command]
+pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+    let db_path = crate::library_db::active_library_path(&state)?;
+    let candidates = crate::library_db::list_ai_tag_candidates_for_model(&db_path, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION)?;
+    let job_id = crate::library_db::create_background_job(&db_path, "ram_plus_tagging", serde_json::json!({ "modelId": RAM_PLUS_MODEL_ID, "modelRevision": RAM_PLUS_MODEL_REVISION }))?;
+    crate::library_db::update_job(&db_path, &job_id, "queued", "RAM++ tagging queued", 0, candidates.len() as i64, None, None)?;
+    if candidates.is_empty() { crate::library_db::update_job(&db_path, &job_id, "completed", "All catalog images already have RAM++ tags", 0, 0, None, None)?; return Ok(job_id); }
+    let models = load_ram_plus_models(&app_handle).map_err(|error| { let _ = crate::library_db::update_job(&db_path, &job_id, "failed", "Unable to load RAM++", 0, candidates.len() as i64, None, Some(&error)); error })?;
+    let tag_count = crate::load_settings(app_handle.clone())?.ai_tag_count.unwrap_or(20) as usize;
+    let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pause = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    state.background_job_cancellations.lock().unwrap().insert(job_id.clone(), cancellation.clone());
+    state.background_job_pauses.lock().unwrap().insert(job_id.clone(), pause.clone());
+    let worker_state = app_handle.clone();
+    let worker_db_path = db_path.clone();
+    let worker_job_id = job_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let total = candidates.len() as i64;
+        for (index, (image_id, path, modified)) in candidates.into_iter().enumerate() {
+            while pause.load(std::sync::atomic::Ordering::SeqCst) { let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "paused", "RAM++ tagging paused", index as i64, total, Some(&path), None); std::thread::sleep(Duration::from_millis(200)); }
+            if cancellation.load(std::sync::atomic::Ordering::SeqCst) { let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "cancelled", "RAM++ tagging cancelled", index as i64, total, Some(&path), None); cleanup_tag_job(&worker_state, &worker_job_id); return; }
+            let current = index as i64 + 1;
+            let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "running", "RAM++ tagging image", current, total, Some(&path), None);
+            let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(&worker_db_path, image_id, modified, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, "processing", None);
+            let result = file_management::get_cached_or_generate_thumbnail_image(&path, &worker_state, None).map_err(|error| error.to_string()).and_then(|image| generate_tags_with_ram_plus(&image, &models, tag_count));
+            match result {
+                Ok(tags) => { let _ = crate::library_db::replace_ai_tags_for_model(&worker_db_path, image_id, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, &tags); let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(&worker_db_path, image_id, modified, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, "completed", None); }
+                Err(error) => { let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(&worker_db_path, image_id, modified, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, "failed", Some(&error)); }
+            }
+        }
+        let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "completed", "RAM++ catalog tagging complete", total, total, None, None);
+        cleanup_tag_job(&worker_state, &worker_job_id);
+    });
+    Ok(job_id)
+}
+
+fn cleanup_tag_job(app_handle: &AppHandle, job_id: &str) {
+    app_handle.state::<AppState>().background_job_cancellations.lock().unwrap().remove(job_id);
+    app_handle.state::<AppState>().background_job_pauses.lock().unwrap().remove(job_id);
+}
+
 #[tauri::command]
 pub async fn start_catalog_ai_tagging(
     app_handle: AppHandle,
@@ -806,4 +894,15 @@ pub fn clear_all_tags(root_path: String, app_handle: AppHandle) -> Result<usize,
         }
     }
     Ok(updated_count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ram_plus_preprocessing_uses_expected_nchw_shape() {
+        let image = DynamicImage::new_rgb8(16, 8);
+        assert_eq!(ram_plus_input(&image).dim(), (1, 3, 384, 384));
+    }
 }

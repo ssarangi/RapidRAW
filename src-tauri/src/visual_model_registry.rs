@@ -134,6 +134,11 @@ pub async fn download_visual_model_pack(pack_id: String, app_handle: AppHandle) 
     Ok(VisualModelPackStatus { installed: true, install_path: directory.to_string_lossy().into_owned(), pack })
 }
 
+pub(crate) fn installed_visual_model_path(app_handle: &AppHandle, pack_id: &str, file_name: &str) -> Result<PathBuf, String> {
+    let path = pack_dir(app_handle, pack_id)?.join(file_name);
+    if path.is_file() { Ok(path) } else { Err(format!("Install the {} visual model pack before running this analysis", pack_id)) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
