@@ -20,7 +20,7 @@ mod denoising;
 mod exif_processing;
 mod export_processing;
 mod face_detection;
-mod face_model_registry;
+pub mod face_model_registry;
 mod file_management;
 mod focus_stacking;
 mod formats;

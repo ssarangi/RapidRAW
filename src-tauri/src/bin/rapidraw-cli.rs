@@ -34,16 +34,20 @@ fn main() {
         Some("library") if arguments.get(1).map(String::as_str) == Some("roots") => list_roots(&arguments),
         Some("library") if arguments.get(1).map(String::as_str) == Some("metrics") => metrics(&arguments),
         Some("jobs") if arguments.get(1).map(String::as_str) == Some("list") => list_jobs(&arguments),
+        Some("jobs") if arguments.get(1).map(String::as_str) == Some("retry") => retry_job(&arguments),
+        Some("jobs") if arguments.get(1).map(String::as_str) == Some("cancel") => cancel_job(&arguments),
         Some("faces") if arguments.get(1).map(String::as_str) == Some("status") => face_status(&arguments),
         Some("faces") if arguments.get(1).map(String::as_str) == Some("clusters") => face_clusters(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("status") => tag_status(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("top") => top_tags(&arguments),
+        Some("tags") if arguments.get(1).map(String::as_str) == Some("export-suggestions") => export_tag_suggestions(&arguments),
         Some("collections") if arguments.get(1).map(String::as_str) == Some("list") => list_collections(&arguments),
         Some("collections") if arguments.get(1).map(String::as_str) == Some("show") => show_collection(&arguments),
         Some("cull") if arguments.get(1).map(String::as_str) == Some("sessions") => cull_sessions(&arguments),
         Some("cull") if arguments.get(1).map(String::as_str) == Some("decisions") => cull_decisions(&arguments),
         Some("models") if arguments.get(1).map(String::as_str) == Some("list") => list_models(),
-        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list".to_string()),
+        Some("models") if arguments.get(1).map(String::as_str) == Some("verify") => verify_model(&arguments),
+        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list|retry|cancel --database <catalog.db> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top|export-suggestions --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models verify --id <model-id>".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -291,4 +295,79 @@ fn cull_decisions(arguments: &[String]) -> Result<serde_json::Value, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     Ok(json!(decisions))
+}
+
+fn retry_job(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let connection = Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let job_id = named_argument(arguments, "--job")?;
+    let updated = connection
+        .execute(
+            "UPDATE background_jobs SET state = 'queued', message = 'Job queued for retry', error = NULL, updated_at = strftime('%s','now') WHERE id = ?1 AND state IN ('failed', 'cancelled')",
+            [&job_id],
+        )
+        .map_err(|error| error.to_string())?;
+    if updated == 0 {
+        return Err(format!("Job {job_id} is not eligible for retry"));
+    }
+    Ok(json!({ "id": job_id, "status": "queued" }))
+}
+
+fn cancel_job(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let connection = Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let job_id = named_argument(arguments, "--job")?;
+    let updated = connection
+        .execute(
+            "UPDATE background_jobs SET state = 'cancelled', message = 'Cancelled via CLI', updated_at = strftime('%s','now'), completed_at = strftime('%s','now') WHERE id = ?1 AND state IN ('queued', 'running', 'paused', 'cancelling')",
+            [&job_id],
+        )
+        .map_err(|error| error.to_string())?;
+    if updated == 0 {
+        return Err(format!("Job {job_id} is not cancellable"));
+    }
+    Ok(json!({ "id": job_id, "status": "cancelled" }))
+}
+
+fn export_tag_suggestions(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let connection = Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare("SELECT iat.id, r.absolute_path || '/' || i.relative_path, t.name, iat.confidence, iat.model_id FROM image_ai_tags iat JOIN images i ON i.id = iat.image_id JOIN collection_roots r ON r.id = i.root_id JOIN tags t ON t.id = iat.tag_id WHERE i.status = 'present' AND iat.review_state = 'suggested' ORDER BY iat.confidence DESC")
+        .map_err(|error| error.to_string())?;
+    let suggestions = statement
+        .query_map([], |row| Ok(json!({
+            "id": row.get::<_, i64>(0)?,
+            "path": row.get::<_, String>(1)?,
+            "tag": row.get::<_, String>(2)?,
+            "confidence": row.get::<_, f64>(3)?,
+            "modelId": row.get::<_, String>(4)?,
+        })))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(json!(suggestions))
+}
+
+fn verify_model(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let model_id = named_argument(arguments, "--id")?;
+    let visual_pack = visual_model_packs().into_iter().find(|p| p.id == model_id);
+    let face_pack = rapidraw_lib::face_model_registry::face_model_packs().into_iter().find(|p| p.id == model_id);
+    match (visual_pack, face_pack) {
+        (Some(pack), _) => Ok(json!({
+            "id": pack.id,
+            "displayName": pack.display_name,
+            "task": pack.task,
+            "runnable": pack.id == "ram-plus-onnx",
+            "license": pack.license_name,
+            "sourceUrl": pack.model_source_url,
+        })),
+        (_, Some(pack)) => Ok(json!({
+            "id": pack.id,
+            "displayName": pack.display_name,
+            "detector": pack.detector,
+            "recognizer": pack.recognizer,
+            "runnable": pack.id == "opencv-yunet-sface",
+            "license": pack.license_name,
+            "sourceUrl": pack.model_source_url,
+        })),
+        (None, None) => Err(format!("Unknown model: {model_id}")),
+    }
 }
