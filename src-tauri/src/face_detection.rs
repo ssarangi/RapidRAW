@@ -304,6 +304,11 @@ pub fn start_face_detection(
         .lock()
         .unwrap()
         .insert(job_id.clone(), pause.clone());
+    state
+        .background_job_controls
+        .lock()
+        .unwrap()
+        .insert(job_id.clone(), crate::app_state::BackgroundJobControl::new());
     let app = app_handle.clone();
     let event_job_id = job_id.clone();
     let worker_job_id = job_id.clone();
@@ -340,6 +345,11 @@ pub fn start_face_detection(
             .remove(&worker_job_id);
         app.state::<crate::AppState>()
             .background_job_pauses
+            .lock()
+            .unwrap()
+            .remove(&worker_job_id);
+        app.state::<crate::AppState>()
+            .background_job_controls
             .lock()
             .unwrap()
             .remove(&worker_job_id);
@@ -380,6 +390,11 @@ pub fn start_face_recognition(
         .lock()
         .unwrap()
         .insert(job_id.clone(), pause.clone());
+    state
+        .background_job_controls
+        .lock()
+        .unwrap()
+        .insert(job_id.clone(), crate::app_state::BackgroundJobControl::new());
     let app = app_handle.clone();
     let worker_job_id = job_id.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -415,6 +430,11 @@ pub fn start_face_recognition(
             .remove(&worker_job_id);
         app.state::<crate::AppState>()
             .background_job_pauses
+            .lock()
+            .unwrap()
+            .remove(&worker_job_id);
+        app.state::<crate::AppState>()
+            .background_job_controls
             .lock()
             .unwrap()
             .remove(&worker_job_id);
