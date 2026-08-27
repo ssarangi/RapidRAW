@@ -2109,15 +2109,38 @@ pub fn pause_background_job(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<(), String> {
     let db_path = active_library_path(&state)?;
-    let job_state: String = open_connection(&db_path)?
+    let (kind, job_state): (String, String) = open_connection(&db_path)?
         .query_row(
-            "SELECT state FROM background_jobs WHERE id = ?1",
+            "SELECT kind, state FROM background_jobs WHERE id = ?1",
             [&job_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|error| error.to_string())?;
     if !can_pause_job(&job_state) {
         return Err("This job is no longer pausable".to_string());
+    }
+    if kind == "catalog_scan" {
+        if state
+            .catalog_scan_control
+            .active_job_id
+            .lock()
+            .unwrap()
+            .as_deref()
+            != Some(&job_id)
+        {
+            return Err("The catalog scan is not active in this application session".to_string());
+        }
+        *state.catalog_scan_control.paused.lock().unwrap() = true;
+        return update_job(
+            &db_path,
+            &job_id,
+            "paused",
+            "Indexing paused",
+            0,
+            0,
+            None,
+            None,
+        );
     }
     let token = state
         .background_job_pauses
@@ -2145,15 +2168,39 @@ pub fn resume_background_job(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<(), String> {
     let db_path = active_library_path(&state)?;
-    let job_state: String = open_connection(&db_path)?
+    let (kind, job_state): (String, String) = open_connection(&db_path)?
         .query_row(
-            "SELECT state FROM background_jobs WHERE id = ?1",
+            "SELECT kind, state FROM background_jobs WHERE id = ?1",
             [&job_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|error| error.to_string())?;
     if !can_resume_job(&job_state) {
         return Err("This job is not paused".to_string());
+    }
+    if kind == "catalog_scan" {
+        if state
+            .catalog_scan_control
+            .active_job_id
+            .lock()
+            .unwrap()
+            .as_deref()
+            != Some(&job_id)
+        {
+            return Err("The catalog scan is not active in this application session".to_string());
+        }
+        *state.catalog_scan_control.paused.lock().unwrap() = false;
+        state.catalog_scan_control.cvar.notify_all();
+        return update_job(
+            &db_path,
+            &job_id,
+            "running",
+            "Resuming catalog scan",
+            0,
+            0,
+            None,
+            None,
+        );
     }
     let token = state
         .background_job_pauses
