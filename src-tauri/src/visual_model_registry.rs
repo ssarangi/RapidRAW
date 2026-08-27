@@ -89,6 +89,45 @@ pub fn visual_model_packs() -> Vec<VisualModelPack> {
             license_url: "https://huggingface.co/imageomics/bioclip".to_string(),
             model_source_url: "https://github.com/Imageomics/bioclip".to_string(),
         },
+        VisualModelPack {
+            id: "rawnind-utnet2-bayer".to_string(),
+            display_name: "RawNIND Bayer RAW Denoise".to_string(),
+            description: "Deep sensor Bayer joint denoising and demosaicing directly into linear Rec.2020.".to_string(),
+            task: "RAW sensor denoising".to_string(),
+            availability: VisualModelAvailability::BundleRequired,
+            artifacts: vec![
+                VisualModelArtifact { file_name: "rawnind_bayer.onnx".to_string(), source_url: String::new() },
+            ],
+            license_name: "GPL-3.0".to_string(),
+            license_url: "https://arxiv.org/abs/2501.08924".to_string(),
+            model_source_url: "https://github.com/darktable-org/darktable-ai/blob/master/models/rawdenoise-nind/README.md".to_string(),
+        },
+        VisualModelPack {
+            id: "nafnet-sidd-rgb".to_string(),
+            display_name: "NAFNet SIDD RGB Denoise".to_string(),
+            description: "Fast high-fidelity nonlinear activation-free network for developed linear RGB images.".to_string(),
+            task: "RGB image denoising".to_string(),
+            availability: VisualModelAvailability::BundleRequired,
+            artifacts: vec![
+                VisualModelArtifact { file_name: "nafnet_sidd.onnx".to_string(), source_url: String::new() },
+            ],
+            license_name: "MIT".to_string(),
+            license_url: "https://github.com/megvii-research/NAFNet".to_string(),
+            model_source_url: "https://github.com/darktable-org/darktable-ai/blob/master/models/denoise-nafnet/README.md".to_string(),
+        },
+        VisualModelPack {
+            id: "realplksr-2x".to_string(),
+            display_name: "RealPLKSR 2x Upscale".to_string(),
+            description: "Conservative super-resolution and structural enlargement using pre-GAN MSSIM weights.".to_string(),
+            task: "Image enlargement".to_string(),
+            availability: VisualModelAvailability::BundleRequired,
+            artifacts: vec![
+                VisualModelArtifact { file_name: "realplksr_2x.onnx".to_string(), source_url: String::new() },
+            ],
+            license_name: "Apache-2.0".to_string(),
+            license_url: "https://github.com/dslisleedh/PLKSR".to_string(),
+            model_source_url: "https://github.com/darktable-org/darktable-ai/blob/master/models/upscale-realplksr/README.md".to_string(),
+        },
     ]
 }
 

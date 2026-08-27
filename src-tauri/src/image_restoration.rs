@@ -153,6 +153,47 @@ pub fn calculate_tiles(
     tiles
 }
 
+/// Packs single-channel Bayer mosaic CFA raw values into a 4-channel NCHW tensor
+/// format [R, G1, G2, B] normalized by camera black/white level.
+pub fn pack_bayer_cfa(
+    raw_mosaic: &[u16],
+    width: usize,
+    height: usize,
+    black_level: u16,
+    white_level: u16,
+) -> Result<Vec<f32>, String> {
+    if width % 2 != 0 || height % 2 != 0 {
+        return Err("Bayer mosaic dimensions must be even".to_string());
+    }
+    let half_w = width / 2;
+    let half_h = height / 2;
+    let channel_size = half_w * half_h;
+    let mut tensor = vec![0.0f32; channel_size * 4];
+
+    let range = (white_level.saturating_sub(black_level)).max(1) as f32;
+
+    for y in 0..half_h {
+        for x in 0..half_w {
+            let src_y = y * 2;
+            let src_x = x * 2;
+            let dest_idx = y * half_w + x;
+
+            // Bayer RGGB pattern
+            let r = raw_mosaic[src_y * width + src_x];
+            let g1 = raw_mosaic[src_y * width + (src_x + 1)];
+            let g2 = raw_mosaic[(src_y + 1) * width + src_x];
+            let b = raw_mosaic[(src_y + 1) * width + (src_x + 1)];
+
+            tensor[dest_idx] = (r.saturating_sub(black_level) as f32 / range).clamp(0.0, 1.0);
+            tensor[channel_size + dest_idx] = (g1.saturating_sub(black_level) as f32 / range).clamp(0.0, 1.0);
+            tensor[channel_size * 2 + dest_idx] = (g2.saturating_sub(black_level) as f32 / range).clamp(0.0, 1.0);
+            tensor[channel_size * 3 + dest_idx] = (b.saturating_sub(black_level) as f32 / range).clamp(0.0, 1.0);
+        }
+    }
+
+    Ok(tensor)
+}
+
 /// Creates a safe derivative output path in the catalog's derivative directory
 pub fn derivative_output_path(
     catalog_dir: &Path,
@@ -205,5 +246,19 @@ mod tests {
         let enhanced = apply_microcontrast(&img, 0.5, 0.3);
         assert_eq!(enhanced.width(), 100);
         assert_eq!(enhanced.height(), 100);
+    }
+
+    #[test]
+    fn pack_bayer_cfa_normalizes_to_unit_range_and_nchw_layout() {
+        let mosaic: Vec<u16> = vec![
+            512, 1024,
+            1024, 2048,
+        ];
+        let tensor = pack_bayer_cfa(&mosaic, 2, 2, 0, 4096).unwrap();
+        assert_eq!(tensor.len(), 4);
+        assert_eq!(tensor[0], 512.0 / 4096.0); // R
+        assert_eq!(tensor[1], 1024.0 / 4096.0); // G1
+        assert_eq!(tensor[2], 1024.0 / 4096.0); // G2
+        assert_eq!(tensor[3], 2048.0 / 4096.0); // B
     }
 }
