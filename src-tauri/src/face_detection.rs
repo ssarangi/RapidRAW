@@ -304,11 +304,12 @@ pub fn start_face_detection(
         .lock()
         .unwrap()
         .insert(job_id.clone(), pause.clone());
+    let job_control = crate::app_state::BackgroundJobControl::new();
     state
         .background_job_controls
         .lock()
         .unwrap()
-        .insert(job_id.clone(), crate::app_state::BackgroundJobControl::new());
+        .insert(job_id.clone(), job_control.clone());
     let app = app_handle.clone();
     let event_job_id = job_id.clone();
     let worker_job_id = job_id.clone();
@@ -319,7 +320,7 @@ pub fn start_face_detection(
             &model_path,
             &worker_job_id,
             &cancellation,
-            &pause,
+            &job_control,
         );
         if let Err(error) = result {
             let job_state = if error == "Face detection cancelled" {
@@ -390,11 +391,12 @@ pub fn start_face_recognition(
         .lock()
         .unwrap()
         .insert(job_id.clone(), pause.clone());
+    let job_control = crate::app_state::BackgroundJobControl::new();
     state
         .background_job_controls
         .lock()
         .unwrap()
-        .insert(job_id.clone(), crate::app_state::BackgroundJobControl::new());
+        .insert(job_id.clone(), job_control.clone());
     let app = app_handle.clone();
     let worker_job_id = job_id.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -404,7 +406,7 @@ pub fn start_face_recognition(
             &model_path,
             &worker_job_id,
             &cancellation,
-            &pause,
+            &job_control,
         );
         if let Err(error) = result {
             let job_state = if error == "Face recognition cancelled" {
@@ -452,7 +454,7 @@ fn run_face_recognition(
     model_path: &Path,
     job_id: &str,
     cancellation: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pause: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
 ) -> Result<(), String> {
     let conn = rusqlite::Connection::open(db_path).map_err(|error| error.to_string())?;
     let mut sql = "SELECT f.id, r.absolute_path, i.relative_path, f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present' AND f.model_pack_id = 'opencv-yunet-sface' AND f.review_state <> 'rejected' AND f.embedding_id IS NULL".to_string();
@@ -524,18 +526,8 @@ fn run_face_recognition(
         .commit_from_file(model_path)
         .map_err(|error| error.to_string())?;
     for (index, (face_id, root, relative, x, y, width, height)) in faces.into_iter().enumerate() {
-        while pause.load(Ordering::SeqCst) {
-            let _ = update_job(
-                db_path,
-                job_id,
-                "paused",
-                "Face recognition paused",
-                index as i64,
-                total,
-                None,
-                None,
-            );
-            std::thread::sleep(std::time::Duration::from_millis(200));
+        if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
+            return Err("Face recognition cancelled".to_string());
         }
         if cancellation.load(Ordering::SeqCst) {
             return Err("Face recognition cancelled".to_string());
@@ -592,7 +584,7 @@ fn run_face_detection(
     model_path: &Path,
     job_id: &str,
     cancellation: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pause: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
 ) -> Result<(), String> {
     let conn = rusqlite::Connection::open(db_path).map_err(|error| error.to_string())?;
     let mut sql = "SELECT i.id, r.absolute_path, i.relative_path FROM images i JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present'".to_string();
@@ -642,18 +634,8 @@ fn run_face_detection(
         .commit_from_file(model_path)
         .map_err(|error| error.to_string())?;
     for (index, (image_id, root, relative)) in images.into_iter().enumerate() {
-        while pause.load(Ordering::SeqCst) {
-            let _ = update_job(
-                db_path,
-                job_id,
-                "paused",
-                "Face detection paused",
-                index as i64,
-                total,
-                None,
-                None,
-            );
-            std::thread::sleep(std::time::Duration::from_millis(200));
+        if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
+            return Err("Face detection cancelled".to_string());
         }
         if cancellation.load(Ordering::SeqCst) {
             return Err("Face detection cancelled".to_string());
