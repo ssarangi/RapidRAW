@@ -258,6 +258,9 @@ export default function BottomBar({
   const catalogScanFileName = catalogScan.currentPath?.split(/[\\/]/).pop() || '';
   const catalogScanPercent =
     catalogScan.total > 0 ? Math.min(100, Math.round((catalogScan.current / catalogScan.total) * 100)) : null;
+  const activeBackgroundJobs = backgroundJobs.filter((job) =>
+    ['queued', 'running', 'paused', 'cancelling'].includes(job.state),
+  );
 
   const handlePauseCatalogScan = async () => {
     try {
@@ -307,7 +310,7 @@ export default function BottomBar({
   };
 
   useEffect(() => {
-    if (!isCatalogScanModalOpen) return;
+    if (!isCatalogScanModalOpen && !isLibraryView) return;
     let active = true;
     const loadJobs = async () => {
       try {
@@ -317,16 +320,16 @@ export default function BottomBar({
           setBackgroundJobsError(null);
         }
       } catch (error) {
-        if (active) setBackgroundJobsError(String(error));
+        if (active && isCatalogScanModalOpen) setBackgroundJobsError(String(error));
       }
     };
     void loadJobs();
-    const timer = window.setInterval(() => void loadJobs(), 1500);
+    const timer = window.setInterval(() => void loadJobs(), isCatalogScanModalOpen ? 1500 : 3000);
     return () => {
       active = false;
       window.clearInterval(timer);
     };
-  }, [isCatalogScanModalOpen]);
+  }, [isCatalogScanModalOpen, isLibraryView]);
 
   useEffect(() => {
     if (isZoomReady && !isDraggingSlider.current) {
@@ -647,7 +650,7 @@ export default function BottomBar({
                     className="h-6 w-6 rounded object-cover border border-border-color shrink-0"
                     alt=""
                   />
-                ) : catalogScan.isActive ? (
+                ) : catalogScan.isActive || activeBackgroundJobs.length > 0 ? (
                   <Loader2 size={16} className="animate-spin text-accent shrink-0" />
                 ) : (
                   <Database size={16} className="text-red-500 shrink-0" />
@@ -659,8 +662,8 @@ export default function BottomBar({
                       ? `Indexing paused ${catalogScan.current}/${catalogScan.total || '?'}`
                       : catalogScan.total > 0
                         ? `Indexing collection ${catalogScan.current}/${catalogScan.total}${catalogScanFileName ? ` · ${catalogScanFileName}` : ''}`
-                        : backgroundJobs.length > 0
-                          ? `${backgroundJobs.filter((job) => ['running', 'paused', 'cancelling'].includes(job.state)).length} active background jobs`
+                        : activeBackgroundJobs.length > 0
+                          ? `${activeBackgroundJobs.length} active background job${activeBackgroundJobs.length === 1 ? '' : 's'}`
                           : 'Background jobs'}
                 </Text>
                 {catalogScanPercent !== null && (
