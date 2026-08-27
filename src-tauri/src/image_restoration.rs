@@ -24,7 +24,7 @@ impl Default for RestorationRecipe {
     fn default() -> Self {
         Self {
             operation_kind: "raw_denoise".to_string(),
-            model_id: "rawnind-utnet2".to_string(),
+            model_id: "rawnind-utnet2-bayer".to_string(),
             model_revision: "v1".to_string(),
             denoise_strength: 0.8,
             microcontrast_strength: 0.35,
@@ -32,6 +32,26 @@ impl Default for RestorationRecipe {
             tile_size: 768,
             tile_overlap: 64,
         }
+    }
+}
+
+fn validate_restoration_recipe(recipe: &RestorationRecipe) -> Result<(), String> {
+    if !matches!(recipe.operation_kind.as_str(), "raw_denoise" | "rgb_denoise" | "deblur" | "upscale") {
+        return Err(format!("Unsupported restoration operation: {}", recipe.operation_kind));
+    }
+    if !(0.0..=1.0).contains(&recipe.denoise_strength)
+        || !(0.0..=1.0).contains(&recipe.microcontrast_strength)
+        || !(0.0..=1.0).contains(&recipe.detail_recovery)
+    {
+        return Err("Restoration strengths must be between 0 and 1".to_string());
+    }
+    if recipe.tile_size < 64 || recipe.tile_overlap >= recipe.tile_size {
+        return Err("Tile size must be at least 64 and overlap must be smaller than the tile size".to_string());
+    }
+    match recipe.operation_kind.as_str() {
+        "raw_denoise" if recipe.model_id != "rawnind-utnet2-bayer" => Err("RAW denoise requires the RawNIND Bayer model".to_string()),
+        "rgb_denoise" if recipe.model_id != "nafnet-sidd-rgb" => Err("RGB denoise requires the NAFNet SIDD model".to_string()),
+        _ => Ok(()),
     }
 }
 
@@ -191,10 +211,17 @@ pub fn run_neural_restoration_tiled(
             .try_extract_array::<f32>()
             .map_err(|e| e.to_string())?;
 
+        let shape = out_array.shape();
+        if shape.len() != 4 || shape[0] != 1 || shape[1] != 3 || shape[2] != th as usize || shape[3] != tw as usize {
+            return Err(format!("Model output shape mismatch. Expected [1, 3, {}, {}], got {:?}", th, tw, shape));
+        }
+
         for y in 0..th {
             let wy = (std::f32::consts::PI * (y as f32 + 0.5) / th as f32).sin();
+            let wy = wy * wy; // Hann window
             for x in 0..tw {
                 let wx = (std::f32::consts::PI * (x as f32 + 0.5) / tw as f32).sin();
+                let wx = wx * wx; // Hann window
                 let w = (wx * wy).max(0.01);
 
                 let global_x = tx + x;
@@ -238,6 +265,118 @@ pub fn run_neural_restoration_tiled(
     Ok(DynamicImage::ImageRgb8(out_buffer))
 }
 
+/// Executes tiled RawNIND inference on an undecoded CFA mosaic
+pub fn run_rawnind_restoration_tiled(
+    raw_mosaic: &[u16],
+    width: usize,
+    height: usize,
+    cfa_pattern: &str,
+    black_levels: [u16; 4],
+    white_levels: [u16; 4],
+    model_session: &mut ort::session::Session,
+    tile_size: u32,
+    tile_overlap: u32,
+    _denoise_strength: f32,
+) -> Result<DynamicImage, String> {
+    let packed_bayer = pack_bayer_cfa_with_pattern(
+        raw_mosaic,
+        width,
+        height,
+        cfa_pattern,
+        black_levels,
+        white_levels,
+    )?;
+    let bayer_w = width / 2;
+    let bayer_h = height / 2;
+    let channel_size = bayer_w * bayer_h;
+
+    // We tile on the Bayer domain, so tile size is halved
+    let bayer_tile_size = tile_size / 2;
+    let bayer_tile_overlap = tile_overlap / 2;
+
+    let tiles = calculate_tiles(bayer_w as u32, bayer_h as u32, bayer_tile_size, bayer_tile_overlap);
+
+    let mut output_accum = vec![0.0f32; (width * height * 3) as usize];
+    let mut weight_accum = vec![0.0f32; (width * height) as usize];
+
+    for (tx, ty, tw, th) in tiles {
+        // Output from model is full resolution, so we reconstruct it
+        let out_w = tw * 2;
+        let out_h = th * 2;
+
+        let mut input_tile = ndarray::Array4::<f32>::zeros((1, 4, th as usize, tw as usize));
+        for y in 0..th as usize {
+            for x in 0..tw as usize {
+                let src_idx = (ty as usize + y) * bayer_w + (tx as usize + x);
+                input_tile[[0, 0, y, x]] = packed_bayer[src_idx];
+                input_tile[[0, 1, y, x]] = packed_bayer[channel_size + src_idx];
+                input_tile[[0, 2, y, x]] = packed_bayer[channel_size * 2 + src_idx];
+                input_tile[[0, 3, y, x]] = packed_bayer[channel_size * 3 + src_idx];
+            }
+        }
+
+        let tensor_input = ort::value::Tensor::from_array(input_tile).map_err(|e| e.to_string())?;
+        let outputs = model_session
+            .run(ort::inputs![tensor_input])
+            .map_err(|e| format!("Neural inference failed: {e}"))?;
+
+        let out_array = outputs[0]
+            .try_extract_array::<f32>()
+            .map_err(|e| e.to_string())?;
+
+        let shape = out_array.shape();
+        if shape.len() != 4 || shape[0] != 1 || shape[1] != 3 || shape[2] != out_h as usize || shape[3] != out_w as usize {
+            return Err(format!("Model output shape mismatch. Expected [1, 3, {}, {}], got {:?}", out_h, out_w, shape));
+        }
+
+        for y in 0..out_h {
+            let wy = (std::f32::consts::PI * (y as f32 + 0.5) / out_h as f32).sin();
+            let wy = wy * wy; // Hann window
+            for x in 0..out_w {
+                let wx = (std::f32::consts::PI * (x as f32 + 0.5) / out_w as f32).sin();
+                let wx = wx * wx; // Hann window
+                let w = (wx * wy).max(0.01);
+
+                let global_x = (tx * 2) + x;
+                let global_y = (ty * 2) + y;
+                let global_idx = (global_y * width as u32 + global_x) as usize;
+
+                let r_pred = out_array[[0, 0, y as usize, x as usize]];
+                let g_pred = out_array[[0, 1, y as usize, x as usize]];
+                let b_pred = out_array[[0, 2, y as usize, x as usize]];
+
+                if !r_pred.is_finite() || !g_pred.is_finite() || !b_pred.is_finite() {
+                    return Err("RawNIND emitted non-finite pixel data".to_string());
+                }
+                output_accum[global_idx * 3] += r_pred * w;
+                output_accum[global_idx * 3 + 1] += g_pred * w;
+                output_accum[global_idx * 3 + 2] += b_pred * w;
+                weight_accum[global_idx] += w;
+            }
+        }
+    }
+
+    let mut out_buffer = ImageBuffer::<Rgb<u8>, Vec<u8>>::new(width as u32, height as u32);
+    for y in 0..height as u32 {
+        for x in 0..width as u32 {
+            let idx = (y * width as u32 + x) as usize;
+            let w = weight_accum[idx].max(f32::EPSILON);
+            // Model outputs linear Rec.2020. We apply a simple gamma for sRGB preview here
+            let r_lin = (output_accum[idx * 3] / w).clamp(0.0, 1.0);
+            let g_lin = (output_accum[idx * 3 + 1] / w).clamp(0.0, 1.0);
+            let b_lin = (output_accum[idx * 3 + 2] / w).clamp(0.0, 1.0);
+
+            let r = (r_lin.powf(1.0 / 2.2) * 255.0) as u8;
+            let g = (g_lin.powf(1.0 / 2.2) * 255.0) as u8;
+            let b = (b_lin.powf(1.0 / 2.2) * 255.0) as u8;
+
+            out_buffer.put_pixel(x, y, Rgb([r, g, b]));
+        }
+    }
+
+    Ok(DynamicImage::ImageRgb8(out_buffer))
+}
+
 /// Packs single-channel Bayer mosaic CFA raw values into a 4-channel NCHW tensor
 /// format [R, G1, G2, B] normalized by camera black/white level.
 pub fn pack_bayer_cfa(
@@ -247,32 +386,61 @@ pub fn pack_bayer_cfa(
     black_level: u16,
     white_level: u16,
 ) -> Result<Vec<f32>, String> {
+    pack_bayer_cfa_with_pattern(
+        raw_mosaic,
+        width,
+        height,
+        "RGGB",
+        [black_level; 4],
+        [white_level; 4],
+    )
+}
+
+/// Packs a two-by-two Bayer mosaic into canonical [R, G1, G2, B] channels.
+/// RawNIND is deliberately limited to standard Bayer patterns; X-Trans and other
+/// mosaics need a model trained for their CFA and must not be passed to this runner.
+pub fn pack_bayer_cfa_with_pattern(
+    raw_mosaic: &[u16],
+    width: usize,
+    height: usize,
+    cfa_pattern: &str,
+    black_levels: [u16; 4],
+    white_levels: [u16; 4],
+) -> Result<Vec<f32>, String> {
     if width % 2 != 0 || height % 2 != 0 {
         return Err("Bayer mosaic dimensions must be even".to_string());
     }
+    if raw_mosaic.len() < width.saturating_mul(height) {
+        return Err("Bayer mosaic buffer is shorter than its declared dimensions".to_string());
+    }
+    let positions = match cfa_pattern {
+        "RGGB" => [0, 1, 2, 3],
+        "BGGR" => [3, 2, 1, 0],
+        "GRBG" => [1, 0, 3, 2],
+        "GBRG" => [2, 3, 0, 1],
+        _ => return Err(format!("RawNIND supports RGGB/BGGR/GRBG/GBRG CFA patterns, got {cfa_pattern}")),
+    };
     let half_w = width / 2;
     let half_h = height / 2;
     let channel_size = half_w * half_h;
     let mut tensor = vec![0.0f32; channel_size * 4];
-
-    let range = (white_level.saturating_sub(black_level)).max(1) as f32;
 
     for y in 0..half_h {
         for x in 0..half_w {
             let src_y = y * 2;
             let src_x = x * 2;
             let dest_idx = y * half_w + x;
-
-            // Bayer RGGB pattern
-            let r = raw_mosaic[src_y * width + src_x];
-            let g1 = raw_mosaic[src_y * width + (src_x + 1)];
-            let g2 = raw_mosaic[(src_y + 1) * width + src_x];
-            let b = raw_mosaic[(src_y + 1) * width + (src_x + 1)];
-
-            tensor[dest_idx] = (r.saturating_sub(black_level) as f32 / range).clamp(0.0, 1.0);
-            tensor[channel_size + dest_idx] = (g1.saturating_sub(black_level) as f32 / range).clamp(0.0, 1.0);
-            tensor[channel_size * 2 + dest_idx] = (g2.saturating_sub(black_level) as f32 / range).clamp(0.0, 1.0);
-            tensor[channel_size * 3 + dest_idx] = (b.saturating_sub(black_level) as f32 / range).clamp(0.0, 1.0);
+            let samples = [
+                raw_mosaic[src_y * width + src_x],
+                raw_mosaic[src_y * width + src_x + 1],
+                raw_mosaic[(src_y + 1) * width + src_x],
+                raw_mosaic[(src_y + 1) * width + src_x + 1],
+            ];
+            for (channel, &position) in positions.iter().enumerate() {
+                let range = white_levels[position].saturating_sub(black_levels[position]).max(1) as f32;
+                tensor[channel * channel_size + dest_idx] =
+                    (samples[position].saturating_sub(black_levels[position]) as f32 / range).clamp(0.0, 1.0);
+            }
         }
     }
 
@@ -305,6 +473,7 @@ pub fn start_image_restoration(
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<String, String> {
+    validate_restoration_recipe(&recipe)?;
     let db_path = crate::library_db::active_library_path(&state)?;
     let job_id = crate::library_db::create_background_job(
         &db_path,
@@ -461,112 +630,169 @@ fn run_restoration_worker(
     let derivative_id = conn.last_insert_rowid();
 
     let is_raw = crate::formats::is_raw_file(&source_path);
-    let img = if is_raw {
-        let file_bytes = match fs::read(&source_path) {
-            Ok(bytes) => bytes,
+    let file_bytes = if is_raw {
+        match fs::read(&source_path) {
+            Ok(bytes) => Some(bytes),
             Err(e) => {
                 let error_msg = format!("Failed to read raw file: {e}");
-                let _ = conn.execute(
-                    "UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3",
-                    rusqlite::params![error_msg, now, derivative_id],
-                );
-                return Err(error_msg);
-            }
-        };
-        let app_settings = crate::app_settings::AppSettings::default();
-        match crate::image_loader::load_base_image_from_bytes(
-            &file_bytes,
-            &source_path.to_string_lossy(),
-            false,
-            &app_settings,
-            None,
-        ) {
-            Ok(loaded) => loaded,
-            Err(e) => {
-                let error_msg = format!("Failed to develop RAW file for restoration: {e}");
-                let _ = conn.execute(
-                    "UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3",
-                    rusqlite::params![error_msg, now, derivative_id],
-                );
+                let _ = conn.execute("UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3", rusqlite::params![error_msg, now, derivative_id]);
                 return Err(error_msg);
             }
         }
     } else {
-        match image::open(&source_path) {
-            Ok(loaded) => loaded,
-            Err(e) => {
-                let error_msg = format!("Failed to open image: {e}");
-                let _ = conn.execute(
-                    "UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3",
-                    rusqlite::params![error_msg, now, derivative_id],
-                );
-                return Err(error_msg);
-            }
-        }
+        None
     };
-    let (width, height) = img.dimensions();
 
     // Check pause state with cancellation awareness
     while pause.load(std::sync::atomic::Ordering::SeqCst) {
         if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
-            let _ = conn.execute(
-                "UPDATE image_derivatives SET state = 'cancelled', updated_at = ?1 WHERE id = ?2",
-                rusqlite::params![now, derivative_id],
-            );
+            let _ = conn.execute("UPDATE image_derivatives SET state = 'cancelled', updated_at = ?1 WHERE id = ?2", rusqlite::params![now, derivative_id]);
             return Err("Restoration cancelled".to_string());
         }
-        let _ = crate::library_db::update_job(
-            db_path,
-            job_id,
-            "paused",
-            "Restoration paused",
-            30,
-            100,
-            None,
-            None,
-        );
+        let _ = crate::library_db::update_job(db_path, job_id, "paused", "Restoration paused", 30, 100, None, None);
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
 
-    let _ = crate::library_db::update_job(
-        db_path,
-        job_id,
-        "running",
-        "Executing neural restoration and microcontrast filter",
-        50,
-        100,
-        None,
-        None,
-    );
+    let _ = crate::library_db::update_job(db_path, job_id, "running", "Executing neural restoration and microcontrast filter", 50, 100, None, None);
 
     // Check if neural model is installed and load session
-    let restored = match crate::visual_model_registry::installed_visual_model_path(
-        _app_handle,
-        &recipe.model_id,
-        if recipe.model_id.contains("rawnind") {
-            "rawnind_bayer.onnx"
-        } else if recipe.model_id.contains("nafnet") {
-            "nafnet_sidd.onnx"
-        } else {
-            "model.onnx"
-        },
-    ) {
-        Ok(model_file) if model_file.exists() => {
-            match ort::session::Session::builder().and_then(|b| b.commit_from_file(&model_file)) {
-                Ok(mut session) => {
-                    run_neural_restoration_tiled(
-                        &img,
-                        &mut session,
-                        recipe.tile_size,
-                        recipe.tile_overlap,
-                        recipe.denoise_strength,
-                    )
-                    .unwrap_or_else(|_| img.clone())
+    let restored = if recipe.operation_kind.contains("denoise") {
+        match crate::visual_model_registry::installed_visual_model_path(
+            _app_handle,
+            &recipe.model_id,
+            if recipe.model_id.contains("rawnind") {
+                "rawnind_bayer.onnx"
+            } else if recipe.model_id.contains("nafnet") {
+                "nafnet_sidd.onnx"
+            } else {
+                "model.onnx"
+            },
+        ) {
+            Ok(model_file) if model_file.exists() => {
+                match ort::session::Session::builder().and_then(|b| b.commit_from_file(&model_file)) {
+                    Ok(mut session) => {
+                        if recipe.model_id.contains("rawnind") && is_raw {
+                            // Extract Bayer mosaic
+                            let bytes = file_bytes.as_ref().unwrap();
+                            let source = rawler::rawsource::RawSource::new_from_slice(bytes);
+                            let raw_image = match rawler::get_decoder(&source).and_then(|d| d.raw_image(&source, &rawler::decoders::RawDecodeParams::default(), false)) {
+                                Ok(ri) => ri,
+                                Err(e) => {
+                                    let error_msg = format!("Failed to decode RAW mosaic for RawNIND: {}", e);
+                                    let _ = conn.execute("UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3", rusqlite::params![error_msg, now, derivative_id]);
+                                    return Err(error_msg);
+                                }
+                            };
+                            let raw_data = match &raw_image.data {
+                                rawler::rawimage::RawImageData::Integer(data) => data,
+                                _ => {
+                                    let error_msg = "Unsupported float RAW data for RawNIND".to_string();
+                                    let _ = conn.execute("UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3", rusqlite::params![error_msg, now, derivative_id]);
+                                    return Err(error_msg);
+                                }
+                            };
+                            let cfa_pattern = raw_image.camera.cfa.name.as_str();
+                            let black_levels = raw_image
+                                .blacklevel
+                                .as_bayer_array()
+                                .map(|level| level.clamp(0.0, u16::MAX as f32) as u16);
+                            let white_levels = raw_image
+                                .whitelevel
+                                .as_bayer_array()
+                                .map(|level| level.clamp(0.0, u16::MAX as f32) as u16);
+
+                            match run_rawnind_restoration_tiled(
+                                raw_data,
+                                raw_image.width,
+                                raw_image.height,
+                                cfa_pattern,
+                                black_levels,
+                                white_levels,
+                                &mut session,
+                                recipe.tile_size,
+                                recipe.tile_overlap,
+                                recipe.denoise_strength,
+                            ) {
+                                Ok(res) => res,
+                                Err(e) => {
+                                    let error_msg = format!("RawNIND inference failed: {}", e);
+                                    let _ = conn.execute("UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3", rusqlite::params![error_msg, now, derivative_id]);
+                                    return Err(error_msg);
+                                }
+                            }
+                        } else {
+                            // Standard RGB fallback/neural run
+                            let img = if is_raw {
+                                match crate::image_loader::load_base_image_from_bytes(file_bytes.as_ref().unwrap(), &source_path.to_string_lossy(), false, &crate::app_settings::AppSettings::default(), None) {
+                                    Ok(loaded) => loaded,
+                                    Err(e) => {
+                                        let error_msg = format!("Failed to develop RAW file for restoration: {}", e);
+                                        let _ = conn.execute("UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3", rusqlite::params![error_msg, now, derivative_id]);
+                                        return Err(error_msg);
+                                    }
+                                }
+                            } else {
+                                match image::open(&source_path) {
+                                    Ok(loaded) => loaded,
+                                    Err(e) => {
+                                        let error_msg = format!("Failed to open image: {}", e);
+                                        let _ = conn.execute("UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3", rusqlite::params![error_msg, now, derivative_id]);
+                                        return Err(error_msg);
+                                    }
+                                }
+                            };
+
+                            match run_neural_restoration_tiled(
+                                &img,
+                                &mut session,
+                                recipe.tile_size,
+                                recipe.tile_overlap,
+                                recipe.denoise_strength,
+                            ) {
+                                Ok(res) => res,
+                                Err(e) => {
+                                    let error_msg = format!("Neural inference failed: {}", e);
+                                    let _ = conn.execute("UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3", rusqlite::params![error_msg, now, derivative_id]);
+                                    return Err(error_msg);
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let error_msg = format!("Failed to load ONNX model: {}", e);
+                        let _ = conn.execute("UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3", rusqlite::params![error_msg, now, derivative_id]);
+                        return Err(error_msg);
+                    }
                 }
-                Err(_) => img.clone(),
+            }
+            _ => {
+                let error_msg = "Required model artifact is missing or not installed.".to_string();
+                let _ = conn.execute("UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3", rusqlite::params![error_msg, now, derivative_id]);
+                return Err(error_msg);
             }
         }
-        _ => img.clone(),
+    } else {
+        // Non-neural fallback operation
+        let img = if is_raw {
+            match crate::image_loader::load_base_image_from_bytes(file_bytes.as_ref().unwrap(), &source_path.to_string_lossy(), false, &crate::app_settings::AppSettings::default(), None) {
+                Ok(loaded) => loaded,
+                Err(e) => {
+                    let error_msg = format!("Failed to develop RAW file for restoration: {}", e);
+                    let _ = conn.execute("UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3", rusqlite::params![error_msg, now, derivative_id]);
+                    return Err(error_msg);
+                }
+            }
+        } else {
+            match image::open(&source_path) {
+                Ok(loaded) => loaded,
+                Err(e) => {
+                    let error_msg = format!("Failed to open image: {}", e);
+                    let _ = conn.execute("UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3", rusqlite::params![error_msg, now, derivative_id]);
+                    return Err(error_msg);
+                }
+            }
+        };
+        img
     };
 
     // Apply microcontrast enhancement and detail sharpening on restored image
@@ -602,6 +828,8 @@ fn run_restoration_worker(
         );
         return Err(error_msg);
     }
+
+    let (width, height) = enhanced.dimensions();
 
     // Calculate output hash for provenance verification
     let output_hash = match fs::read(&final_output) {
@@ -707,9 +935,75 @@ mod tests {
     fn restoration_recipe_defaults_are_valid() {
         let recipe = RestorationRecipe::default();
         assert_eq!(recipe.operation_kind, "raw_denoise");
+        assert_eq!(recipe.model_id, "rawnind-utnet2-bayer");
         assert!(recipe.denoise_strength > 0.0 && recipe.denoise_strength <= 1.0);
         assert!(recipe.microcontrast_strength >= 0.0);
         assert!(recipe.tile_size >= 256);
         assert!(recipe.tile_overlap < recipe.tile_size);
+    }
+    #[test]
+    fn pack_bayer_cfa_reorders_bggr_to_canonical_channels() {
+        let mosaic = vec![40, 30, 20, 10]; // BGGR: B, G, G, R
+        let packed = pack_bayer_cfa_with_pattern(
+            &mosaic,
+            2,
+            2,
+            "BGGR",
+            [0; 4],
+            [100; 4],
+        )
+        .unwrap();
+        assert_eq!(packed, vec![0.1, 0.2, 0.3, 0.4]);
+    }
+
+    #[test]
+    fn test_pack_bayer_cfa_dimensions() {
+        // 4x4 image
+        let mut raw_mosaic = vec![0u16; 16];
+        raw_mosaic[0] = 10;
+        raw_mosaic[1] = 20;
+        raw_mosaic[4] = 30;
+        raw_mosaic[5] = 40;
+
+        let packed = pack_bayer_cfa(&raw_mosaic, 4, 4, 0, 100).unwrap();
+        assert_eq!(packed.len(), 4 * (2 * 2)); // 4 channels * 4 pixels
+        assert_eq!(packed[0], 0.1);
+        assert_eq!(packed[4], 0.2); // G1 starts at offset 4
+        assert_eq!(packed[8], 0.3); // G2 starts at offset 8
+        assert_eq!(packed[12], 0.4); // B starts at offset 12
+    }
+
+    #[test]
+    fn test_pack_bayer_cfa_odd_dimensions_fail() {
+        let raw_mosaic = vec![0u16; 9];
+        let packed = pack_bayer_cfa(&raw_mosaic, 3, 3, 0, 100);
+        assert!(packed.is_err());
+    }
+
+    #[test]
+    fn test_pack_bayer_cfa_clamping() {
+        let raw_mosaic = vec![0, 150, 0, 0];
+        let packed = pack_bayer_cfa(&raw_mosaic, 2, 2, 50, 100).unwrap();
+        // 0 -> clamped to 0
+        // 150 - 50 = 100 / 50 = 2 -> clamped to 1.0
+        assert_eq!(packed[0], 0.0);
+        assert_eq!(packed[1], 1.0);
+    }
+
+    #[test]
+    fn pack_bayer_cfa_rejects_unknown_cfa_and_short_buffer() {
+        assert!(pack_bayer_cfa_with_pattern(&[0; 4], 2, 2, "XTRANS", [0; 4], [1; 4]).is_err());
+        assert!(pack_bayer_cfa_with_pattern(&[0; 3], 2, 2, "RGGB", [0; 4], [1; 4]).is_err());
+    }
+
+    #[test]
+    fn restoration_recipe_rejects_invalid_model_or_tile_settings() {
+        let mut recipe = RestorationRecipe::default();
+        assert!(validate_restoration_recipe(&recipe).is_ok());
+        recipe.model_id = "nafnet-sidd-rgb".to_string();
+        assert!(validate_restoration_recipe(&recipe).is_err());
+        recipe.model_id = "rawnind-utnet2-bayer".to_string();
+        recipe.tile_overlap = recipe.tile_size;
+        assert!(validate_restoration_recipe(&recipe).is_err());
     }
 }

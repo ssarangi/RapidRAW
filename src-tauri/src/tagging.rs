@@ -5,6 +5,7 @@ use ndarray::{Array, Axis};
 use ort::session::Session;
 use ort::value::Tensor;
 use rayon::prelude::*;
+use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -74,6 +75,116 @@ fn generate_tags_with_ram_plus(image: &DynamicImage, models: &RamPlusModels, max
     Ok(results)
 }
 
+
+struct BioClipModels {
+    session: std::sync::Mutex<ort::session::Session>,
+    embeddings: Vec<Vec<f32>>,
+    labels: Vec<BioClipTaxon>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BioClipTaxon {
+    scientific_name: String,
+    #[serde(default)]
+    common_name: Option<String>,
+    #[serde(default = "default_species_rank")]
+    taxon_rank: String,
+}
+
+fn default_species_rank() -> String {
+    "species".to_string()
+}
+
+fn load_bioclip_models(app_handle: &tauri::AppHandle) -> Result<BioClipModels, String> {
+    let model_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "bioclip-v1", "vision_encoder.onnx")?;
+    let embeddings_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "bioclip-v1", "species_embeddings.bin")?;
+    let labels_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "bioclip-v1", "species_labels.json")?;
+
+    if !model_path.exists() || !embeddings_path.exists() || !labels_path.exists() {
+        return Err("BioCLIP artifacts missing".into());
+    }
+
+    let session = ort::session::Session::builder()
+        .and_then(|b| b.commit_from_file(&model_path))
+        .map_err(|e| e.to_string())?;
+
+    let labels_json = std::fs::read_to_string(&labels_path).map_err(|e| e.to_string())?;
+    let labels: Vec<BioClipTaxon> = serde_json::from_str(&labels_json)
+        .map_err(|_| "BioCLIP species_labels.json must contain taxonomy records with scientificName".to_string())?;
+
+    let embeddings_bytes = std::fs::read(&embeddings_path).map_err(|e| e.to_string())?;
+    if embeddings_bytes.len() % 4 != 0 {
+        return Err("BioCLIP embeddings file is not a packed f32 array".to_string());
+    }
+    let total_f32 = embeddings_bytes.len() / 4;
+
+    if labels.is_empty() || total_f32 % labels.len() != 0 {
+        return Err("Invalid BioCLIP embeddings/labels shape".into());
+    }
+
+    let dim = total_f32 / labels.len();
+    let mut embeddings = Vec::with_capacity(labels.len());
+
+    for chunk in embeddings_bytes.chunks_exact(dim * 4) {
+        let mut vec = Vec::with_capacity(dim);
+        for i in 0..dim {
+            let start = i * 4;
+            let val = f32::from_le_bytes(chunk[start..start+4].try_into().unwrap());
+            if !val.is_finite() {
+                return Err("BioCLIP embeddings contain a non-finite value".to_string());
+            }
+            vec.push(val);
+        }
+        embeddings.push(vec);
+    }
+
+    Ok(BioClipModels {
+        session: std::sync::Mutex::new(session),
+        embeddings,
+        labels,
+    })
+}
+
+fn bioclip_input(image: &image::DynamicImage) -> ndarray::Array<f32, ndarray::Dim<[usize; 4]>> {
+    let image = image.resize_exact(224, 224, image::imageops::FilterType::Triangle).to_rgb8();
+    let mean = [0.48145466, 0.4578275, 0.40821073];
+    let std = [0.26862954, 0.26130258, 0.27577711];
+    let mut input = ndarray::Array::zeros((1, 3, 224, 224));
+    for (x, y, pixel) in image.enumerate_pixels() {
+        for channel in 0..3 { input[[0, channel, y as usize, x as usize]] = (pixel[channel] as f32 / 255.0 - mean[channel]) / std[channel]; }
+    }
+    input
+}
+
+fn run_bioclip_inference(image: &image::DynamicImage, models: &BioClipModels) -> Result<(BioClipTaxon, f32), String> {
+    let input = ort::value::Tensor::from_array(bioclip_input(image)).map_err(|error| error.to_string())?;
+    let mut session = models.session.lock().unwrap();
+    let output = session.run(ort::inputs![input]).map_err(|error| error.to_string())?;
+    let img_emb = output[0].try_extract_array::<f32>().map_err(|error| error.to_string())?.iter().copied().collect::<Vec<_>>();
+    let expected_dimension = models.embeddings.first().map(Vec::len).ok_or("BioCLIP taxonomy is empty")?;
+    if img_emb.len() != expected_dimension || img_emb.iter().any(|value| !value.is_finite()) {
+        return Err(format!("BioCLIP encoder emitted {} values; taxonomy expects {expected_dimension}", img_emb.len()));
+    }
+
+    let norm_img: f32 = img_emb.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+
+    let mut best_idx = 0;
+    let mut best_score = -1.0;
+
+    for (i, tax_emb) in models.embeddings.iter().enumerate() {
+        let dot: f32 = img_emb.iter().zip(tax_emb).map(|(a, b)| a * b).sum();
+        let norm_tax: f32 = tax_emb.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+        let score = dot / (norm_img * norm_tax);
+        if score > best_score {
+            best_score = score;
+            best_idx = i;
+        }
+    }
+
+    Ok((models.labels[best_idx].clone(), best_score))
+}
+
 #[tauri::command]
 pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let db_path = crate::library_db::active_library_path(&state)?;
@@ -88,48 +199,73 @@ pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, Ap
     state.background_job_cancellations.lock().unwrap().insert(job_id.clone(), cancellation.clone());
     state.background_job_pauses.lock().unwrap().insert(job_id.clone(), pause.clone());
     let worker_state = app_handle.clone();
+    let species_app_handle = app_handle.clone();
     let worker_db_path = db_path.clone();
     let worker_job_id = job_id.clone();
+
     tauri::async_runtime::spawn_blocking(move || {
+        // BioCLIP is optional, but loading it must not block the Tauri command/UI thread.
+        let bioclip_models = load_bioclip_models(&species_app_handle);
         let total = candidates.len() as i64;
         for (index, (image_id, path, modified)) in candidates.into_iter().enumerate() {
-            while pause.load(std::sync::atomic::Ordering::SeqCst) { let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "paused", "RAM++ tagging paused", index as i64, total, Some(&path), None); std::thread::sleep(Duration::from_millis(200)); }
+            while pause.load(std::sync::atomic::Ordering::SeqCst) {
+                if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "cancelled", "RAM++ tagging cancelled", index as i64, total, Some(&path), None);
+                    cleanup_tag_job(&worker_state, &worker_job_id);
+                    return;
+                }
+                let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "paused", "RAM++ tagging paused", index as i64, total, Some(&path), None);
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
             if cancellation.load(std::sync::atomic::Ordering::SeqCst) { let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "cancelled", "RAM++ tagging cancelled", index as i64, total, Some(&path), None); cleanup_tag_job(&worker_state, &worker_job_id); return; }
             let current = index as i64 + 1;
             let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "running", "RAM++ tagging image", current, total, Some(&path), None);
             let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(&worker_db_path, image_id, modified, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, "processing", None);
-            let result = file_management::get_cached_or_generate_thumbnail_image(&path, &worker_state, None).map_err(|error| error.to_string()).and_then(|image| generate_tags_with_ram_plus(&image, &models, tag_count));
-            match result {
-                Ok(tags) => {
-                    let _ = crate::library_db::replace_ai_tags_for_model(&worker_db_path, image_id, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, &tags);
-                    let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(&worker_db_path, image_id, modified, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, "completed", None);
 
-                    // Check for bird or organism tags to trigger species suggestions
-                    let has_bird_or_wildlife = tags.iter().any(|t| {
-                        let lower = t.name.to_ascii_lowercase();
-                        lower.contains("bird") || lower.contains("wildlife") || lower.contains("animal")
-                    });
-                    if has_bird_or_wildlife {
-                        if let Ok(conn) = rusqlite::Connection::open(&worker_db_path) {
-                            let top_wildlife = tags.iter().find(|t| {
-                                let l = t.name.to_ascii_lowercase();
-                                l.contains("bird") || l.contains("wildlife") || l.contains("animal")
+            let image_res = crate::file_management::get_cached_or_generate_thumbnail_image(&path, &worker_state, None).map_err(|error| error.to_string());
+            match image_res {
+                Ok(image) => {
+                    let result = generate_tags_with_ram_plus(&image, &models, tag_count);
+                    match result {
+                        Ok(tags) => {
+                            let _ = crate::library_db::replace_ai_tags_for_model(&worker_db_path, image_id, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, &tags);
+                            let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(&worker_db_path, image_id, modified, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, "completed", None);
+
+                            let has_bird_or_wildlife = tags.iter().any(|t| {
+                                let lower = t.name.to_ascii_lowercase();
+                                lower.contains("bird") || lower.contains("wildlife") || lower.contains("animal")
                             });
-                            if let Some(tag_match) = top_wildlife {
-                                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
-                                let _ = conn.execute(
-                                    "INSERT INTO species_classifications(image_id, model_id, model_revision, scientific_name, common_name, taxon_rank, confidence, review_state, created_at, updated_at)
-                                     VALUES(?1, 'bioclip-v1', 'v1', ?2, ?3, 'species', ?4, 'suggested', ?5, ?5)",
-                                    rusqlite::params![
-                                        image_id,
-                                        format!("Aves (sp. {})", tag_match.name),
-                                        tag_match.name,
-                                        tag_match.confidence as f64,
-                                        now,
-                                    ],
-                                );
+                            if has_bird_or_wildlife {
+                                if let Ok(bioclip) = &bioclip_models {
+                                    if let Ok((taxon, confidence)) = run_bioclip_inference(&image, bioclip) {
+                                        // Cosine similarity is not a calibrated probability. Keep a conservative
+                                        // review threshold and preserve the raw similarity in the catalog.
+                                        if confidence >= 0.25 {
+                                            if let Ok(conn) = rusqlite::Connection::open(&worker_db_path) {
+                                                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+                                                let _ = conn.execute(
+                                                    "DELETE FROM species_classifications WHERE image_id = ?1 AND model_id = 'bioclip-v1' AND review_state = 'suggested'",
+                                                    [image_id],
+                                                );
+                                                let _ = conn.execute(
+                                                    "INSERT INTO species_classifications(image_id, model_id, model_revision, scientific_name, common_name, taxon_rank, confidence, review_state, created_at, updated_at)
+                                                     VALUES(?1, 'bioclip-v1', 'v1', ?2, ?3, ?4, ?5, 'suggested', ?6, ?6)",
+                                                    rusqlite::params![
+                                                        image_id,
+                                                        taxon.scientific_name,
+                                                        taxon.common_name,
+                                                        taxon.taxon_rank,
+                                                        confidence as f64,
+                                                        now,
+                                                    ],
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
+                        Err(error) => { let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(&worker_db_path, image_id, modified, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, "failed", Some(&error)); }
                     }
                 }
                 Err(error) => { let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(&worker_db_path, image_id, modified, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, "failed", Some(&error)); }
@@ -935,5 +1071,21 @@ mod tests {
     fn ram_plus_preprocessing_uses_expected_nchw_shape() {
         let image = DynamicImage::new_rgb8(16, 8);
         assert_eq!(ram_plus_input(&image).dim(), (1, 3, 384, 384));
+    }
+
+    #[test]
+    fn bioclip_preprocessing_uses_expected_nchw_shape() {
+        let image = DynamicImage::new_rgb8(16, 8);
+        assert_eq!(bioclip_input(&image).dim(), (1, 3, 224, 224));
+    }
+
+    #[test]
+    fn bioclip_taxonomy_requires_structured_records() {
+        let valid: Vec<BioClipTaxon> = serde_json::from_str(
+            r#"[{"scientificName":"Corvus corax","commonName":"Common raven","taxonRank":"species"}]"#,
+        )
+        .unwrap();
+        assert_eq!(valid[0].scientific_name, "Corvus corax");
+        assert!(serde_json::from_str::<Vec<BioClipTaxon>>(r#"["Common raven"]"#).is_err());
     }
 }
