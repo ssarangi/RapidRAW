@@ -805,9 +805,25 @@ export default function MetadataPanel() {
                               <div className="text-text-secondary truncate mb-1">
                                 Path: <span className="text-text-primary">{deriv.outputPath}</span>
                               </div>
-                              <div className="text-text-secondary">
+                              <div className="text-text-secondary mb-2">
                                 Model: {deriv.modelId} ({deriv.width}x{deriv.height})
                               </div>
+                              {deriv.state === 'completed' && (
+                                <button
+                                  className="w-full py-1 bg-surface-hover border border-border-color/40 text-text-primary rounded text-xs hover:bg-card-active transition-colors"
+                                  onClick={() => {
+                                    useEditorStore.getState().setSelectedImage({
+                                      path: deriv.outputPath,
+                                      name: deriv.outputPath.split(/[\\/]/).pop() || 'derivative.tiff',
+                                      width: deriv.width || 0,
+                                      height: deriv.height || 0,
+                                    } as any);
+                                    useUIStore.getState().setActivePanel('editor');
+                                  }}
+                                >
+                                  Open in Editor
+                                </button>
+                              )}
                             </div>
                           ))}
                         </div>
