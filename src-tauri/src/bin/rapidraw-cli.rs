@@ -87,7 +87,7 @@ fn metrics(arguments: &[String]) -> Result<serde_json::Value, String> {
             .map_err(|error| error.to_string())
     };
     Ok(
-        json!({ "images": count("SELECT COUNT(*) FROM images WHERE status = 'present'")?, "missing": count("SELECT COUNT(*) FROM images WHERE status = 'missing'")?, "aiSuggested": count("SELECT COUNT(*) FROM image_ai_tags WHERE review_state = 'suggested'")?, "aiAccepted": count("SELECT COUNT(*) FROM image_ai_tags WHERE review_state = 'accepted'")? }),
+        json!({ "images": count("SELECT COUNT(*) FROM images WHERE status = 'present'")?, "missing": count("SELECT COUNT(*) FROM images WHERE status = 'missing'")?, "aiSuggested": count("SELECT COUNT(*) FROM image_ai_tags WHERE review_state = 'suggested'")?, "aiAccepted": count("SELECT COUNT(*) FROM image_ai_tags WHERE review_state = 'accepted'")?, "cullSessions": count("SELECT COUNT(*) FROM cull_sessions")?, "cullOverrides": count("SELECT COUNT(*) FROM cull_decision_events")? }),
     )
 }
 
