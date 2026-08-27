@@ -34,7 +34,16 @@ export default function FaceModelsSettings({ onOpenExternal }: FaceModelsSetting
     setLoading(true);
     setLoadingError(null);
     try {
-      setStatuses(await invoke<FaceModelPackStatus[]>(Invokes.ListFaceModelPackStatuses));
+      const rawStatuses = await invoke<Array<FaceModelPackStatus & { id?: string }>>(
+        Invokes.ListFaceModelPackStatuses,
+      );
+      // Rust serializes FaceModelPackStatus with `#[serde(flatten)]`; normalize it
+      // here so this component remains compatible with both payload shapes.
+      setStatuses(
+        rawStatuses
+          .filter((status): status is FaceModelPackStatus & { id: string } => Boolean(status?.pack?.id || status?.id))
+          .map((status) => (status.pack ? status : { ...status, pack: status } as FaceModelPackStatus)),
+      );
     } catch (error) {
       setLoadingError(String(error));
     } finally {

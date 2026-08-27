@@ -1287,7 +1287,7 @@ export default function SettingsPanel({
     <>
       <ConfirmModal {...confirmModalState} onClose={closeConfirmModal} />
       <LayoutGroup id="settings-panel">
-        <div className="flex flex-col h-full w-full text-text-primary">
+        <div className="flex flex-col h-full w-full min-w-0 text-text-primary">
           <header className="shrink-0 flex flex-wrap items-center justify-between gap-y-4 mb-8 pt-4">
             <div className="flex items-center shrink-0">
               <Button
@@ -1335,7 +1335,7 @@ export default function SettingsPanel({
             </div>
           </header>
 
-          <div className="flex-1 overflow-y-auto overflow-x-hidden pr-2 -mr-2 custom-scrollbar">
+          <div className="flex-1 min-w-0 overflow-y-auto overflow-x-hidden pr-2 -mr-2 custom-scrollbar">
             <AnimatePresence mode="wait">
               {activeCategory === 'general' && (
                 <motion.div
@@ -1344,9 +1344,9 @@ export default function SettingsPanel({
                   animate={{ opacity: 1, x: 0 }}
                   exit={{ opacity: 0, x: -10 }}
                   transition={{ duration: 0.2 }}
-                  className="space-y-10"
+                  className="w-full min-w-0 space-y-10"
                 >
-                  <div className="p-6 bg-surface rounded-xl shadow-md">
+                  <div className="w-full min-w-0 p-6 bg-surface rounded-xl shadow-md">
                     <Text variant={TextVariants.title} color={TextColors.accent} className="mb-8">
                       {t('settings.general.title')}
                     </Text>
@@ -2316,9 +2316,9 @@ export default function SettingsPanel({
                   animate={{ opacity: 1, x: 0 }}
                   exit={{ opacity: 0, x: -10 }}
                   transition={{ duration: 0.2 }}
-                  className="space-y-10"
+                  className="w-full min-w-0 space-y-10"
                 >
-                  <div className="p-6 bg-surface rounded-xl shadow-md">
+                  <div className="w-full min-w-0 p-6 bg-surface rounded-xl shadow-md">
                     <Text variant={TextVariants.title} color={TextColors.accent} className="mb-8">
                       {t('settings.processing.title')}
                     </Text>
