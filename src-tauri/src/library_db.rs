@@ -18,7 +18,7 @@ use crate::file_management::{ImageFile, parse_virtual_path};
 use crate::file_management::{assign_group_ids, read_file_mapped};
 use crate::formats::{is_raw_file, is_supported_image_file};
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -159,6 +159,42 @@ pub struct CatalogMetrics {
     pub ai_tags: Vec<CatalogFacetValue>,
     pub ratings: Vec<CatalogFacetValue>,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageProvenance {
+    pub image_id: i64,
+    pub path: String,
+    pub camera: Option<String>,
+    pub lens: Option<String>,
+    pub year: Option<i64>,
+    pub rating: i64,
+    pub ai_tags: Vec<ImageAiTagDetail>,
+    pub faces: Vec<CatalogFace>,
+    pub species: Vec<SpeciesDetail>,
+    pub analysis_errors: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageAiTagDetail {
+    pub name: String,
+    pub confidence: f64,
+    pub review_state: String,
+    pub model_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeciesDetail {
+    pub scientific_name: String,
+    pub common_name: Option<String>,
+    pub taxon_rank: Option<String>,
+    pub confidence: f64,
+    pub review_state: String,
+    pub model_id: String,
+}
+
 
 /// A human-maintained identity. Detection and clustering may propose links to
 /// a person, but the person record is deliberately independent from any
@@ -729,6 +765,22 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           PRIMARY KEY(image_id, analysis_kind, model_id, model_revision, image_modified_at)
         );
         CREATE INDEX IF NOT EXISTS idx_image_ai_analysis_pending ON image_ai_analysis_state(analysis_kind, model_id, state);
+
+        CREATE TABLE IF NOT EXISTS species_classifications (
+          id INTEGER PRIMARY KEY,
+          image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+          model_id TEXT NOT NULL,
+          model_revision TEXT NOT NULL,
+          scientific_name TEXT NOT NULL,
+          common_name TEXT,
+          taxon_rank TEXT,
+          confidence REAL NOT NULL,
+          review_state TEXT NOT NULL DEFAULT 'suggested' CHECK(review_state IN ('suggested', 'accepted', 'rejected')),
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_species_classifications_image ON species_classifications(image_id, review_state);
+        CREATE INDEX IF NOT EXISTS idx_species_classifications_name ON species_classifications(scientific_name, common_name);
         ",
     )
     .map_err(|e| e.to_string())?;
@@ -788,6 +840,7 @@ mod tests {
             "cull_sessions",
             "cull_decisions",
             "cull_decision_events",
+            "species_classifications",
         ] {
             let exists: i64 = connection
                 .query_row(
@@ -3141,6 +3194,13 @@ pub fn list_catalog_faces(
 ) -> Result<Vec<CatalogFace>, String> {
     let db_path = active_library_path(&state)?;
     let conn = open_connection(&db_path)?;
+    list_faces_for_image_internal(&conn, image_id)
+}
+
+fn list_faces_for_image_internal(
+    conn: &Connection,
+    image_id: i64,
+) -> Result<Vec<CatalogFace>, String> {
     let mut statement = conn
         .prepare(
             "SELECT id, image_id, person_id, model_pack_id, detector_confidence,
@@ -3483,5 +3543,115 @@ pub fn get_catalog_metrics(
             &conn,
             "SELECT CAST(v.rating AS TEXT), COUNT(*) FROM image_versions v JOIN images i ON i.id = v.image_id WHERE i.status = 'present' GROUP BY v.rating ORDER BY v.rating DESC",
         )?,
+    })
+}
+
+#[tauri::command]
+pub fn get_image_provenance(
+    image_id: i64,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<ImageProvenance, String> {
+    let db_path = active_library_path(&state)?;
+    let conn = open_connection(&db_path)?;
+
+    let (path, camera_make, camera_model, lens_model, year): (String, Option<String>, Option<String>, Option<String>, Option<i64>) = conn
+        .query_row(
+            "SELECT r.absolute_path || '/' || i.relative_path, m.camera_make, m.camera_model, m.lens_model, m.year
+             FROM images i
+             JOIN collection_roots r ON r.id = i.root_id
+             LEFT JOIN image_metadata m ON m.image_id = i.id
+             WHERE i.id = ?1",
+            [image_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .map_err(|error| format!("Image not found: {error}"))?;
+
+    let camera = match (camera_make, camera_model) {
+        (Some(make), Some(model)) => Some(format!("{make} {model}")),
+        (Some(make), None) => Some(make),
+        (None, Some(model)) => Some(model),
+        (None, None) => None,
+    };
+
+    let rating: i64 = conn
+        .query_row(
+            "SELECT COALESCE(rating, 0) FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
+            [image_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    let mut ai_tag_stmt = conn
+        .prepare(
+            "SELECT t.name, iat.confidence, iat.review_state, iat.model_id
+             FROM image_ai_tags iat
+             JOIN tags t ON t.id = iat.tag_id
+             WHERE iat.image_id = ?1
+             ORDER BY iat.confidence DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let ai_tags = ai_tag_stmt
+        .query_map([image_id], |row| {
+            Ok(ImageAiTagDetail {
+                name: row.get(0)?,
+                confidence: row.get(1)?,
+                review_state: row.get(2)?,
+                model_id: row.get(3)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    let faces = list_faces_for_image_internal(&conn, image_id)?;
+
+    let mut species_stmt = conn
+        .prepare(
+            "SELECT scientific_name, common_name, taxon_rank, confidence, review_state, model_id
+             FROM species_classifications
+             WHERE image_id = ?1
+             ORDER BY confidence DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let species = species_stmt
+        .query_map([image_id], |row| {
+            Ok(SpeciesDetail {
+                scientific_name: row.get(0)?,
+                common_name: row.get(1)?,
+                taxon_rank: row.get(2)?,
+                confidence: row.get(3)?,
+                review_state: row.get(4)?,
+                model_id: row.get(5)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    let mut err_stmt = conn
+        .prepare(
+            "SELECT error_message FROM image_ai_analysis_state WHERE image_id = ?1 AND state = 'failed' AND error_message IS NOT NULL",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let analysis_errors = err_stmt
+        .query_map([image_id], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    Ok(ImageProvenance {
+        image_id,
+        path,
+        camera,
+        lens: lens_model,
+        year,
+        rating,
+        ai_tags,
+        faces,
+        species,
+        analysis_errors,
     })
 }

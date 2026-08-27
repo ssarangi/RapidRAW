@@ -2440,6 +2440,7 @@ pub fn run() {
             library_db::sync_catalog_paths,
             library_db::search_catalog_images,
             library_db::get_catalog_metrics,
+            library_db::get_image_provenance,
             library_db::list_catalog_people,
             library_db::list_smart_collections,
             library_db::save_smart_collection,
