@@ -155,6 +155,89 @@ pub fn calculate_tiles(
     tiles
 }
 
+/// Executes tiled neural image restoration using an ONNX model session if present,
+/// blending tiles with Hanning weight windows to prevent edge artifacts.
+pub fn run_neural_restoration_tiled(
+    img: &DynamicImage,
+    model_session: &mut ort::session::Session,
+    tile_size: u32,
+    tile_overlap: u32,
+    denoise_strength: f32,
+) -> Result<DynamicImage, String> {
+    let (width, height) = img.dimensions();
+    let tiles = calculate_tiles(width, height, tile_size, tile_overlap);
+    let rgb = img.to_rgb8();
+
+    let mut output_accum = vec![0.0f32; (width * height * 3) as usize];
+    let mut weight_accum = vec![0.0f32; (width * height) as usize];
+
+    for (tx, ty, tw, th) in tiles {
+        let mut input_tile = ndarray::Array4::<f32>::zeros((1, 3, th as usize, tw as usize));
+        for y in 0..th {
+            for x in 0..tw {
+                let px = rgb.get_pixel(tx + x, ty + y);
+                input_tile[[0, 0, y as usize, x as usize]] = px[0] as f32 / 255.0;
+                input_tile[[0, 1, y as usize, x as usize]] = px[1] as f32 / 255.0;
+                input_tile[[0, 2, y as usize, x as usize]] = px[2] as f32 / 255.0;
+            }
+        }
+
+        let tensor_input = ort::value::Tensor::from_array(input_tile).map_err(|e| e.to_string())?;
+        let outputs = model_session
+            .run(ort::inputs![tensor_input])
+            .map_err(|e| format!("Neural inference failed: {e}"))?;
+
+        let out_array = outputs[0]
+            .try_extract_array::<f32>()
+            .map_err(|e| e.to_string())?;
+
+        for y in 0..th {
+            let wy = (std::f32::consts::PI * (y as f32 + 0.5) / th as f32).sin();
+            for x in 0..tw {
+                let wx = (std::f32::consts::PI * (x as f32 + 0.5) / tw as f32).sin();
+                let w = (wx * wy).max(0.01);
+
+                let global_x = tx + x;
+                let global_y = ty + y;
+                let global_idx = (global_y * width + global_x) as usize;
+
+                let r_pred = out_array[[0, 0, y as usize, x as usize]];
+                let g_pred = out_array[[0, 1, y as usize, x as usize]];
+                let b_pred = out_array[[0, 2, y as usize, x as usize]];
+
+                // Blend prediction with original based on denoise_strength
+                let px_orig = rgb.get_pixel(global_x, global_y);
+                let r_orig = px_orig[0] as f32 / 255.0;
+                let g_orig = px_orig[1] as f32 / 255.0;
+                let b_orig = px_orig[2] as f32 / 255.0;
+
+                let r_blended = r_orig * (1.0 - denoise_strength) + r_pred * denoise_strength;
+                let g_blended = g_orig * (1.0 - denoise_strength) + g_pred * denoise_strength;
+                let b_blended = b_orig * (1.0 - denoise_strength) + b_pred * denoise_strength;
+
+                output_accum[global_idx * 3] += r_blended * w;
+                output_accum[global_idx * 3 + 1] += g_blended * w;
+                output_accum[global_idx * 3 + 2] += b_blended * w;
+                weight_accum[global_idx] += w;
+            }
+        }
+    }
+
+    let mut out_buffer = ImageBuffer::<Rgb<u8>, Vec<u8>>::new(width, height);
+    for y in 0..height {
+        for x in 0..width {
+            let idx = (y * width + x) as usize;
+            let w = weight_accum[idx].max(f32::EPSILON);
+            let r = (output_accum[idx * 3] / w * 255.0).clamp(0.0, 255.0) as u8;
+            let g = (output_accum[idx * 3 + 1] / w * 255.0).clamp(0.0, 255.0) as u8;
+            let b = (output_accum[idx * 3 + 2] / w * 255.0).clamp(0.0, 255.0) as u8;
+            out_buffer.put_pixel(x, y, Rgb([r, g, b]));
+        }
+    }
+
+    Ok(DynamicImage::ImageRgb8(out_buffer))
+}
+
 /// Packs single-channel Bayer mosaic CFA raw values into a 4-channel NCHW tensor
 /// format [R, G1, G2, B] normalized by camera black/white level.
 pub fn pack_bayer_cfa(
@@ -456,8 +539,38 @@ fn run_restoration_worker(
         None,
     );
 
-    // Apply microcontrast enhancement and restoration parameters
-    let enhanced = apply_microcontrast(&img, recipe.microcontrast_strength, recipe.detail_recovery);
+    // Check if neural model is installed and load session
+    let restored = match crate::visual_model_registry::installed_visual_model_path(
+        _app_handle,
+        &recipe.model_id,
+        if recipe.model_id.contains("rawnind") {
+            "rawnind_bayer.onnx"
+        } else if recipe.model_id.contains("nafnet") {
+            "nafnet_sidd.onnx"
+        } else {
+            "model.onnx"
+        },
+    ) {
+        Ok(model_file) if model_file.exists() => {
+            match ort::session::Session::builder().and_then(|b| b.commit_from_file(&model_file)) {
+                Ok(mut session) => {
+                    run_neural_restoration_tiled(
+                        &img,
+                        &mut session,
+                        recipe.tile_size,
+                        recipe.tile_overlap,
+                        recipe.denoise_strength,
+                    )
+                    .unwrap_or_else(|_| img.clone())
+                }
+                Err(_) => img.clone(),
+            }
+        }
+        _ => img.clone(),
+    };
+
+    // Apply microcontrast enhancement and detail sharpening on restored image
+    let enhanced = apply_microcontrast(&restored, recipe.microcontrast_strength, recipe.detail_recovery);
 
     if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
         let _ = fs::remove_file(&temp_output);

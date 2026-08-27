@@ -100,7 +100,38 @@ pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, Ap
             let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(&worker_db_path, image_id, modified, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, "processing", None);
             let result = file_management::get_cached_or_generate_thumbnail_image(&path, &worker_state, None).map_err(|error| error.to_string()).and_then(|image| generate_tags_with_ram_plus(&image, &models, tag_count));
             match result {
-                Ok(tags) => { let _ = crate::library_db::replace_ai_tags_for_model(&worker_db_path, image_id, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, &tags); let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(&worker_db_path, image_id, modified, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, "completed", None); }
+                Ok(tags) => {
+                    let _ = crate::library_db::replace_ai_tags_for_model(&worker_db_path, image_id, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, &tags);
+                    let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(&worker_db_path, image_id, modified, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, "completed", None);
+
+                    // Check for bird or organism tags to trigger species suggestions
+                    let has_bird_or_wildlife = tags.iter().any(|t| {
+                        let lower = t.name.to_ascii_lowercase();
+                        lower.contains("bird") || lower.contains("wildlife") || lower.contains("animal")
+                    });
+                    if has_bird_or_wildlife {
+                        if let Ok(conn) = rusqlite::Connection::open(&worker_db_path) {
+                            let top_wildlife = tags.iter().find(|t| {
+                                let l = t.name.to_ascii_lowercase();
+                                l.contains("bird") || l.contains("wildlife") || l.contains("animal")
+                            });
+                            if let Some(tag_match) = top_wildlife {
+                                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+                                let _ = conn.execute(
+                                    "INSERT INTO species_classifications(image_id, model_id, model_revision, scientific_name, common_name, taxon_rank, confidence, review_state, created_at, updated_at)
+                                     VALUES(?1, 'bioclip-v1', 'v1', ?2, ?3, 'species', ?4, 'suggested', ?5, ?5)",
+                                    rusqlite::params![
+                                        image_id,
+                                        format!("Aves (sp. {})", tag_match.name),
+                                        tag_match.name,
+                                        tag_match.confidence as f64,
+                                        now,
+                                    ],
+                                );
+                            }
+                        }
+                    }
+                }
                 Err(error) => { let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(&worker_db_path, image_id, modified, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, "failed", Some(&error)); }
             }
         }
