@@ -261,6 +261,7 @@ export default function BottomBar({
   const activeBackgroundJobs = backgroundJobs.filter((job) =>
     ['queued', 'running', 'paused', 'cancelling'].includes(job.state),
   );
+  const activeBackgroundJob = activeBackgroundJobs[0];
 
   const handlePauseCatalogScan = async () => {
     try {
@@ -663,7 +664,9 @@ export default function BottomBar({
                       : catalogScan.total > 0
                         ? `Indexing collection ${catalogScan.current}/${catalogScan.total}${catalogScanFileName ? ` · ${catalogScanFileName}` : ''}`
                         : activeBackgroundJobs.length > 0
-                          ? `${activeBackgroundJobs.length} active background job${activeBackgroundJobs.length === 1 ? '' : 's'}`
+                          ? activeBackgroundJobs.length === 1
+                            ? activeBackgroundJob?.message || 'Background job running'
+                            : `${activeBackgroundJobs.length} active background jobs`
                           : 'Background jobs'}
                 </Text>
                 {catalogScanPercent !== null && (
@@ -945,6 +948,7 @@ export default function BottomBar({
                             </div>
                           </div>
                           <Text variant={TextVariants.small} color={TextColors.secondary} className="truncate">{job.message}</Text>
+                          {job.currentItem && <Text variant={TextVariants.small} color={TextColors.secondary} className="truncate">{job.currentItem.split(/[\\/]/).pop()}</Text>}
                           {job.total > 0 && <Text variant={TextVariants.small} color={TextColors.secondary}>{job.current}/{job.total}</Text>}
                           {job.error && <Text variant={TextVariants.small} className="text-red-300 truncate">{job.error}</Text>}
                         </div>
