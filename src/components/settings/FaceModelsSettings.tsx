@@ -83,15 +83,48 @@ export default function FaceModelsSettings({ onOpenExternal }: FaceModelsSetting
     }
   };
 
+  const downloadEligible = async () => {
+    const eligible = statuses.filter(
+      (status) =>
+        !status.installed &&
+        status.pack.availability === 'directDownload' &&
+        (!status.pack.licenseAcknowledgementRequired || acceptedLicenses.has(status.pack.id)),
+    );
+    if (eligible.length === 0) {
+      setActionError('No eligible model packs are available. Accept required upstream licenses before downloading restricted packs.');
+      return;
+    }
+    setActionError(null);
+    for (const status of eligible) {
+      setActiveDownload({ packId: status.pack.id, displayName: status.pack.displayName, current: 0, total: status.pack.artifacts.length, stage: 'Preparing download' });
+      try {
+        await invoke<FaceModelPackStatus>(Invokes.DownloadFaceModelPack, {
+          packId: status.pack.id,
+          acceptRestrictedLicense: acceptedLicenses.has(status.pack.id),
+        });
+      } catch (error) {
+        setActionError(`Could not download ${status.pack.displayName}: ${String(error)}`);
+        break;
+      }
+    }
+    setActiveDownload(null);
+    await refresh();
+  };
+
   return (
     <div className="p-6 bg-surface rounded-xl shadow-md space-y-6">
-      <div>
-        <Text variant={TextVariants.title} color={TextColors.accent} className="mb-2">
-          Face Models
-        </Text>
-        <Text variant={TextVariants.small}>
-          Manage local face detection and recognition models. Downloads stay on this device and no photo data is sent to a service.
-        </Text>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <Text variant={TextVariants.title} color={TextColors.accent} className="mb-2">
+            Face Models
+          </Text>
+          <Text variant={TextVariants.small}>
+            Manage local face detection and recognition models. Downloads stay on this device and no photo data is sent to a service.
+          </Text>
+        </div>
+        <Button onClick={() => void downloadEligible()} disabled={activeDownload !== null || loading} className="shrink-0">
+          <Download size={16} /> Download eligible
+        </Button>
       </div>
 
       <div className="rounded-md border border-border-color bg-bg-primary p-4 flex items-start gap-3">
