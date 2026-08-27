@@ -348,16 +348,28 @@ fn run_restoration_worker(
         .as_secs() as i64;
     let recipe_json = serde_json::to_string(recipe).unwrap_or_default();
 
+    // Calculate input hash for provenance verification
+    let input_hash = match fs::read(&source_path) {
+        Ok(bytes) => {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            Some(hex::encode(hasher.finalize()))
+        }
+        Err(_) => None,
+    };
+
     // Create queued derivative record
     conn.execute(
-        "INSERT INTO image_derivatives(source_image_id, operation_kind, model_id, model_revision, recipe_json, output_path, output_format, state, created_at, updated_at)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, 'tiff', 'running', ?7, ?7)",
+        "INSERT INTO image_derivatives(source_image_id, operation_kind, model_id, model_revision, recipe_json, input_hash, output_path, output_format, state, created_at, updated_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 'tiff', 'running', ?8, ?8)",
         rusqlite::params![
             image_id,
             recipe.operation_kind,
             recipe.model_id,
             recipe.model_revision,
             recipe_json,
+            input_hash,
             final_output.to_string_lossy().to_string(),
             now,
         ],
@@ -411,8 +423,15 @@ fn run_restoration_worker(
     };
     let (width, height) = img.dimensions();
 
-    // Check pause state
+    // Check pause state with cancellation awareness
     while pause.load(std::sync::atomic::Ordering::SeqCst) {
+        if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = conn.execute(
+                "UPDATE image_derivatives SET state = 'cancelled', updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![now, derivative_id],
+            );
+            return Err("Restoration cancelled".to_string());
+        }
         let _ = crate::library_db::update_job(
             db_path,
             job_id,
@@ -471,17 +490,29 @@ fn run_restoration_worker(
         return Err(error_msg);
     }
 
+    // Calculate output hash for provenance verification
+    let output_hash = match fs::read(&final_output) {
+        Ok(bytes) => {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            Some(hex::encode(hasher.finalize()))
+        }
+        Err(_) => None,
+    };
+
     let completed_now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
 
-    // Update derivative record to completed
+    // Update derivative record to completed with provenance hashes
     conn.execute(
-        "UPDATE image_derivatives SET width = ?1, height = ?2, state = 'completed', completed_at = ?3, updated_at = ?3 WHERE id = ?4",
+        "UPDATE image_derivatives SET width = ?1, height = ?2, output_hash = ?3, state = 'completed', completed_at = ?4, updated_at = ?4 WHERE id = ?5",
         rusqlite::params![
             width as i64,
             height as i64,
+            output_hash,
             completed_now,
             derivative_id,
         ],

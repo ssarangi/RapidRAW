@@ -36,8 +36,6 @@ fn main() {
         Some("library") if arguments.get(1).map(String::as_str) == Some("roots") => list_roots(&arguments),
         Some("library") if arguments.get(1).map(String::as_str) == Some("metrics") => metrics(&arguments),
         Some("jobs") if arguments.get(1).map(String::as_str) == Some("list") => list_jobs(&arguments),
-        Some("jobs") if arguments.get(1).map(String::as_str) == Some("retry") => retry_job(&arguments),
-        Some("jobs") if arguments.get(1).map(String::as_str) == Some("cancel") => cancel_job(&arguments),
         Some("faces") if arguments.get(1).map(String::as_str) == Some("status") => face_status(&arguments),
         Some("faces") if arguments.get(1).map(String::as_str) == Some("clusters") => face_clusters(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("status") => tag_status(&arguments),
@@ -51,7 +49,7 @@ fn main() {
         Some("models") if arguments.get(1).map(String::as_str) == Some("info") => verify_model(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("list") => list_derivatives(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("run") => run_restore_cli(&arguments),
-        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list|retry|cancel --database <catalog.db> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top|export-suggestions --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id>".to_string()),
+        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top|export-suggestions --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id>".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -299,36 +297,6 @@ fn cull_decisions(arguments: &[String]) -> Result<serde_json::Value, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     Ok(json!(decisions))
-}
-
-fn retry_job(arguments: &[String]) -> Result<serde_json::Value, String> {
-    let connection = Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
-    let job_id = named_argument(arguments, "--job")?;
-    let updated = connection
-        .execute(
-            "UPDATE background_jobs SET state = 'queued', message = 'Job queued for retry', error = NULL, updated_at = strftime('%s','now') WHERE id = ?1 AND state IN ('failed', 'cancelled')",
-            [&job_id],
-        )
-        .map_err(|error| error.to_string())?;
-    if updated == 0 {
-        return Err(format!("Job {job_id} is not eligible for retry"));
-    }
-    Ok(json!({ "id": job_id, "status": "queued" }))
-}
-
-fn cancel_job(arguments: &[String]) -> Result<serde_json::Value, String> {
-    let connection = Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
-    let job_id = named_argument(arguments, "--job")?;
-    let updated = connection
-        .execute(
-            "UPDATE background_jobs SET state = 'cancelled', message = 'Cancelled via CLI', updated_at = strftime('%s','now'), completed_at = strftime('%s','now') WHERE id = ?1 AND state IN ('queued', 'running', 'paused', 'cancelling')",
-            [&job_id],
-        )
-        .map_err(|error| error.to_string())?;
-    if updated == 0 {
-        return Err(format!("Job {job_id} is not cancellable"));
-    }
-    Ok(json!({ "id": job_id, "status": "cancelled" }))
 }
 
 fn export_tag_suggestions(arguments: &[String]) -> Result<serde_json::Value, String> {
