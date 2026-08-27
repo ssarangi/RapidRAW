@@ -125,6 +125,7 @@ export enum Invokes {
   UpdateCullSessionDecision = 'update_cull_session_decision',
   ListCatalogFaces = 'list_catalog_faces',
   CreateCatalogPerson = 'create_catalog_person',
+  RenameCatalogPerson = 'rename_catalog_person',
   MergeCatalogPeople = 'merge_catalog_people',
   ReviewCatalogFace = 'review_catalog_face',
   ListBackgroundJobs = 'list_background_jobs',

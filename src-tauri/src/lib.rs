@@ -2453,6 +2453,7 @@ pub fn run() {
             library_db::list_suggested_ai_tags,
             library_db::review_ai_tag,
             library_db::create_catalog_person,
+            library_db::rename_catalog_person,
             library_db::merge_catalog_people,
             library_db::review_catalog_face,
             library_db::list_background_jobs,

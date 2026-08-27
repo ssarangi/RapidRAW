@@ -3042,6 +3042,45 @@ pub fn create_catalog_person(
 }
 
 #[tauri::command]
+pub fn rename_catalog_person(
+    person_id: i64,
+    display_name: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<CatalogPerson, String> {
+    let display_name = display_name.trim();
+    if display_name.is_empty() {
+        return Err("Person name cannot be empty".to_string());
+    }
+    let conn = open_connection(&active_library_path(&state)?)?;
+    let changed = conn
+        .execute(
+            "UPDATE people SET display_name = ?1, updated_at = ?2 WHERE id = ?3 AND state = 'active'",
+            params![display_name, now_secs(), person_id],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("Active catalog person was not found".to_string());
+    }
+    conn.query_row(
+        "SELECT p.id, p.display_name, p.state, COUNT(f.id)
+         FROM people p
+         LEFT JOIN faces f ON f.person_id = p.id AND f.review_state = 'confirmed'
+         WHERE p.id = ?1
+         GROUP BY p.id",
+        [person_id],
+        |row| {
+            Ok(CatalogPerson {
+                id: row.get(0)?,
+                display_name: row.get(1)?,
+                state: row.get(2)?,
+                face_count: row.get(3)?,
+            })
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn merge_catalog_people(
     source_person_id: i64,
     target_person_id: i64,
