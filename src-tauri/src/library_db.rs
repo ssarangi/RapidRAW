@@ -2960,6 +2960,30 @@ pub fn list_cull_session_decisions(
 }
 
 #[tauri::command]
+pub fn update_cull_session_decision(
+    session_id: i64,
+    representative_path: String,
+    keep: bool,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let mut connection = open_connection(&active_library_path(&state)?)?;
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let changed = transaction
+        .execute(
+            "UPDATE cull_decisions SET proposed_status = ?1, updated_at = strftime('%s','now') WHERE session_id = ?2 AND representative_path = ?3",
+            params![if keep { "keep" } else { "reject" }, session_id, representative_path],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 { return Err("Culling decision was not found".to_string()); }
+    transaction.execute(
+        "UPDATE cull_sessions SET rejected_count = (SELECT COUNT(*) FROM cull_decisions WHERE session_id = ?1 AND proposed_status = 'reject'), updated_at = strftime('%s','now') WHERE id = ?1",
+        [session_id],
+    ).map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 pub fn create_catalog_person(
     display_name: String,
     state: tauri::State<'_, crate::AppState>,

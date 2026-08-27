@@ -2443,6 +2443,7 @@ pub fn run() {
             library_db::delete_smart_collection,
             library_db::list_cull_sessions,
             library_db::list_cull_session_decisions,
+            library_db::update_cull_session_decision,
             library_db::list_catalog_faces,
             library_db::list_unreviewed_catalog_faces,
             library_db::list_unreviewed_face_clusters,

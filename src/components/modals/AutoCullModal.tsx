@@ -110,6 +110,20 @@ export default function AutoCullModal() {
   const keepItems = useMemo(() => (plan ? plan.items.filter((i) => i.keep) : []), [plan]);
   const conflictItems = useMemo(() => rejectItems.filter((i) => i.hasConflict), [rejectItems]);
 
+  const togglePlanItem = async (representativePath: string) => {
+    if (!plan) return;
+    const item = plan.items.find((candidate) => candidate.representativePath === representativePath);
+    if (!item) return;
+    const keep = !item.keep;
+    const updatedItems = plan.items.map((candidate) => candidate.representativePath === representativePath ? { ...candidate, keep } : candidate);
+    const updatedPlan = { ...plan, items: updatedItems, rejectCount: updatedItems.filter((candidate) => !candidate.keep).length };
+    setUI((s) => ({ autoCullModalState: { ...s.autoCullModalState, plan: updatedPlan } }));
+    if (plan.sessionId) {
+      try { await invoke(Invokes.UpdateCullSessionDecision, { sessionId: plan.sessionId, representativePath, keep }); }
+      catch (err) { setUI((s) => ({ autoCullModalState: { ...s.autoCullModalState, plan, error: String(err) } })); }
+    }
+  };
+
   if (!isOpen) return null;
 
   const renderRules = () => (
@@ -288,13 +302,13 @@ export default function AutoCullModal() {
         </Text>
 
         <div className="bg-bg-primary rounded-lg p-2 h-[40vh] overflow-y-auto text-sm">
-          {rejectItems.length === 0 ? (
+          {plan.items.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full">
               <CheckCircle className="w-10 h-10 text-green-500 mb-2" />
               <Text>{t('modals.autoCull.nothingToReject')}</Text>
             </div>
           ) : (
-            rejectItems.map((item) => (
+            plan.items.map((item) => (
               <div
                 key={item.representativePath}
                 className="flex items-center justify-between px-2 py-1.5 border-b border-surface last:border-0"
@@ -303,13 +317,14 @@ export default function AutoCullModal() {
                   {item.representativePath.split(/[\\/]/).pop()}
                 </Text>
                 <div className="flex items-center gap-2">
+                  <button className={item.keep ? 'text-green-300 text-xs hover:text-green-200' : 'text-red-300 text-xs hover:text-red-200'} onClick={() => void togglePlanItem(item.representativePath)} data-tooltip={item.keep ? 'Mark as reject' : 'Keep this image'}>{item.keep ? 'Keep' : 'Reject'}</button>
                   {item.hasConflict && (
                     <Text variant={TextVariants.small} className="text-yellow-500">
                       {t('modals.autoCull.reasonConflict')}
                     </Text>
                   )}
                   <Text variant={TextVariants.small} color={TextColors.secondary}>
-                    {item.reason.startsWith('duplicate_of:')
+                    {item.keep ? (item.reason === 'best_in_group' ? 'Best in group' : 'Unique') : item.reason.startsWith('duplicate_of:')
                       ? t('modals.autoCull.reasonDuplicate')
                       : t('modals.autoCull.reasonBlurry')}
                   </Text>

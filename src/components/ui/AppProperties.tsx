@@ -120,6 +120,7 @@ export enum Invokes {
   DeleteSmartCollection = 'delete_smart_collection',
   ListCullSessions = 'list_cull_sessions',
   ListCullSessionDecisions = 'list_cull_session_decisions',
+  UpdateCullSessionDecision = 'update_cull_session_decision',
   ListCatalogFaces = 'list_catalog_faces',
   CreateCatalogPerson = 'create_catalog_person',
   MergeCatalogPeople = 'merge_catalog_people',
