@@ -110,6 +110,29 @@ fn installed(pack: &VisualModelPack, directory: &Path) -> bool {
     manifest_path(directory).exists() && pack.artifacts.iter().all(|artifact| directory.join(&artifact.file_name).is_file())
 }
 
+fn fail_download_job(
+    job: &Option<(PathBuf, String)>,
+    state: &tauri::State<'_, crate::AppState>,
+    error: String,
+    current: i64,
+    total: i64,
+) -> String {
+    if let Some((db_path, job_id)) = job.as_ref() {
+        let _ = crate::library_db::update_job(
+            db_path,
+            job_id,
+            "failed",
+            "Model download failed",
+            current,
+            total,
+            None,
+            Some(&error),
+        );
+        state.background_job_cancellations.lock().unwrap().remove(job_id);
+    }
+    error
+}
+
 #[tauri::command]
 pub fn list_visual_model_pack_statuses(app_handle: AppHandle) -> Result<Vec<VisualModelPackStatus>, String> {
     visual_model_packs().into_iter().map(|pack| {
@@ -187,8 +210,15 @@ pub async fn download_visual_model_pack(
                 None,
             );
         }
-        let response = reqwest::get(&artifact.source_url).await.map_err(|error| error.to_string())?.error_for_status().map_err(|error| error.to_string())?;
-        let bytes = response.bytes().await.map_err(|error| error.to_string())?;
+        let response = reqwest::get(&artifact.source_url)
+            .await
+            .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?
+            .error_for_status()
+            .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
         if cancellation
             .as_ref()
             .is_some_and(|token| token.load(Ordering::SeqCst))
@@ -199,16 +229,21 @@ pub async fn download_visual_model_pack(
             }
             return Err("Model download cancelled".to_string());
         }
-        if bytes.is_empty() { return Err(format!("Downloaded {} was empty", artifact.file_name)); }
+        if bytes.is_empty() {
+            return Err(fail_download_job(&job, &state, format!("Downloaded {} was empty", artifact.file_name), current, total));
+        }
         let target = directory.join(&artifact.file_name);
         let temporary = target.with_extension("download");
-        let mut file = fs::File::create(&temporary).map_err(|error| error.to_string())?;
-        file.write_all(&bytes).map_err(|error| error.to_string())?;
-        file.sync_all().map_err(|error| error.to_string())?;
-        fs::rename(&temporary, &target).map_err(|error| error.to_string())?;
+        let mut file = fs::File::create(&temporary).map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
+        file.write_all(&bytes).map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
+        file.sync_all().map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
+        fs::rename(&temporary, &target).map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
     }
     let manifest = InstalledVisualModelPack { pack_id: pack.id.clone(), installed_at: Utc::now().timestamp(), source_path: None };
-    fs::write(manifest_path(&directory), serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+    let manifest = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| fail_download_job(&job, &state, error.to_string(), total, total))?;
+    fs::write(manifest_path(&directory), manifest)
+        .map_err(|error| fail_download_job(&job, &state, error.to_string(), total, total))?;
     if let Some((db_path, job_id)) = job.as_ref() {
         let _ = crate::library_db::update_job(db_path, job_id, "completed", "Model download complete", total, total, None, None);
         state.background_job_cancellations.lock().unwrap().remove(job_id);
