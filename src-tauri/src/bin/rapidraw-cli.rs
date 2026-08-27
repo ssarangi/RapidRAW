@@ -20,6 +20,12 @@ fn named_argument(arguments: &[String], flag: &str) -> Result<String, String> {
         .ok_or_else(|| format!("{flag} <value> is required"))
 }
 
+fn numeric_argument(arguments: &[String], flag: &str) -> Result<i64, String> {
+    named_argument(arguments, flag)?
+        .parse::<i64>()
+        .map_err(|_| format!("{flag} must be an integer"))
+}
+
 fn main() {
     let arguments: Vec<String> = env::args().skip(1).collect();
     let result = match arguments.first().map(String::as_str) {
@@ -33,7 +39,9 @@ fn main() {
         Some("tags") if arguments.get(1).map(String::as_str) == Some("top") => top_tags(&arguments),
         Some("collections") if arguments.get(1).map(String::as_str) == Some("list") => list_collections(&arguments),
         Some("collections") if arguments.get(1).map(String::as_str) == Some("show") => show_collection(&arguments),
-        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name>".to_string()),
+        Some("cull") if arguments.get(1).map(String::as_str) == Some("sessions") => cull_sessions(&arguments),
+        Some("cull") if arguments.get(1).map(String::as_str) == Some("decisions") => cull_decisions(&arguments),
+        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id>".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -233,4 +241,48 @@ fn show_collection(arguments: &[String]) -> Result<serde_json::Value, String> {
             },
         )
         .map_err(|error| error.to_string())
+}
+
+fn cull_sessions(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let connection =
+        Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare("SELECT id, root_id, scope_path, state, total_count, rejected_count, created_at, updated_at FROM cull_sessions ORDER BY updated_at DESC LIMIT 100")
+        .map_err(|error| error.to_string())?;
+    let sessions = statement
+        .query_map([], |row| Ok(json!({
+            "id": row.get::<_, i64>(0)?,
+            "rootId": row.get::<_, Option<i64>>(1)?,
+            "scopePath": row.get::<_, String>(2)?,
+            "state": row.get::<_, String>(3)?,
+            "total": row.get::<_, i64>(4)?,
+            "rejected": row.get::<_, i64>(5)?,
+            "createdAt": row.get::<_, i64>(6)?,
+            "updatedAt": row.get::<_, i64>(7)?,
+        })))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(json!(sessions))
+}
+
+fn cull_decisions(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let connection =
+        Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let session_id = numeric_argument(arguments, "--session")?;
+    let mut statement = connection
+        .prepare("SELECT representative_path, proposed_status, final_status, quality_score, reason FROM cull_decisions WHERE session_id = ?1 ORDER BY quality_score DESC")
+        .map_err(|error| error.to_string())?;
+    let decisions = statement
+        .query_map([session_id], |row| Ok(json!({
+            "path": row.get::<_, String>(0)?,
+            "proposed": row.get::<_, String>(1)?,
+            "final": row.get::<_, String>(2)?,
+            "qualityScore": row.get::<_, f64>(3)?,
+            "reason": row.get::<_, String>(4)?,
+        })))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(json!(decisions))
 }
