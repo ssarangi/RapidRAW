@@ -17,6 +17,8 @@ import {
   Sparkles,
   Tags,
   User,
+  Bookmark,
+  Trash2,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
@@ -27,6 +29,7 @@ import {
   CatalogMetrics,
   CatalogRoot,
   CatalogSearchQuery,
+  SmartCollection,
   FilterCriteria,
   ImageFile,
   Invokes,
@@ -607,7 +610,7 @@ export function CatalogSearchDropdown() {
     if (!name) { toast.info('Enter a smart collection name.'); return; }
     const tags = form.tags.split(',').map((tag) => tag.trim()).filter(Boolean);
     const aiTags = form.aiTags.split(',').map((tag) => tag.trim()).filter(Boolean);
-    const query: CatalogSearchQuery = { rootId: activeRoot?.id ?? null, text: form.text.trim() || null, year: form.year ? Number(form.year) : null, camera: form.camera || null, lens: form.lens || null, person: form.person || null, tags: tags.length ? tags : null, aiTags: aiTags.length ? aiTags : null, minRating: form.minRating ? Number(form.minRating) : null, limit: 20_000 };
+    const query: CatalogSearchQuery = { rootId: activeRoot?.id ?? null, text: form.text.trim() || null, year: form.year ? Number(form.year) : null, camera: form.camera || null, lens: form.lens || null, person: form.person || null, tags: tags.length ? tags : null, aiTags: aiTags.length ? aiTags : null, tagMode: tags.length > 1 ? 'AND' : null, minRating: form.minRating ? Number(form.minRating) : null, limit: 20_000 };
     try { await invoke(Invokes.SaveSmartCollection, { name, queryJson: JSON.stringify(query) }); setCollectionName(''); toast.success('Smart collection saved.'); } catch (error) { toast.error(`Failed to save smart collection: ${error}`); }
   };
 
@@ -757,6 +760,136 @@ export function CatalogSearchDropdown() {
                   Search
                 </Button>
               </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
+export function SmartCollectionsDropdown() {
+  const [isOpen, setIsOpen] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isApplying, setIsApplying] = useState(false);
+  const [collections, setCollections] = useState<SmartCollection[]>([]);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const { librarySource, catalogRoots } = useLibraryStore(
+    useShallow((state) => ({ librarySource: state.librarySource, catalogRoots: state.catalogRoots })),
+  );
+  const isCatalogAvailable = librarySource.type === 'catalog';
+
+  const loadCollections = async () => {
+    if (!isCatalogAvailable) return;
+    setIsLoading(true);
+    try {
+      setCollections(await invoke<SmartCollection[]>(Invokes.ListSmartCollections));
+    } catch (error) {
+      console.error('Failed to load smart collections:', error);
+      toast.error(`Failed to load smart collections: ${error}`);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) setIsOpen(false);
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const toggleOpen = () => {
+    const nextOpen = !isOpen;
+    setIsOpen(nextOpen);
+    if (nextOpen) void loadCollections();
+  };
+
+  const applyCollection = async (collection: SmartCollection) => {
+    let query: CatalogSearchQuery;
+    try {
+      query = JSON.parse(collection.queryJson) as CatalogSearchQuery;
+    } catch {
+      toast.error(`Smart collection "${collection.name}" has an invalid query.`);
+      return;
+    }
+
+    setIsApplying(true);
+    try {
+      const files = await invoke<ImageFile[]>(Invokes.SearchCatalogImages, { query });
+      const imageRatings: Record<string, number> = {};
+      files.forEach((file) => { imageRatings[file.path] = file.rating || 0; });
+      const root = catalogRoots.find((candidate: CatalogRoot) => candidate.id === query.rootId) || catalogRoots[0] || null;
+      useLibraryStore.getState().setLibrary({
+        rootPaths: root ? [root.absolutePath] : useLibraryStore.getState().rootPaths,
+        currentFolderPath: `Library: ${collection.name}`,
+        activeAlbumId: null,
+        activeCatalogRootId: root?.id ?? null,
+        imageList: files,
+        imageRatings,
+        multiSelectedPaths: [],
+        libraryActivePath: null,
+        libraryScrollTop: 0,
+      });
+      useLibraryStore.getState().setSearchCriteria({ text: '', tags: [], mode: 'OR' });
+      setIsOpen(false);
+    } catch (error) {
+      console.error('Failed to apply smart collection:', error);
+      toast.error(`Failed to apply smart collection: ${error}`);
+    } finally {
+      setIsApplying(false);
+    }
+  };
+
+  const deleteCollection = async (collection: SmartCollection) => {
+    if (!window.confirm(`Delete smart collection "${collection.name}"?`)) return;
+    try {
+      await invoke(Invokes.DeleteSmartCollection, { id: collection.id });
+      setCollections((current) => current.filter((candidate) => candidate.id !== collection.id));
+    } catch (error) {
+      toast.error(`Failed to delete smart collection: ${error}`);
+    }
+  };
+
+  return (
+    <div className="relative" ref={dropdownRef}>
+      <Button
+        aria-expanded={isOpen}
+        aria-haspopup="true"
+        className={clsx('h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center', !isCatalogAvailable && 'opacity-50')}
+        disabled={!isCatalogAvailable}
+        onClick={toggleOpen}
+        data-tooltip="Smart Collections"
+      >
+        <Bookmark className="w-5 h-5" />
+      </Button>
+      <AnimatePresence>
+        {isOpen && (
+          <motion.div className="absolute right-0 mt-2 w-80 max-w-[calc(100vw-2rem)] origin-top-right z-50" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} transition={{ duration: 0.1, ease: 'easeOut' }}>
+            <div className="bg-surface/95 backdrop-blur-md border border-border-color/50 rounded-lg shadow-xl p-2">
+              <div className="flex items-center justify-between px-2 py-2">
+                <Text variant={TextVariants.small} weight={TextWeights.semibold}>Smart Collections</Text>
+                <Button className="h-7 w-7 p-0 bg-transparent text-text-secondary shadow-none" onClick={() => void loadCollections()} data-tooltip="Refresh collections">
+                  <Loader2 size={15} className={clsx(isLoading && 'animate-spin')} />
+                </Button>
+              </div>
+              {isLoading ? (
+                <div className="flex items-center gap-2 px-2 py-4 text-text-secondary"><Loader2 size={16} className="animate-spin" /><Text variant={TextVariants.small}>Loading collections</Text></div>
+              ) : collections.length === 0 ? (
+                <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="px-2 py-4">Save a catalog search to create a smart collection.</Text>
+              ) : (
+                <div className="max-h-72 overflow-y-auto">
+                  {collections.map((collection) => (
+                    <div key={collection.id} className="group flex items-center gap-1 rounded-md hover:bg-bg-primary">
+                      <button className="min-w-0 flex-1 px-2 py-2 text-left text-sm text-text-primary truncate" disabled={isApplying} onClick={() => void applyCollection(collection)}>{collection.name}</button>
+                      <Button className="h-8 w-8 shrink-0 p-0 bg-transparent text-text-secondary opacity-0 group-hover:opacity-100 hover:text-red-400 shadow-none" onClick={() => void deleteCollection(collection)} data-tooltip={`Delete ${collection.name}`}>
+                        <Trash2 size={15} />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </motion.div>
         )}

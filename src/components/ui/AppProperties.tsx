@@ -478,6 +478,12 @@ export interface CatalogSearchQuery {
   limit?: number | null;
 }
 
+export interface SmartCollection {
+  id: number;
+  name: string;
+  queryJson: string;
+}
+
 export type LibrarySource =
   | { type: 'filesystem' }
   | { type: 'catalog'; libraryId: string; dbPath: string; name: string };

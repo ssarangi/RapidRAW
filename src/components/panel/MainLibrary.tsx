@@ -43,7 +43,7 @@ import { useUIStore } from '../../store/useUIStore';
 import SettingsPanel from './SettingsPanel';
 
 import LibraryGrid from './library/LibraryGrid';
-import { CatalogAiTaggingButton, CatalogAiTagReviewButton, CatalogSearchDropdown, SearchInput, ViewOptionsDropdown } from './library/LibraryHeader';
+import { CatalogAiTaggingButton, CatalogAiTagReviewButton, CatalogSearchDropdown, SearchInput, SmartCollectionsDropdown, ViewOptionsDropdown } from './library/LibraryHeader';
 
 export interface ColumnWidths {
   thumbnail: number;
@@ -612,6 +612,7 @@ export default function MainLibrary(props: MainLibraryProps) {
           <div className="flex items-center bg-surface p-1 rounded-lg gap-1 border border-border-color/20">
             <SearchInput indexingProgress={props.indexingProgress} isIndexing={props.isIndexing} />
             <CatalogSearchDropdown />
+            <SmartCollectionsDropdown />
             <CatalogAiTaggingButton />
             <CatalogAiTagReviewButton />
             <ViewOptionsDropdown
