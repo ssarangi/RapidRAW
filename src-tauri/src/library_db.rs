@@ -18,7 +18,7 @@ use crate::file_management::{ImageFile, parse_virtual_path};
 use crate::file_management::{assign_group_ids, read_file_mapped};
 use crate::formats::{is_raw_file, is_supported_image_file};
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -701,6 +701,16 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         );
         CREATE INDEX IF NOT EXISTS idx_cull_decisions_session ON cull_decisions(session_id, proposed_status);
 
+        CREATE TABLE IF NOT EXISTS cull_decision_events (
+          id INTEGER PRIMARY KEY,
+          decision_id INTEGER NOT NULL REFERENCES cull_decisions(id) ON DELETE CASCADE,
+          previous_status TEXT NOT NULL CHECK(previous_status IN ('keep', 'reject')),
+          next_status TEXT NOT NULL CHECK(next_status IN ('keep', 'reject')),
+          source TEXT NOT NULL DEFAULT 'user',
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_cull_decision_events_decision ON cull_decision_events(decision_id, created_at DESC);
+
         CREATE TABLE IF NOT EXISTS image_ai_analysis_state (
           image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
           analysis_kind TEXT NOT NULL,
@@ -772,6 +782,7 @@ mod tests {
             "smart_collections",
             "cull_sessions",
             "cull_decisions",
+            "cull_decision_events",
         ] {
             let exists: i64 = connection
                 .query_row(
@@ -2968,13 +2979,17 @@ pub fn update_cull_session_decision(
 ) -> Result<(), String> {
     let mut connection = open_connection(&active_library_path(&state)?)?;
     let transaction = connection.transaction().map_err(|error| error.to_string())?;
-    let changed = transaction
-        .execute(
-            "UPDATE cull_decisions SET proposed_status = ?1, updated_at = strftime('%s','now') WHERE session_id = ?2 AND representative_path = ?3",
-            params![if keep { "keep" } else { "reject" }, session_id, representative_path],
-        )
-        .map_err(|error| error.to_string())?;
-    if changed == 0 { return Err("Culling decision was not found".to_string()); }
+    let decision: Option<(i64, String)> = transaction.query_row(
+        "SELECT id, proposed_status FROM cull_decisions WHERE session_id = ?1 AND representative_path = ?2",
+        params![session_id, representative_path],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(|error| error.to_string())?;
+    let Some((decision_id, previous_status)) = decision else { return Err("Culling decision was not found".to_string()); };
+    let next_status = if keep { "keep" } else { "reject" };
+    if previous_status != next_status {
+        transaction.execute("INSERT INTO cull_decision_events(decision_id, previous_status, next_status, created_at) VALUES(?1, ?2, ?3, strftime('%s','now'))", params![decision_id, previous_status, next_status]).map_err(|error| error.to_string())?;
+        transaction.execute("UPDATE cull_decisions SET proposed_status = ?1, updated_at = strftime('%s','now') WHERE id = ?2", params![next_status, decision_id]).map_err(|error| error.to_string())?;
+    }
     transaction.execute(
         "UPDATE cull_sessions SET rejected_count = (SELECT COUNT(*) FROM cull_decisions WHERE session_id = ?1 AND proposed_status = 'reject'), updated_at = strftime('%s','now') WHERE id = ?1",
         [session_id],
