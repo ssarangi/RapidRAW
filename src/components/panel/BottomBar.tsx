@@ -930,10 +930,10 @@ export default function BottomBar({
                       {backgroundJobs.map((job) => (
                         <div key={job.id} className="px-3 py-2 border-b border-border-color last:border-b-0">
                           <div className="flex gap-3 justify-between items-center">
-                            <Text variant={TextVariants.small}>{job.kind === 'catalog_scan' ? 'Catalog scan' : job.kind}</Text>
+                            <Text variant={TextVariants.small}>{({ catalog_scan: 'Catalog scan', model_download: 'Model download', ram_plus_tagging: 'RAM++ tagging', ai_tagging: 'AI tagging', face_detection: 'Face detection', face_recognition: 'Face recognition' } as Record<string, string>)[job.kind] || job.kind}</Text>
                             <div className="flex items-center gap-2">
                               <Text variant={TextVariants.small} color={job.state === 'failed' ? TextColors.error : job.state === 'completed' ? TextColors.success : TextColors.accent}>{job.state}</Text>
-                              {['running', 'paused'].includes(job.state) && <button className="p-1 text-text-secondary hover:bg-bg-primary rounded" onClick={() => void handlePauseBackgroundJob(job.id, job.state === 'paused')} data-tooltip={job.state === 'paused' ? 'Resume job' : 'Pause job'}>{job.state === 'paused' ? <Play size={13} /> : <Pause size={13} />}</button>}
+                              {job.kind !== 'model_download' && ['running', 'paused'].includes(job.state) && <button className="p-1 text-text-secondary hover:bg-bg-primary rounded" onClick={() => void handlePauseBackgroundJob(job.id, job.state === 'paused')} data-tooltip={job.state === 'paused' ? 'Resume job' : 'Pause job'}>{job.state === 'paused' ? <Play size={13} /> : <Pause size={13} />}</button>}
                               {['queued', 'running', 'paused'].includes(job.state) && (
                                 <button className="p-1 text-red-300 hover:bg-red-500/10 rounded" onClick={() => void handleCancelBackgroundJob(job.id)} data-tooltip="Cancel job">
                                   <Square size={13} />
