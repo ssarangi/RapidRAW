@@ -396,6 +396,8 @@ export interface CatalogMetrics {
   missingImages: number;
   aiTagsSuggested: number;
   aiTagsAccepted: number;
+  cullSessions: number;
+  cullOverrides: number;
   years: CatalogFacetValue[];
   cameras: CatalogFacetValue[];
   lenses: CatalogFacetValue[];

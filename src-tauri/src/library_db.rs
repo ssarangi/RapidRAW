@@ -146,6 +146,8 @@ pub struct CatalogMetrics {
     pub missing_images: i64,
     pub ai_tags_suggested: i64,
     pub ai_tags_accepted: i64,
+    pub cull_sessions: i64,
+    pub cull_overrides: i64,
     pub years: Vec<CatalogFacetValue>,
     pub cameras: Vec<CatalogFacetValue>,
     pub lenses: Vec<CatalogFacetValue>,
@@ -3319,6 +3321,12 @@ pub fn get_catalog_metrics(
             |row| row.get(0),
         )
         .map_err(|e| e.to_string())?;
+    let cull_sessions = conn
+        .query_row("SELECT COUNT(*) FROM cull_sessions", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    let cull_overrides = conn
+        .query_row("SELECT COUNT(*) FROM cull_decision_events", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
 
     Ok(CatalogMetrics {
         total_images,
@@ -3327,6 +3335,8 @@ pub fn get_catalog_metrics(
         missing_images,
         ai_tags_suggested,
         ai_tags_accepted,
+        cull_sessions,
+        cull_overrides,
         years: facet_query(
             &conn,
             "SELECT CAST(m.year AS TEXT), COUNT(*) FROM image_metadata m JOIN images i ON i.id = m.image_id WHERE i.status = 'present' AND m.year IS NOT NULL GROUP BY m.year ORDER BY m.year DESC",
