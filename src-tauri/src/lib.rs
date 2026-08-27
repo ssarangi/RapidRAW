@@ -28,6 +28,7 @@ mod gpu_processing;
 mod hdr_deghosting;
 mod image_loader;
 mod image_processing;
+pub mod image_restoration;
 mod inpainting;
 mod launch_request;
 mod lens_blur;
@@ -2441,6 +2442,7 @@ pub fn run() {
             library_db::search_catalog_images,
             library_db::get_catalog_metrics,
             library_db::get_image_provenance,
+            library_db::list_image_derivatives,
             library_db::list_catalog_people,
             library_db::list_smart_collections,
             library_db::save_smart_collection,

@@ -18,7 +18,7 @@ use crate::file_management::{ImageFile, parse_virtual_path};
 use crate::file_management::{assign_group_ids, read_file_mapped};
 use crate::formats::{is_raw_file, is_supported_image_file};
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 9;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -194,6 +194,29 @@ pub struct SpeciesDetail {
     pub review_state: String,
     pub model_id: String,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageDerivative {
+    pub id: i64,
+    pub source_image_id: i64,
+    pub operation_kind: String,
+    pub model_id: String,
+    pub model_revision: String,
+    pub recipe_json: String,
+    pub input_hash: Option<String>,
+    pub output_path: String,
+    pub output_hash: Option<String>,
+    pub output_format: String,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub state: String,
+    pub error_message: Option<String>,
+    pub created_at: i64,
+    pub completed_at: Option<i64>,
+    pub updated_at: i64,
+}
+
 
 
 /// A human-maintained identity. Detection and clustering may propose links to
@@ -781,6 +804,28 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         );
         CREATE INDEX IF NOT EXISTS idx_species_classifications_image ON species_classifications(image_id, review_state);
         CREATE INDEX IF NOT EXISTS idx_species_classifications_name ON species_classifications(scientific_name, common_name);
+
+        CREATE TABLE IF NOT EXISTS image_derivatives (
+          id INTEGER PRIMARY KEY,
+          source_image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+          operation_kind TEXT NOT NULL CHECK(operation_kind IN ('raw_denoise', 'rgb_denoise', 'deblur', 'upscale')),
+          model_id TEXT NOT NULL,
+          model_revision TEXT NOT NULL,
+          recipe_json TEXT NOT NULL,
+          input_hash TEXT,
+          output_path TEXT NOT NULL,
+          output_hash TEXT,
+          output_format TEXT NOT NULL,
+          width INTEGER,
+          height INTEGER,
+          state TEXT NOT NULL CHECK(state IN ('queued', 'running', 'paused', 'completed', 'failed', 'cancelled')),
+          error_message TEXT,
+          created_at INTEGER NOT NULL,
+          completed_at INTEGER,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_image_derivatives_source ON image_derivatives(source_image_id, operation_kind);
+        CREATE INDEX IF NOT EXISTS idx_image_derivatives_state ON image_derivatives(state);
         ",
     )
     .map_err(|e| e.to_string())?;
@@ -841,6 +886,7 @@ mod tests {
             "cull_decisions",
             "cull_decision_events",
             "species_classifications",
+            "image_derivatives",
         ] {
             let exists: i64 = connection
                 .query_row(
@@ -3654,4 +3700,51 @@ pub fn get_image_provenance(
         species,
         analysis_errors,
     })
+}
+
+#[tauri::command]
+pub fn list_image_derivatives(
+    image_id: i64,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<ImageDerivative>, String> {
+    let db_path = active_library_path(&state)?;
+    let conn = open_connection(&db_path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, source_image_id, operation_kind, model_id, model_revision, recipe_json,
+                    input_hash, output_path, output_hash, output_format, width, height, state,
+                    error_message, created_at, completed_at, updated_at
+             FROM image_derivatives
+             WHERE source_image_id = ?1
+             ORDER BY created_at DESC",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let derivatives = stmt
+        .query_map([image_id], |row| {
+            Ok(ImageDerivative {
+                id: row.get(0)?,
+                source_image_id: row.get(1)?,
+                operation_kind: row.get(2)?,
+                model_id: row.get(3)?,
+                model_revision: row.get(4)?,
+                recipe_json: row.get(5)?,
+                input_hash: row.get(6)?,
+                output_path: row.get(7)?,
+                output_hash: row.get(8)?,
+                output_format: row.get(9)?,
+                width: row.get(10)?,
+                height: row.get(11)?,
+                state: row.get(12)?,
+                error_message: row.get(13)?,
+                created_at: row.get(14)?,
+                completed_at: row.get(15)?,
+                updated_at: row.get(16)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    Ok(derivatives)
 }
