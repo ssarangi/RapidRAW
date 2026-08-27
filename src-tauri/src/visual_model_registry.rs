@@ -1,6 +1,8 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -117,16 +119,86 @@ pub fn list_visual_model_pack_statuses(app_handle: AppHandle) -> Result<Vec<Visu
 }
 
 #[tauri::command]
-pub async fn download_visual_model_pack(pack_id: String, app_handle: AppHandle) -> Result<VisualModelPackStatus, String> {
+pub async fn download_visual_model_pack(
+    pack_id: String,
+    app_handle: AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<VisualModelPackStatus, String> {
     let pack = visual_model_packs().into_iter().find(|candidate| candidate.id == pack_id).ok_or_else(|| format!("Unknown visual model pack: {pack_id}"))?;
     if pack.availability != VisualModelAvailability::DirectDownload {
         return Err(format!("{} requires a pinned ONNX bundle before it can be installed", pack.display_name));
     }
     let directory = pack_dir(&app_handle, &pack.id)?;
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
-    for artifact in &pack.artifacts {
+    let total = pack.artifacts.len() as i64;
+    let job = crate::library_db::active_library_path(&state)
+        .ok()
+        .and_then(|db_path| {
+            crate::library_db::create_background_job(
+                &db_path,
+                "model_download",
+                serde_json::json!({ "packId": pack.id, "displayName": pack.display_name }),
+            )
+            .map(|job_id| (db_path, job_id))
+            .ok()
+        });
+    if let Some((db_path, job_id)) = job.as_ref() {
+        let _ = crate::library_db::update_job(
+            db_path,
+            job_id,
+            "running",
+            "Starting model download",
+            0,
+            total,
+            None,
+            None,
+        );
+    }
+    let cancellation = job.as_ref().map(|(_, job_id)| {
+        let token = Arc::new(AtomicBool::new(false));
+        state
+            .background_job_cancellations
+            .lock()
+            .unwrap()
+            .insert(job_id.clone(), token.clone());
+        token
+    });
+    for (index, artifact) in pack.artifacts.iter().enumerate() {
+        let current = index as i64;
+        if cancellation
+            .as_ref()
+            .is_some_and(|token| token.load(Ordering::SeqCst))
+        {
+            if let Some((db_path, job_id)) = job.as_ref() {
+                let _ = crate::library_db::update_job(db_path, job_id, "cancelled", "Model download cancelled", current, total, None, None);
+                state.background_job_cancellations.lock().unwrap().remove(job_id);
+            }
+            return Err("Model download cancelled".to_string());
+        }
+        if let Some((db_path, job_id)) = job.as_ref() {
+            let _ = crate::library_db::update_job(
+                db_path,
+                job_id,
+                "running",
+                &format!("Downloading {}", artifact.file_name),
+                current,
+                total,
+                Some(&artifact.file_name),
+                None,
+            );
+        }
         let response = reqwest::get(&artifact.source_url).await.map_err(|error| error.to_string())?.error_for_status().map_err(|error| error.to_string())?;
         let bytes = response.bytes().await.map_err(|error| error.to_string())?;
+        if cancellation
+            .as_ref()
+            .is_some_and(|token| token.load(Ordering::SeqCst))
+        {
+            if let Some((db_path, job_id)) = job.as_ref() {
+                let _ = crate::library_db::update_job(db_path, job_id, "cancelled", "Model download cancelled", current, total, None, None);
+                state.background_job_cancellations.lock().unwrap().remove(job_id);
+            }
+            return Err("Model download cancelled".to_string());
+        }
         if bytes.is_empty() { return Err(format!("Downloaded {} was empty", artifact.file_name)); }
         let target = directory.join(&artifact.file_name);
         let temporary = target.with_extension("download");
@@ -137,6 +209,10 @@ pub async fn download_visual_model_pack(pack_id: String, app_handle: AppHandle) 
     }
     let manifest = InstalledVisualModelPack { pack_id: pack.id.clone(), installed_at: Utc::now().timestamp(), source_path: None };
     fs::write(manifest_path(&directory), serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
+    if let Some((db_path, job_id)) = job.as_ref() {
+        let _ = crate::library_db::update_job(db_path, job_id, "completed", "Model download complete", total, total, None, None);
+        state.background_job_cancellations.lock().unwrap().remove(job_id);
+    }
     Ok(VisualModelPackStatus { installed: true, install_path: directory.to_string_lossy().into_owned(), pack })
 }
 
