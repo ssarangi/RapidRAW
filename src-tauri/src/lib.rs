@@ -2457,6 +2457,8 @@ pub fn run() {
             library_db::confirm_face_cluster,
             library_db::list_suggested_ai_tags,
             library_db::review_ai_tag,
+            library_db::list_suggested_species,
+            library_db::review_species,
             library_db::create_catalog_person,
             library_db::rename_catalog_person,
             library_db::remove_catalog_person,

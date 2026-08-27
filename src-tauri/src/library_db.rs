@@ -3748,3 +3748,77 @@ pub fn list_image_derivatives(
 
     Ok(derivatives)
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SpeciesSuggestionItem {
+    pub id: i64,
+    pub image_id: i64,
+    pub image_path: String,
+    pub scientific_name: String,
+    pub common_name: Option<String>,
+    pub taxon_rank: Option<String>,
+    pub confidence: f64,
+    pub model_id: String,
+}
+
+#[tauri::command]
+pub fn list_suggested_species(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<SpeciesSuggestionItem>, String> {
+    let db_path = active_library_path(&state)?;
+    let conn = open_connection(&db_path)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.id, s.image_id, r.absolute_path || '/' || i.relative_path,
+                    s.scientific_name, s.common_name, s.taxon_rank, s.confidence, s.model_id
+             FROM species_classifications s
+             JOIN images i ON i.id = s.image_id
+             JOIN collection_roots r ON r.id = i.root_id
+             WHERE s.review_state = 'suggested'
+             ORDER BY s.confidence DESC
+             LIMIT 100",
+        )
+        .map_err(|e| e.to_string())?;
+
+    let items = stmt
+        .query_map([], |row| {
+            Ok(SpeciesSuggestionItem {
+                id: row.get(0)?,
+                image_id: row.get(1)?,
+                image_path: row.get(2)?,
+                scientific_name: row.get(3)?,
+                common_name: row.get(4)?,
+                taxon_rank: row.get(5)?,
+                confidence: row.get(6)?,
+                model_id: row.get(7)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
+    Ok(items)
+}
+
+#[tauri::command]
+pub fn review_species(
+    id: i64,
+    review_state: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    if !["accepted", "rejected"].contains(&review_state.as_str()) {
+        return Err("review_state must be 'accepted' or 'rejected'".to_string());
+    }
+    let db_path = active_library_path(&state)?;
+    let conn = open_connection(&db_path)?;
+    let now = now_secs();
+
+    conn.execute(
+        "UPDATE species_classifications SET review_state = ?1, updated_at = ?2 WHERE id = ?3",
+        params![review_state, now, id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
