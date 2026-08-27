@@ -707,4 +707,18 @@ mod tests {
     fn cosine_similarity_rejects_mismatched_dimensions() {
         assert_eq!(cosine_similarity(&[1.0, 0.0], &[1.0]), -1.0);
     }
+
+    #[test]
+    fn orthogonal_embeddings_have_zero_similarity() {
+        let a = vec![1.0, 0.0, 0.0];
+        let b = vec![0.0, 1.0, 0.0];
+        assert_eq!(cosine_similarity(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn opposite_embeddings_have_negative_unit_similarity() {
+        let a = vec![1.0, 0.0];
+        let b = vec![-1.0, 0.0];
+        assert_eq!(cosine_similarity(&a, &b), -1.0);
+    }
 }
