@@ -982,20 +982,20 @@ export function CatalogEnhanceMenu() {
   const isCatalogAvailable = librarySource.type === 'catalog';
 
   const handleRunEnhance = async (operationKind: string) => {
-    if (!isCatalogAvailable) {
-      toast.info('Open a SQLite library to run restoration.');
+    if (!libraryActivePath) {
+      toast.info('Select an image in the catalog to enhance.');
       return;
     }
-    const currentImage = imageList.find((img) => img.path === libraryActivePath) || imageList[0];
+    const currentImage = imageList.find((img) => img.path === libraryActivePath);
     if (!currentImage?.id) {
-      toast.info('Select an image in the catalog to enhance.');
+      toast.info('Selected image is not indexed in the catalog.');
       return;
     }
     setIsProcessing(true);
     try {
       const recipe = {
         operationKind,
-        modelId: operationKind === 'raw_denoise' ? 'rawnind-utnet2' : 'nafnet-sidd',
+        modelId: operationKind === 'raw_denoise' ? 'rawnind-utnet2-bayer' : 'nafnet-sidd-rgb',
         modelRevision: 'v1',
         denoiseStrength,
         microcontrastStrength: microcontrast,

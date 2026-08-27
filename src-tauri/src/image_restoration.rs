@@ -205,11 +205,12 @@ pub fn derivative_output_path(
 ) -> Result<PathBuf, String> {
     let dir = catalog_dir.join("derivatives").join(operation);
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create derivative directory: {e}"))?;
-    let timestamp = std::time::SystemTime::now()
+    let timestamp_nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    let filename = format!("img_{source_image_id}_{operation}_{timestamp}.{format_ext}");
+        .as_nanos();
+    let uuid_suffix = &uuid::Uuid::new_v4().to_string()[..8];
+    let filename = format!("img_{source_image_id}_{operation}_{timestamp_nanos}_{uuid_suffix}.{format_ext}");
     Ok(dir.join(filename))
 }
 
@@ -341,7 +342,40 @@ fn run_restoration_worker(
     let final_output = derivative_output_path(catalog_dir, image_id, &recipe.operation_kind, "tiff")?;
     let temp_output = final_output.with_extension("tmp.tiff");
 
-    let img = image::open(&source_path).map_err(|e| format!("Failed to open image: {e}"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let recipe_json = serde_json::to_string(recipe).unwrap_or_default();
+
+    // Create queued derivative record
+    conn.execute(
+        "INSERT INTO image_derivatives(source_image_id, operation_kind, model_id, model_revision, recipe_json, output_path, output_format, state, created_at, updated_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, 'tiff', 'running', ?7, ?7)",
+        rusqlite::params![
+            image_id,
+            recipe.operation_kind,
+            recipe.model_id,
+            recipe.model_revision,
+            recipe_json,
+            final_output.to_string_lossy().to_string(),
+            now,
+        ],
+    )
+    .map_err(|e| format!("Failed to create initial derivative record: {e}"))?;
+    let derivative_id = conn.last_insert_rowid();
+
+    let img = match image::open(&source_path) {
+        Ok(loaded) => loaded,
+        Err(e) => {
+            let error_msg = format!("Failed to open image: {e}");
+            let _ = conn.execute(
+                "UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3",
+                rusqlite::params![error_msg, now, derivative_id],
+            );
+            return Err(error_msg);
+        }
+    };
     let (width, height) = img.dimensions();
 
     // Check pause state
@@ -374,41 +408,52 @@ fn run_restoration_worker(
     let enhanced = apply_microcontrast(&img, recipe.microcontrast_strength, recipe.detail_recovery);
 
     if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+        let _ = fs::remove_file(&temp_output);
+        let _ = conn.execute(
+            "UPDATE image_derivatives SET state = 'cancelled', updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![now, derivative_id],
+        );
         return Err("Restoration cancelled".to_string());
     }
 
     // Save temporary derivative file
-    enhanced
-        .save(&temp_output)
-        .map_err(|e| format!("Failed to write derivative: {e}"))?;
+    if let Err(e) = enhanced.save(&temp_output) {
+        let _ = fs::remove_file(&temp_output);
+        let error_msg = format!("Failed to write derivative: {e}");
+        let _ = conn.execute(
+            "UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![error_msg, now, derivative_id],
+        );
+        return Err(error_msg);
+    }
 
     // Atomic publish
-    fs::rename(&temp_output, &final_output).map_err(|e| format!("Failed to publish derivative: {e}"))?;
+    if let Err(e) = fs::rename(&temp_output, &final_output) {
+        let _ = fs::remove_file(&temp_output);
+        let error_msg = format!("Failed to publish derivative: {e}");
+        let _ = conn.execute(
+            "UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3",
+            rusqlite::params![error_msg, now, derivative_id],
+        );
+        return Err(error_msg);
+    }
 
-    let now = std::time::SystemTime::now()
+    let completed_now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
 
-    let recipe_json = serde_json::to_string(recipe).unwrap_or_default();
-
-    // Insert durable derivative record
+    // Update derivative record to completed
     conn.execute(
-        "INSERT INTO image_derivatives(source_image_id, operation_kind, model_id, model_revision, recipe_json, output_path, output_format, width, height, state, created_at, completed_at, updated_at)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, 'tiff', ?7, ?8, 'completed', ?9, ?9, ?9)",
+        "UPDATE image_derivatives SET width = ?1, height = ?2, state = 'completed', completed_at = ?3, updated_at = ?3 WHERE id = ?4",
         rusqlite::params![
-            image_id,
-            recipe.operation_kind,
-            recipe.model_id,
-            recipe.model_revision,
-            recipe_json,
-            final_output.to_string_lossy().to_string(),
             width as i64,
             height as i64,
-            now,
+            completed_now,
+            derivative_id,
         ],
     )
-    .map_err(|e| format!("Failed to record derivative in catalog: {e}"))?;
+    .map_err(|e| format!("Failed to update derivative in catalog: {e}"))?;
 
     let _ = crate::library_db::update_job(
         db_path,
