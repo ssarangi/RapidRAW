@@ -38,6 +38,7 @@ pub struct AutoCullPlanItem {
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoCullPlan {
+    pub session_id: Option<i64>,
     pub folder_path: String,
     pub include_subfolders: bool,
     pub settings: CullingSettings,
@@ -241,7 +242,26 @@ pub async fn plan_auto_cull(
 
     let _ = app_handle.emit("auto-cull-plan-complete", total_count);
 
+    let session_id = crate::library_db::active_library_path(&state)
+        .ok()
+        .and_then(|db_path| {
+            let decisions = items
+                .iter()
+                .map(|item| (item.representative_path.clone(), item.keep, item.reason.clone(), item.quality_score))
+                .collect::<Vec<_>>();
+            crate::library_db::record_cull_session(
+                &db_path,
+                &base_plan.folder_path,
+                &serde_json::to_string(&settings).unwrap_or_else(|_| "{}".to_string()),
+                &decisions,
+            )
+            .map_err(|error| eprintln!("Failed to persist culling session: {error}"))
+            .ok()
+            .flatten()
+        });
+
     Ok(AutoCullPlan {
+        session_id,
         total_count,
         reject_count,
         items,
@@ -285,9 +305,20 @@ pub async fn apply_auto_cull_plan(
     plan: AutoCullPlan,
     conflict_action: Option<String>,
     app_handle: AppHandle,
+    state: tauri::State<'_, AppState>,
 ) -> Result<AutoCullResult, String> {
+    let finalize_session = || {
+        if let Some(session_id) = plan.session_id {
+            if let Ok(db_path) = crate::library_db::active_library_path(&state) {
+                if let Err(error) = crate::library_db::mark_cull_session_applied(&db_path, session_id) {
+                    eprintln!("Failed to finalize culling session {session_id}: {error}");
+                }
+            }
+        }
+    };
     let all_reject_items: Vec<&AutoCullPlanItem> = plan.items.iter().filter(|i| !i.keep).collect();
     if all_reject_items.is_empty() {
+        finalize_session();
         return Ok(AutoCullResult::default());
     }
 
@@ -312,6 +343,7 @@ pub async fn apply_auto_cull_plan(
         .collect();
 
     if all_reject_paths.is_empty() {
+        finalize_session();
         return Ok(AutoCullResult {
             skipped_paths,
             ..Default::default()
@@ -329,6 +361,7 @@ pub async fn apply_auto_cull_plan(
             all_reject_paths.clone(),
             app_handle.clone(),
         )?;
+        finalize_session();
         return Ok(AutoCullResult {
             rejected_folder_path: String::new(),
             moved: Vec::new(),
@@ -382,6 +415,8 @@ pub async fn apply_auto_cull_plan(
             })
         })
         .collect();
+
+    finalize_session();
 
     Ok(AutoCullResult {
         rejected_folder_path: rejected_folder_str,

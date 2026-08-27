@@ -2438,6 +2438,8 @@ pub fn run() {
             library_db::list_smart_collections,
             library_db::save_smart_collection,
             library_db::delete_smart_collection,
+            library_db::list_cull_sessions,
+            library_db::list_cull_session_decisions,
             library_db::list_catalog_faces,
             library_db::list_unreviewed_catalog_faces,
             library_db::list_unreviewed_face_clusters,

@@ -116,6 +116,8 @@ export enum Invokes {
   ListSmartCollections = 'list_smart_collections',
   SaveSmartCollection = 'save_smart_collection',
   DeleteSmartCollection = 'delete_smart_collection',
+  ListCullSessions = 'list_cull_sessions',
+  ListCullSessionDecisions = 'list_cull_session_decisions',
   ListCatalogFaces = 'list_catalog_faces',
   CreateCatalogPerson = 'create_catalog_person',
   ReviewCatalogFace = 'review_catalog_face',
@@ -620,6 +622,7 @@ export interface AutoCullPlanItem {
 }
 
 export interface AutoCullPlan {
+  sessionId?: number | null;
   folderPath: string;
   includeSubfolders: boolean;
   settings: CullingSettings;

@@ -18,7 +18,7 @@ use crate::file_management::{ImageFile, parse_virtual_path};
 use crate::file_management::{assign_group_ids, read_file_mapped};
 use crate::formats::{is_raw_file, is_supported_image_file};
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -111,6 +111,30 @@ pub struct SmartCollection {
     pub id: i64,
     pub name: String,
     pub query_json: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CullSessionSummary {
+    pub id: i64,
+    pub root_id: Option<i64>,
+    pub scope_path: String,
+    pub state: String,
+    pub total_count: i64,
+    pub rejected_count: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CullSessionDecision {
+    pub id: i64,
+    pub representative_path: String,
+    pub proposed_status: String,
+    pub final_status: String,
+    pub quality_score: f64,
+    pub reason: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -617,6 +641,36 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           updated_at INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS cull_sessions (
+          id INTEGER PRIMARY KEY,
+          root_id INTEGER REFERENCES collection_roots(id) ON DELETE SET NULL,
+          scope_path TEXT NOT NULL,
+          mode TEXT NOT NULL DEFAULT 'assisted',
+          state TEXT NOT NULL CHECK(state IN ('planned', 'applied', 'cancelled', 'failed')),
+          settings_json TEXT NOT NULL,
+          feature_set_version TEXT NOT NULL,
+          total_count INTEGER NOT NULL DEFAULT 0,
+          rejected_count INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_cull_sessions_root ON cull_sessions(root_id, updated_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cull_decisions (
+          id INTEGER PRIMARY KEY,
+          session_id INTEGER NOT NULL REFERENCES cull_sessions(id) ON DELETE CASCADE,
+          image_id INTEGER REFERENCES images(id) ON DELETE SET NULL,
+          representative_path TEXT NOT NULL,
+          proposed_status TEXT NOT NULL CHECK(proposed_status IN ('keep', 'reject')),
+          final_status TEXT NOT NULL DEFAULT 'pending' CHECK(final_status IN ('pending', 'keep', 'reject', 'skipped')),
+          quality_score REAL NOT NULL,
+          reason TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(session_id, representative_path)
+        );
+        CREATE INDEX IF NOT EXISTS idx_cull_decisions_session ON cull_decisions(session_id, proposed_status);
+
         CREATE TABLE IF NOT EXISTS image_ai_analysis_state (
           image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
           analysis_kind TEXT NOT NULL,
@@ -686,6 +740,8 @@ mod tests {
             "face_clusters",
             "face_cluster_members",
             "smart_collections",
+            "cull_sessions",
+            "cull_decisions",
         ] {
             let exists: i64 = connection
                 .query_row(
@@ -773,6 +829,48 @@ mod tests {
         assert!(can_resume_job("paused"));
         assert!(!can_resume_job("running"));
         assert!(!can_resume_job("cancelled"));
+    }
+
+    #[test]
+    fn cull_sessions_persist_catalog_decisions_and_final_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("catalog.db");
+        let connection = Connection::open(&path).unwrap();
+        migrate(&connection).unwrap();
+        insert_test_image(&connection);
+        drop(connection);
+
+        let session_id = record_cull_session(
+            &path,
+            "/photos",
+            "{}",
+            &[
+                ("/photos/photo.jpg".to_string(), true, "unique".to_string(), 0.8),
+                ("/photos/missing.jpg".to_string(), false, "blurry".to_string(), 0.2),
+            ],
+        )
+        .unwrap()
+        .unwrap();
+        mark_cull_session_applied(&path, session_id).unwrap();
+
+        let connection = Connection::open(&path).unwrap();
+        let (state, decisions): (String, i64) = connection
+            .query_row(
+                "SELECT s.state, COUNT(d.id) FROM cull_sessions s JOIN cull_decisions d ON d.session_id = s.id WHERE s.id = ?1 GROUP BY s.id",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let rejected: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM cull_decisions WHERE session_id = ?1 AND final_status = 'reject'",
+                [session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "applied");
+        assert_eq!(decisions, 2);
+        assert_eq!(rejected, 1);
     }
 
     #[test]
@@ -2729,6 +2827,106 @@ pub fn delete_smart_collection(
         return Err("Smart collection was not found".to_string());
     }
     Ok(())
+}
+
+pub(crate) fn record_cull_session(
+    db_path: &Path,
+    scope_path: &str,
+    settings_json: &str,
+    decisions: &[(String, bool, String, f64)],
+) -> Result<Option<i64>, String> {
+    let mut connection = open_connection(db_path)?;
+    let roots = {
+        let mut statement = connection
+            .prepare("SELECT id, absolute_path FROM collection_roots")
+            .map_err(|error| error.to_string())?;
+        statement
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    let scope = Path::new(scope_path);
+    let Some((root_id, root_path)) = roots.into_iter().find(|(_, root_path)| scope.starts_with(root_path)) else {
+        return Ok(None);
+    };
+    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "INSERT INTO cull_sessions(root_id, scope_path, state, settings_json, feature_set_version, total_count, rejected_count, created_at, updated_at) VALUES(?1, ?2, 'planned', ?3, 'culling-v1', ?4, ?5, strftime('%s','now'), strftime('%s','now'))",
+            params![root_id, scope_path, settings_json, decisions.len() as i64, decisions.iter().filter(|(_, keep, _, _)| !*keep).count() as i64],
+        )
+        .map_err(|error| error.to_string())?;
+    let session_id = transaction.last_insert_rowid();
+    let image_ids = {
+        let mut statement = transaction
+            .prepare("SELECT id, relative_path FROM images WHERE root_id = ?1")
+            .map_err(|error| error.to_string())?;
+        statement
+            .query_map([root_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| error.to_string())?
+            .filter_map(Result::ok)
+            .map(|(id, relative_path)| (Path::new(&root_path).join(relative_path).to_string_lossy().into_owned(), id))
+            .collect::<HashMap<_, _>>()
+    };
+    for (path, keep, reason, quality_score) in decisions {
+        transaction
+            .execute(
+                "INSERT INTO cull_decisions(session_id, image_id, representative_path, proposed_status, quality_score, reason, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, strftime('%s','now'), strftime('%s','now'))",
+                params![session_id, image_ids.get(path), path, if *keep { "keep" } else { "reject" }, quality_score, reason],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(Some(session_id))
+}
+
+pub(crate) fn mark_cull_session_applied(db_path: &Path, session_id: i64) -> Result<(), String> {
+    let connection = open_connection(db_path)?;
+    connection
+        .execute(
+            "UPDATE cull_decisions SET final_status = proposed_status, updated_at = strftime('%s','now') WHERE session_id = ?1 AND final_status = 'pending'",
+            [session_id],
+        )
+        .map_err(|error| error.to_string())?;
+    connection
+        .execute(
+            "UPDATE cull_sessions SET state = 'applied', updated_at = strftime('%s','now') WHERE id = ?1",
+            [session_id],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_cull_sessions(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<CullSessionSummary>, String> {
+    let connection = open_connection(&active_library_path(&state)?)?;
+    let mut statement = connection
+        .prepare("SELECT id, root_id, scope_path, state, total_count, rejected_count, created_at, updated_at FROM cull_sessions ORDER BY updated_at DESC LIMIT 100")
+        .map_err(|error| error.to_string())?;
+    statement
+        .query_map([], |row| Ok(CullSessionSummary { id: row.get(0)?, root_id: row.get(1)?, scope_path: row.get(2)?, state: row.get(3)?, total_count: row.get(4)?, rejected_count: row.get(5)?, created_at: row.get(6)?, updated_at: row.get(7)? }))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn list_cull_session_decisions(
+    session_id: i64,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<CullSessionDecision>, String> {
+    let connection = open_connection(&active_library_path(&state)?)?;
+    let mut statement = connection
+        .prepare("SELECT id, representative_path, proposed_status, final_status, quality_score, reason FROM cull_decisions WHERE session_id = ?1 ORDER BY quality_score DESC")
+        .map_err(|error| error.to_string())?;
+    statement
+        .query_map([session_id], |row| Ok(CullSessionDecision { id: row.get(0)?, representative_path: row.get(1)?, proposed_status: row.get(2)?, final_status: row.get(3)?, quality_score: row.get(4)?, reason: row.get(5)? }))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
