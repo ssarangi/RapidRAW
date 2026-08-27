@@ -2330,6 +2330,9 @@ pub fn cancel_background_job(
         .cloned()
     {
         token.store(true, Ordering::SeqCst);
+        if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
+            control.cancel();
+        }
     } else {
         return Err("This job cannot be cancelled after an application restart".to_string());
     }
@@ -2393,6 +2396,9 @@ pub fn pause_background_job(
         .cloned()
         .ok_or_else(|| "This job cannot be paused after an application restart".to_string())?;
     token.store(true, Ordering::SeqCst);
+    if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
+        control.set_paused(true);
+    }
     update_job(
         &db_path,
         &job_id,
@@ -2453,6 +2459,9 @@ pub fn resume_background_job(
         .cloned()
         .ok_or_else(|| "This job cannot be resumed after an application restart".to_string())?;
     token.store(false, Ordering::SeqCst);
+    if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
+        control.set_paused(false);
+    }
     update_job(
         &db_path,
         &job_id,

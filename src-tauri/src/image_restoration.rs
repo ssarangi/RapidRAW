@@ -497,6 +497,11 @@ pub fn start_image_restoration(
         .lock()
         .unwrap()
         .insert(job_id.clone(), pause.clone());
+    state
+        .background_job_controls
+        .lock()
+        .unwrap()
+        .insert(job_id.clone(), crate::app_state::BackgroundJobControl::new());
 
     let app = app_handle.clone();
     let worker_job_id = job_id.clone();
@@ -538,6 +543,11 @@ pub fn start_image_restoration(
             .remove(&worker_job_id);
         app.state::<crate::AppState>()
             .background_job_pauses
+            .lock()
+            .unwrap()
+            .remove(&worker_job_id);
+        app.state::<crate::AppState>()
+            .background_job_controls
             .lock()
             .unwrap()
             .remove(&worker_job_id);

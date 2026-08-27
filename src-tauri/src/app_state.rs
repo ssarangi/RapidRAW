@@ -7,7 +7,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use image::{DynamicImage, GrayImage};
 use serde::{Deserialize, Serialize};
 use sysinfo::Disks;
-use tokio::sync::Mutex as TokioMutex;
+use tokio::sync::{Mutex as TokioMutex, Semaphore, watch};
 use tokio::task::JoinHandle;
 use wgpu::{Texture, TextureView};
 
@@ -19,6 +19,26 @@ use crate::image_processing::GpuContext;
 use crate::launch_request::ExternalEditSession;
 use crate::lens_correction::LensDatabase;
 use crate::lut_processing::Lut;
+
+/// Tokio-native control plane for long-running background jobs. CPU-bound work
+/// remains on `spawn_blocking`; supervisors await these signals without polling.
+pub struct BackgroundJobControl {
+    cancel_tx: watch::Sender<bool>,
+    pause_tx: watch::Sender<bool>,
+}
+
+impl BackgroundJobControl {
+    pub fn new() -> Arc<Self> {
+        let (cancel_tx, _) = watch::channel(false);
+        let (pause_tx, _) = watch::channel(false);
+        Arc::new(Self { cancel_tx, pause_tx })
+    }
+
+    pub fn cancel(&self) { let _ = self.cancel_tx.send(true); }
+    pub fn set_paused(&self, paused: bool) { let _ = self.pause_tx.send(paused); }
+    pub fn cancellation_receiver(&self) -> watch::Receiver<bool> { self.cancel_tx.subscribe() }
+    pub fn pause_receiver(&self) -> watch::Receiver<bool> { self.pause_tx.subscribe() }
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct WindowState {
@@ -228,4 +248,6 @@ pub struct AppState {
     pub active_library_path: Mutex<Option<PathBuf>>,
     pub background_job_cancellations: Mutex<HashMap<String, Arc<AtomicBool>>>,
     pub background_job_pauses: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    pub background_job_controls: Mutex<HashMap<String, Arc<BackgroundJobControl>>>,
+    pub ai_job_semaphore: Arc<Semaphore>,
 }

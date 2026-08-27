@@ -198,6 +198,7 @@ pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, Ap
     let pause = Arc::new(std::sync::atomic::AtomicBool::new(false));
     state.background_job_cancellations.lock().unwrap().insert(job_id.clone(), cancellation.clone());
     state.background_job_pauses.lock().unwrap().insert(job_id.clone(), pause.clone());
+    state.background_job_controls.lock().unwrap().insert(job_id.clone(), crate::app_state::BackgroundJobControl::new());
     let worker_state = app_handle.clone();
     let species_app_handle = app_handle.clone();
     let worker_db_path = db_path.clone();
@@ -280,6 +281,7 @@ pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, Ap
 fn cleanup_tag_job(app_handle: &AppHandle, job_id: &str) {
     app_handle.state::<AppState>().background_job_cancellations.lock().unwrap().remove(job_id);
     app_handle.state::<AppState>().background_job_pauses.lock().unwrap().remove(job_id);
+    app_handle.state::<AppState>().background_job_controls.lock().unwrap().remove(job_id);
 }
 
 #[tauri::command]

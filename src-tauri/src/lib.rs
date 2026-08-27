@@ -2316,6 +2316,10 @@ pub fn run() {
             active_library_path: Mutex::new(None),
             background_job_cancellations: Mutex::new(HashMap::new()),
             background_job_pauses: Mutex::new(HashMap::new()),
+            background_job_controls: Mutex::new(HashMap::new()),
+            ai_job_semaphore: Arc::new(tokio::sync::Semaphore::new(
+                std::thread::available_parallelism().map(|count| count.get()).unwrap_or(2).clamp(1, 4),
+            )),
         })
         .invoke_handler(tauri::generate_handler![
             apply_adjustments,
