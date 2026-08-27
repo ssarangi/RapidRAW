@@ -43,7 +43,7 @@ import { useUIStore } from '../../store/useUIStore';
 import SettingsPanel from './SettingsPanel';
 
 import LibraryGrid from './library/LibraryGrid';
-import { CatalogAiTaggingButton, CatalogAiTagReviewButton, CatalogRamPlusTaggingButton, CatalogSearchDropdown, SearchInput, SmartCollectionsDropdown, ViewOptionsDropdown } from './library/LibraryHeader';
+import { CatalogAiTaggingButton, CatalogAiTagReviewButton, CatalogEnhanceMenu, CatalogRamPlusTaggingButton, CatalogSearchDropdown, SearchInput, SmartCollectionsDropdown, ViewOptionsDropdown } from './library/LibraryHeader';
 
 export interface ColumnWidths {
   thumbnail: number;
@@ -616,6 +616,7 @@ export default function MainLibrary(props: MainLibraryProps) {
             <CatalogAiTaggingButton />
             <CatalogRamPlusTaggingButton />
             <CatalogAiTagReviewButton />
+            <CatalogEnhanceMenu />
             <ViewOptionsDropdown
               libraryViewMode={props.libraryViewMode}
               onSelectSize={props.onThumbnailSizeChange}

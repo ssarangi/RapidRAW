@@ -962,6 +962,142 @@ export function CatalogAiTagReviewButton() {
   return <div className="relative"><Button className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center" onClick={() => { setOpen(!open); if (!open) void load(); }} data-tooltip="Review AI tag suggestions"><Tags className="w-5 h-5" /></Button>{open && <div className="absolute right-0 mt-2 w-72 max-h-80 overflow-y-auto z-50 bg-surface border border-border-color rounded-md shadow-xl p-3"><Text variant={TextVariants.small}>AI tag suggestions</Text>{items.length === 0 ? <Text variant={TextVariants.small} color={TextColors.secondary}>No suggestions to review</Text> : items.map((item) => <div key={item.id} className="flex items-center justify-between gap-2 py-2 border-b border-border-color/40"><img src={convertFileSrc(item.imagePath)} className="w-10 h-10 object-cover rounded-sm" alt="" /><div className="min-w-0 flex-1"><Text variant={TextVariants.small}>{item.tag}</Text><Text variant={TextVariants.small} color={TextColors.secondary}>{item.confidence > 0 ? `${Math.round(item.confidence * 100)}% confidence` : 'Derived tag'}</Text></div><div className="flex gap-1"><button className="text-green-300 text-xs" onClick={() => void review(item.id, 'accepted')}>Accept</button><button className="text-red-300 text-xs" onClick={() => void review(item.id, 'rejected')}>Reject</button></div></div>)}</div>}</div>;
 }
 
+export function CatalogEnhanceMenu() {
+  const [open, setOpen] = useState(false);
+  const [denoiseStrength, setDenoiseStrength] = useState(0.8);
+  const [microcontrast, setMicrocontrast] = useState(0.35);
+  const [detailRecovery, setDetailRecovery] = useState(0.5);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const librarySource = useLibraryStore((state) => state.librarySource);
+  const libraryActivePath = useLibraryStore((state) => state.libraryActivePath);
+  const imageList = useLibraryStore((state) => state.imageList);
+  const isCatalogAvailable = librarySource.type === 'catalog';
+
+  const handleRunEnhance = async (operationKind: string) => {
+    if (!isCatalogAvailable) {
+      toast.info('Open a SQLite library to run restoration.');
+      return;
+    }
+    const currentImage = imageList.find((img) => img.path === libraryActivePath) || imageList[0];
+    if (!currentImage?.id) {
+      toast.info('Select an image in the catalog to enhance.');
+      return;
+    }
+    setIsProcessing(true);
+    try {
+      const recipe = {
+        operationKind,
+        modelId: operationKind === 'raw_denoise' ? 'rawnind-utnet2' : 'nafnet-sidd',
+        modelRevision: 'v1',
+        denoiseStrength,
+        microcontrastStrength: microcontrast,
+        detailRecovery,
+        tileSize: 768,
+        tileOverlap: 64,
+      };
+      await invoke('start_image_restoration', {
+        imageId: currentImage.id,
+        recipe,
+      });
+      toast.success(`${operationKind === 'raw_denoise' ? 'RAW AI Denoise' : 'RGB AI Denoise'} job started. Check Background Jobs.`);
+      setOpen(false);
+    } catch (error) {
+      console.error('Failed to start restoration:', error);
+      toast.error(`Restoration failed: ${error}`);
+    } finally {
+      setIsProcessing(false);
+    }
+  };
+
+  return (
+    <div className="relative">
+      <Button
+        className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center"
+        onClick={() => setOpen(!open)}
+        data-tooltip={isCatalogAvailable ? 'AI Denoise & Microcontrast Sharpening' : 'Open a SQLite library to enhance images'}
+        disabled={!isCatalogAvailable}
+      >
+        <Sparkles className="w-5 h-5 text-accent" />
+      </Button>
+      {open && (
+        <div className="absolute right-0 mt-2 w-80 z-50 bg-surface/95 backdrop-blur-md border border-border-color rounded-lg shadow-xl p-4">
+          <Text variant={TextVariants.subheading} weight={TextWeights.semibold} className="mb-3">
+            AI Denoise & Sharpen
+          </Text>
+
+          <div className="space-y-3 mb-4">
+            <div>
+              <div className="flex justify-between text-xs text-text-secondary mb-1">
+                <span>Denoise Strength</span>
+                <span>{Math.round(denoiseStrength * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={denoiseStrength}
+                onChange={(e) => setDenoiseStrength(Number(e.target.value))}
+                className="w-full accent-accent"
+              />
+            </div>
+
+            <div>
+              <div className="flex justify-between text-xs text-text-secondary mb-1">
+                <span>Microcontrast Boost</span>
+                <span>{Math.round(microcontrast * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={microcontrast}
+                onChange={(e) => setMicrocontrast(Number(e.target.value))}
+                className="w-full accent-accent"
+              />
+            </div>
+
+            <div>
+              <div className="flex justify-between text-xs text-text-secondary mb-1">
+                <span>Detail Recovery</span>
+                <span>{Math.round(detailRecovery * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={detailRecovery}
+                onChange={(e) => setDetailRecovery(Number(e.target.value))}
+                className="w-full accent-accent"
+              />
+            </div>
+          </div>
+
+          <div className="flex gap-2">
+            <Button
+              className="flex-1 bg-accent text-white py-2 text-xs font-medium rounded-md"
+              disabled={isProcessing}
+              onClick={() => void handleRunEnhance('raw_denoise')}
+            >
+              {isProcessing ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : 'RAW Denoise + Sharp'}
+            </Button>
+            <Button
+              className="flex-1 bg-surface-hover border border-border-color text-text-primary py-2 text-xs font-medium rounded-md"
+              disabled={isProcessing}
+              onClick={() => void handleRunEnhance('rgb_denoise')}
+            >
+              RGB Denoise
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 const groupingOptionKeys = [
   { key: 'off' as GroupingMode, labelKey: 'library.header.viewOptions.groupOff' as const },
   { key: 'raw' as GroupingMode, labelKey: 'library.header.viewOptions.groupPreferRaw' as const },
