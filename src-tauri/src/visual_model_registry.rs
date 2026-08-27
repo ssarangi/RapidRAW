@@ -302,6 +302,19 @@ pub fn install_visual_model_bundle(
     })
 }
 
+#[tauri::command]
+pub fn remove_visual_model_pack(pack_id: String, app_handle: AppHandle) -> Result<(), String> {
+    let pack = visual_model_packs()
+        .into_iter()
+        .find(|candidate| candidate.id == pack_id)
+        .ok_or_else(|| format!("Unknown visual model pack: {pack_id}"))?;
+    let directory = pack_dir(&app_handle, &pack.id)?;
+    if directory.exists() {
+        fs::remove_dir_all(&directory).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 pub(crate) fn installed_visual_model_path(app_handle: &AppHandle, pack_id: &str, file_name: &str) -> Result<PathBuf, String> {
     let path = pack_dir(app_handle, pack_id)?.join(file_name);
     if path.is_file() { Ok(path) } else { Err(format!("Install the {} visual model pack before running this analysis", pack_id)) }
