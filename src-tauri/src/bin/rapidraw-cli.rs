@@ -1,9 +1,11 @@
 use std::env;
 use std::path::PathBuf;
 
+use image::GenericImageView;
 use rusqlite::Connection;
 use rapidraw_lib::visual_model_registry::visual_model_packs;
 use serde_json::json;
+
 
 fn database_argument(arguments: &[String]) -> Result<PathBuf, String> {
     arguments
@@ -47,7 +49,9 @@ fn main() {
         Some("cull") if arguments.get(1).map(String::as_str) == Some("decisions") => cull_decisions(&arguments),
         Some("models") if arguments.get(1).map(String::as_str) == Some("list") => list_models(),
         Some("models") if arguments.get(1).map(String::as_str) == Some("verify") => verify_model(&arguments),
-        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list|retry|cancel --database <catalog.db> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top|export-suggestions --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models verify --id <model-id>".to_string()),
+        Some("restore") if arguments.get(1).map(String::as_str) == Some("list") => list_derivatives(&arguments),
+        Some("restore") if arguments.get(1).map(String::as_str) == Some("run") => run_restore_cli(&arguments),
+        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list|retry|cancel --database <catalog.db> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top|export-suggestions --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models verify --id <model-id> | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id>".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -370,4 +374,92 @@ fn verify_model(arguments: &[String]) -> Result<serde_json::Value, String> {
         })),
         (None, None) => Err(format!("Unknown model: {model_id}")),
     }
+}
+
+fn list_derivatives(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let connection = Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let image_id = numeric_argument(arguments, "--image")?;
+    let mut stmt = connection
+        .prepare("SELECT id, operation_kind, model_id, model_revision, output_path, output_format, width, height, state, created_at FROM image_derivatives WHERE source_image_id = ?1 ORDER BY created_at DESC")
+        .map_err(|e| e.to_string())?;
+    let derivatives = stmt
+        .query_map([image_id], |row| Ok(json!({
+            "id": row.get::<_, i64>(0)?,
+            "operationKind": row.get::<_, String>(1)?,
+            "modelId": row.get::<_, String>(2)?,
+            "modelRevision": row.get::<_, String>(3)?,
+            "outputPath": row.get::<_, String>(4)?,
+            "outputFormat": row.get::<_, String>(5)?,
+            "width": row.get::<_, Option<i64>>(6)?,
+            "height": row.get::<_, Option<i64>>(7)?,
+            "state": row.get::<_, String>(8)?,
+            "createdAt": row.get::<_, i64>(9)?,
+        })))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(json!(derivatives))
+}
+
+fn run_restore_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let db_path = database_argument(arguments)?;
+    let connection = Connection::open(&db_path).map_err(|error| error.to_string())?;
+    let image_id = numeric_argument(arguments, "--image")?;
+
+    let (root_path, relative_path): (String, String) = connection
+        .query_row(
+            "SELECT r.absolute_path, i.relative_path FROM images i JOIN collection_roots r ON r.id = i.root_id WHERE i.id = ?1",
+            [image_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("Image not found: {e}"))?;
+
+    let source_path = std::path::Path::new(&root_path).join(&relative_path);
+    if !source_path.exists() {
+        return Err(format!("Source image file not found: {}", source_path.display()));
+    }
+
+    let img = image::open(&source_path).map_err(|e| format!("Failed to open image: {e}"))?;
+    let (width, height) = img.dimensions();
+
+    let recipe = rapidraw_lib::image_restoration::RestorationRecipe::default();
+    let enhanced = rapidraw_lib::image_restoration::apply_microcontrast(&img, recipe.microcontrast_strength, recipe.detail_recovery);
+
+    let catalog_dir = db_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let final_output = rapidraw_lib::image_restoration::derivative_output_path(catalog_dir, image_id, &recipe.operation_kind, "tiff")?;
+    let temp_output = final_output.with_extension("tmp.tiff");
+
+    enhanced.save(&temp_output).map_err(|e| format!("Failed to save derivative: {e}"))?;
+    std::fs::rename(&temp_output, &final_output).map_err(|e| format!("Failed to publish derivative: {e}"))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let recipe_json = serde_json::to_string(&recipe).unwrap_or_default();
+
+    connection.execute(
+        "INSERT INTO image_derivatives(source_image_id, operation_kind, model_id, model_revision, recipe_json, output_path, output_format, width, height, state, created_at, completed_at, updated_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, 'tiff', ?7, ?8, 'completed', ?9, ?9, ?9)",
+        rusqlite::params![
+            image_id,
+            recipe.operation_kind,
+            recipe.model_id,
+            recipe.model_revision,
+            recipe_json,
+            final_output.to_string_lossy().to_string(),
+            width as i64,
+            height as i64,
+            now,
+        ],
+    ).map_err(|e| format!("Failed to record derivative: {e}"))?;
+
+    let derivative_id = connection.last_insert_rowid();
+    Ok(json!({
+        "status": "completed",
+        "derivativeId": derivative_id,
+        "outputPath": final_output.to_string_lossy(),
+        "width": width,
+        "height": height,
+    }))
 }
