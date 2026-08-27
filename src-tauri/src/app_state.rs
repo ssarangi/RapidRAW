@@ -38,6 +38,28 @@ impl BackgroundJobControl {
     pub fn set_paused(&self, paused: bool) { let _ = self.pause_tx.send(paused); }
     pub fn cancellation_receiver(&self) -> watch::Receiver<bool> { self.cancel_tx.subscribe() }
     pub fn pause_receiver(&self) -> watch::Receiver<bool> { self.pause_tx.subscribe() }
+
+    /// Waits without polling until a paused job resumes or is cancelled.
+    pub async fn wait_until_runnable(&self) -> bool {
+        let mut cancelled = self.cancellation_receiver();
+        let mut paused = self.pause_receiver();
+        loop {
+            if *cancelled.borrow() {
+                return false;
+            }
+            if !*paused.borrow() {
+                return true;
+            }
+            tokio::select! {
+                changed = cancelled.changed() => {
+                    if changed.is_err() || *cancelled.borrow() { return false; }
+                }
+                changed = paused.changed() => {
+                    if changed.is_err() { return false; }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]

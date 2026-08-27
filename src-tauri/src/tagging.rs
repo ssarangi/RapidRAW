@@ -198,7 +198,8 @@ pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, Ap
     let pause = Arc::new(std::sync::atomic::AtomicBool::new(false));
     state.background_job_cancellations.lock().unwrap().insert(job_id.clone(), cancellation.clone());
     state.background_job_pauses.lock().unwrap().insert(job_id.clone(), pause.clone());
-    state.background_job_controls.lock().unwrap().insert(job_id.clone(), crate::app_state::BackgroundJobControl::new());
+    let job_control = crate::app_state::BackgroundJobControl::new();
+    state.background_job_controls.lock().unwrap().insert(job_id.clone(), job_control.clone());
     let worker_state = app_handle.clone();
     let species_app_handle = app_handle.clone();
     let worker_db_path = db_path.clone();
@@ -209,14 +210,10 @@ pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, Ap
         let bioclip_models = load_bioclip_models(&species_app_handle);
         let total = candidates.len() as i64;
         for (index, (image_id, path, modified)) in candidates.into_iter().enumerate() {
-            while pause.load(std::sync::atomic::Ordering::SeqCst) {
-                if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
-                    let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "cancelled", "RAM++ tagging cancelled", index as i64, total, Some(&path), None);
-                    cleanup_tag_job(&worker_state, &worker_job_id);
-                    return;
-                }
-                let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "paused", "RAM++ tagging paused", index as i64, total, Some(&path), None);
-                std::thread::sleep(std::time::Duration::from_millis(200));
+            if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
+                let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "cancelled", "RAM++ tagging cancelled", index as i64, total, Some(&path), None);
+                cleanup_tag_job(&worker_state, &worker_job_id);
+                return;
             }
             if cancellation.load(std::sync::atomic::Ordering::SeqCst) { let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "cancelled", "RAM++ tagging cancelled", index as i64, total, Some(&path), None); cleanup_tag_job(&worker_state, &worker_job_id); return; }
             let current = index as i64 + 1;

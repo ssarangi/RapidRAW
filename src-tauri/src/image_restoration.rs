@@ -497,11 +497,12 @@ pub fn start_image_restoration(
         .lock()
         .unwrap()
         .insert(job_id.clone(), pause.clone());
+    let job_control = crate::app_state::BackgroundJobControl::new();
     state
         .background_job_controls
         .lock()
         .unwrap()
-        .insert(job_id.clone(), crate::app_state::BackgroundJobControl::new());
+        .insert(job_id.clone(), job_control.clone());
 
     let app = app_handle.clone();
     let worker_job_id = job_id.clone();
@@ -514,7 +515,7 @@ pub fn start_image_restoration(
             &worker_recipe,
             &worker_job_id,
             &cancellation,
-            &pause,
+            &job_control,
             &app,
         );
 
@@ -567,7 +568,7 @@ fn run_restoration_worker(
     recipe: &RestorationRecipe,
     job_id: &str,
     cancellation: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-    pause: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
     _app_handle: &tauri::AppHandle,
 ) -> Result<(), String> {
     let conn = rusqlite::Connection::open(db_path).map_err(|e| e.to_string())?;
@@ -654,13 +655,9 @@ fn run_restoration_worker(
     };
 
     // Check pause state with cancellation awareness
-    while pause.load(std::sync::atomic::Ordering::SeqCst) {
-        if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
-            let _ = conn.execute("UPDATE image_derivatives SET state = 'cancelled', updated_at = ?1 WHERE id = ?2", rusqlite::params![now, derivative_id]);
-            return Err("Restoration cancelled".to_string());
-        }
-        let _ = crate::library_db::update_job(db_path, job_id, "paused", "Restoration paused", 30, 100, None, None);
-        std::thread::sleep(std::time::Duration::from_millis(200));
+    if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
+        let _ = conn.execute("UPDATE image_derivatives SET state = 'cancelled', updated_at = ?1 WHERE id = ?2", rusqlite::params![now, derivative_id]);
+        return Err("Restoration cancelled".to_string());
     }
 
     let _ = crate::library_db::update_job(db_path, job_id, "running", "Executing neural restoration and microcontrast filter", 50, 100, None, None);
