@@ -732,8 +732,10 @@ export function CatalogSearchDropdown() {
                     { label: 'Rated', value: metrics.ratedImages },
                     { label: 'Edited', value: metrics.editedImages },
                     { label: 'Missing', value: metrics.missingImages },
-                    { label: 'AI pending', value: metrics.aiTagsSuggested },
+                    { label: 'AI suggestions', value: metrics.aiTagsSuggested },
                     { label: 'AI accepted', value: metrics.aiTagsAccepted },
+                    { label: 'RAM++ analyzed', value: metrics.ramPlusAnalyzed },
+                    { label: 'RAM++ pending', value: metrics.ramPlusPending },
                   ].map((item) => (
                     <div key={item.label} className="bg-bg-primary rounded-md border border-border-color/30 px-3 py-2">
                       <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>

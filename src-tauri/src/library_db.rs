@@ -146,6 +146,9 @@ pub struct CatalogMetrics {
     pub missing_images: i64,
     pub ai_tags_suggested: i64,
     pub ai_tags_accepted: i64,
+    pub ram_plus_analyzed: i64,
+    pub ram_plus_pending: i64,
+    pub ram_plus_failed: i64,
     pub cull_sessions: i64,
     pub cull_overrides: i64,
     pub years: Vec<CatalogFacetValue>,
@@ -3321,6 +3324,27 @@ pub fn get_catalog_metrics(
             |row| row.get(0),
         )
         .map_err(|e| e.to_string())?;
+    let ram_plus_analyzed = conn
+        .query_row(
+            "SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.model_revision = 'onnx-v1' AND s.image_modified_at = i.modified_at AND s.state = 'completed')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let ram_plus_pending = conn
+        .query_row(
+            "SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND NOT EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.model_revision = 'onnx-v1' AND s.image_modified_at = i.modified_at AND s.state = 'completed')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    let ram_plus_failed = conn
+        .query_row(
+            "SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.model_revision = 'onnx-v1' AND s.image_modified_at = i.modified_at AND s.state = 'failed')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
     let cull_sessions = conn
         .query_row("SELECT COUNT(*) FROM cull_sessions", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
@@ -3335,6 +3359,9 @@ pub fn get_catalog_metrics(
         missing_images,
         ai_tags_suggested,
         ai_tags_accepted,
+        ram_plus_analyzed,
+        ram_plus_pending,
+        ram_plus_failed,
         cull_sessions,
         cull_overrides,
         years: facet_query(

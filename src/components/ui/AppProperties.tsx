@@ -398,6 +398,9 @@ export interface CatalogMetrics {
   missingImages: number;
   aiTagsSuggested: number;
   aiTagsAccepted: number;
+  ramPlusAnalyzed: number;
+  ramPlusPending: number;
+  ramPlusFailed: number;
   cullSessions: number;
   cullOverrides: number;
   years: CatalogFacetValue[];
