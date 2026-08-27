@@ -16,10 +16,11 @@ import {
   Plus,
   SlidersHorizontal,
   Info,
+  History,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
-import { Invokes, ImageFile } from '../../ui/AppProperties';
+import { CullSessionDecision, CullSessionSummary, Invokes, ImageFile } from '../../ui/AppProperties';
 import { Thumbnail } from './LibraryItems';
 import Text from '../../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
@@ -36,6 +37,32 @@ interface SyncViewport {
   zoom: number;
   pan: { x: number; y: number };
   isDragging: boolean;
+}
+
+function CullHistoryPanel({ onClose }: { onClose(): void }) {
+  const [sessions, setSessions] = useState<CullSessionSummary[]>([]);
+  const [decisions, setDecisions] = useState<CullSessionDecision[]>([]);
+  const [selectedSession, setSelectedSession] = useState<CullSessionSummary | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    invoke<CullSessionSummary[]>(Invokes.ListCullSessions)
+      .then((items) => { if (active) setSessions(items); })
+      .catch((reason) => { if (active) setError(String(reason)); })
+      .finally(() => { if (active) setIsLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  const selectSession = async (session: CullSessionSummary) => {
+    setSelectedSession(session);
+    setDecisions([]);
+    try { setDecisions(await invoke<CullSessionDecision[]>(Invokes.ListCullSessionDecisions, { sessionId: session.id })); }
+    catch (reason) { setError(String(reason)); }
+  };
+
+  return <div className="absolute z-50 top-12 right-3 w-80 max-h-[calc(100%-4rem)] overflow-hidden rounded-md border border-border-color bg-bg-secondary shadow-xl flex flex-col"><div className="flex items-center justify-between px-3 py-2 border-b border-border-color"><Text variant={TextVariants.small} weight={TextWeights.semibold}>{selectedSession ? 'Culling Decisions' : 'Culling History'}</Text><button className="p-1 text-text-secondary hover:text-text-primary" onClick={onClose} data-tooltip="Close culling history"><X size={16} /></button></div>{selectedSession ? <><button className="px-3 py-2 text-left text-xs text-accent hover:bg-surface" onClick={() => { setSelectedSession(null); setDecisions([]); }}>All sessions</button><div className="px-3 pb-2 text-xs text-text-secondary truncate">{selectedSession.scopePath}</div><div className="overflow-y-auto divide-y divide-border-color/60">{decisions.map((decision) => <div key={decision.id} className="px-3 py-2"><div className="flex items-center gap-2"><span className={decision.finalStatus === 'reject' || decision.proposedStatus === 'reject' ? 'text-red-300 text-xs' : 'text-green-300 text-xs'}>{decision.finalStatus === 'pending' ? decision.proposedStatus : decision.finalStatus}</span><span className="min-w-0 flex-1 truncate text-xs text-text-primary">{decision.representativePath.split(/[\\/]/).pop()}</span><span className="text-xs tabular-nums text-text-secondary">{Math.round(decision.qualityScore * 100)}</span></div><Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-1 truncate">{decision.reason}</Text></div>)}{decisions.length === 0 && <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="p-3">No decisions recorded.</Text>}</div></> : <div className="overflow-y-auto">{isLoading ? <div className="flex items-center gap-2 p-3 text-text-secondary"><Loader2 size={15} className="animate-spin" /><Text variant={TextVariants.small}>Loading sessions</Text></div> : error ? <Text as="div" variant={TextVariants.small} className="p-3 text-red-300">{error}</Text> : sessions.length === 0 ? <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="p-3">No catalog culling sessions yet.</Text> : sessions.map((session) => <button key={session.id} className="w-full px-3 py-2 text-left hover:bg-surface border-b border-border-color/60 last:border-b-0" onClick={() => void selectSession(session)}><div className="flex gap-2"><span className="min-w-0 flex-1 truncate text-sm text-text-primary">{session.scopePath}</span><span className={session.state === 'applied' ? 'text-green-300 text-xs' : 'text-amber-300 text-xs'}>{session.state}</span></div><Text as="div" variant={TextVariants.small} color={TextColors.secondary}>{session.rejectedCount} rejected of {session.totalCount}</Text></button>)}</div>}</div>;
 }
 
 function CullingPreview({
@@ -1025,6 +1052,8 @@ export default function CullingView(props: any) {
 
   const [showRateBar, setShowRateBar] = useState(false);
   const [showInfoBar, setShowInfoBar] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const isCatalog = useLibraryStore((state) => state.librarySource.type === 'catalog');
 
   const [listHandle, setListHandle] = useListCallbackRef();
   const prevActivePath = useRef<string | null>(null);
@@ -1185,6 +1214,8 @@ export default function CullingView(props: any) {
   return (
     <div className="flex w-full h-full min-h-0 bg-transparent">
       <div className="flex-1 flex overflow-hidden relative bg-transparent">
+        {isCatalog && <button className="absolute z-40 top-3 right-3 h-9 w-9 flex items-center justify-center rounded-md bg-bg-secondary/90 border border-border-color text-text-primary hover:bg-surface" onClick={() => setShowHistory((current) => !current)} data-tooltip="Culling history"><History size={16} /></button>}
+        {isCatalog && showHistory && <CullHistoryPanel onClose={() => setShowHistory(false)} />}
         {displayCount === 0 ? (
           <div className="m-auto text-center">
             <Text variant={TextVariants.heading} color={TextColors.secondary}>

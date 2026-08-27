@@ -647,6 +647,26 @@ export interface AutoCullResult {
   skippedPaths: string[];
 }
 
+export interface CullSessionSummary {
+  id: number;
+  rootId?: number | null;
+  scopePath: string;
+  state: 'planned' | 'applied' | 'cancelled' | 'failed';
+  totalCount: number;
+  rejectedCount: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CullSessionDecision {
+  id: number;
+  representativePath: string;
+  proposedStatus: 'keep' | 'reject';
+  finalStatus: 'pending' | 'keep' | 'reject' | 'skipped';
+  qualityScore: number;
+  reason: string;
+}
+
 export interface KeybindHandler {
   shouldFire?: () => boolean;
   execute: (event: KeyboardEvent) => void;
