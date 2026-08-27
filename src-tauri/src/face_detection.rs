@@ -314,6 +314,7 @@ pub fn start_face_detection(
     let event_job_id = job_id.clone();
     let worker_job_id = job_id.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _permit = tauri::async_runtime::block_on(app.state::<crate::AppState>().ai_job_semaphore.clone().acquire_owned()).ok();
         let result = run_face_detection(
             &db_path,
             root_id,
@@ -400,6 +401,7 @@ pub fn start_face_recognition(
     let app = app_handle.clone();
     let worker_job_id = job_id.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _permit = tauri::async_runtime::block_on(app.state::<crate::AppState>().ai_job_semaphore.clone().acquire_owned()).ok();
         let result = run_face_recognition(
             &db_path,
             root_id,

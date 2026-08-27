@@ -205,6 +205,7 @@ pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, Ap
     let worker_job_id = job_id.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _permit = tauri::async_runtime::block_on(worker_state.state::<AppState>().ai_job_semaphore.clone().acquire_owned()).ok();
         // BioCLIP is optional, but loading it must not block the Tauri command/UI thread.
         let bioclip_models = load_bioclip_models(&species_app_handle);
         let total = candidates.len() as i64;
@@ -358,6 +359,7 @@ pub async fn start_catalog_ai_tagging(
     let job_control = crate::app_state::BackgroundJobControl::new();
     state.background_job_controls.lock().unwrap().insert(job_id.clone(), job_control.clone());
     tauri::async_runtime::spawn_blocking(move || {
+        let _permit = tauri::async_runtime::block_on(worker_app_handle.state::<AppState>().ai_job_semaphore.clone().acquire_owned()).ok();
         let total = candidates.len() as i64;
         for (index, (image_id, path, modified)) in candidates.into_iter().enumerate() {
             if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {

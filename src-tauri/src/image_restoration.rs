@@ -509,6 +509,7 @@ pub fn start_image_restoration(
     let worker_recipe = recipe.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        let _permit = tauri::async_runtime::block_on(app.state::<crate::AppState>().ai_job_semaphore.clone().acquire_owned()).ok();
         let result = run_restoration_worker(
             &db_path,
             image_id,
