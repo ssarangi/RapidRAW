@@ -107,6 +107,14 @@ pub struct CatalogFacetValue {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct SmartCollection {
+    pub id: i64,
+    pub name: String,
+    pub query_json: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct CatalogMetrics {
     pub total_images: i64,
     pub edited_images: i64,
@@ -2611,6 +2619,69 @@ pub fn list_catalog_people(
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn list_smart_collections(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<SmartCollection>, String> {
+    let conn = open_connection(&active_library_path(&state)?)?;
+    let mut statement = conn
+        .prepare("SELECT id, name, query_json FROM smart_collections ORDER BY name COLLATE NOCASE")
+        .map_err(|error| error.to_string())?;
+    statement
+        .query_map([], |row| {
+            Ok(SmartCollection {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                query_json: row.get(2)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn save_smart_collection(
+    name: String,
+    query_json: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<SmartCollection, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Collection name cannot be empty".to_string());
+    }
+    serde_json::from_str::<CatalogSearchQuery>(&query_json)
+        .map_err(|error| format!("Invalid collection query: {error}"))?;
+    let conn = open_connection(&active_library_path(&state)?)?;
+    conn.execute("INSERT INTO smart_collections(name, query_json, created_at, updated_at) VALUES(?1, ?2, strftime('%s','now'), strftime('%s','now')) ON CONFLICT(name) DO UPDATE SET query_json = excluded.query_json, updated_at = excluded.updated_at", params![name, query_json]).map_err(|error| error.to_string())?;
+    conn.query_row(
+        "SELECT id, name, query_json FROM smart_collections WHERE name = ?1",
+        [name],
+        |row| {
+            Ok(SmartCollection {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                query_json: row.get(2)?,
+            })
+        },
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn delete_smart_collection(
+    id: i64,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let changed = open_connection(&active_library_path(&state)?)?
+        .execute("DELETE FROM smart_collections WHERE id = ?1", [id])
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("Smart collection was not found".to_string());
+    }
+    Ok(())
 }
 
 #[tauri::command]
