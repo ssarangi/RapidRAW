@@ -21,6 +21,12 @@ use crate::hierarchy::TAG_HIERARCHY;
 use crate::image_processing::ImageMetadata;
 use crate::{AppState, candidates::TAG_CANDIDATES};
 
+#[derive(Clone, Debug)]
+pub struct ScoredTag {
+    pub name: String,
+    pub confidence: f32,
+}
+
 #[tauri::command]
 pub async fn start_catalog_ai_tagging(
     app_handle: AppHandle,
@@ -354,7 +360,7 @@ pub fn generate_tags_with_clip(
     tokenizer: &Tokenizer,
     custom_tags: Option<Vec<String>>,
     max_tags: usize,
-) -> Result<Vec<String>> {
+) -> Result<Vec<ScoredTag>> {
     let image_input = preprocess_clip_image(image);
 
     let is_custom = custom_tags.as_ref().map(|t| !t.is_empty()).unwrap_or(false);
@@ -426,32 +432,29 @@ pub fn generate_tags_with_clip(
     }
 
     scored_tags.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
-    let initial_tags: Vec<String> = scored_tags
-        .into_iter()
-        .take(max_tags)
-        .map(|(tag, _)| tag)
-        .collect();
-
-    let mut final_tags_set: HashSet<String> = initial_tags.iter().cloned().collect();
+    let selected_tags: Vec<(String, f32)> = scored_tags.into_iter().take(max_tags).collect();
+    let initial_tags: Vec<String> = selected_tags.iter().map(|(tag, _)| tag.clone()).collect();
+    let mut final_tags: HashMap<String, f32> = selected_tags.into_iter().collect();
 
     if !is_custom {
         let color_tags = extract_color_tags(image);
         for color_tag in color_tags {
-            final_tags_set.insert(color_tag);
+            final_tags.entry(color_tag).or_insert(0.0);
         }
 
         for tag in &initial_tags {
             if let Some(parents) = TAG_HIERARCHY.get(tag.as_str()) {
                 for &parent in parents {
-                    final_tags_set.insert(parent.to_string());
+                    final_tags.entry(parent.to_string()).or_insert(0.0);
                 }
             }
         }
     }
 
-    let final_tags = final_tags_set.into_iter().collect();
-
-    Ok(final_tags)
+    Ok(final_tags
+        .into_iter()
+        .map(|(name, confidence)| ScoredTag { name, confidence })
+        .collect())
 }
 
 #[tauri::command]
@@ -567,7 +570,7 @@ pub async fn start_background_indexing(
                                         metadata.tags.unwrap_or_default().into_iter().collect();
 
                                     for tag in ai_tags {
-                                        existing_tags.insert(tag);
+                                        existing_tags.insert(tag.name);
                                     }
 
                                     let mut final_tags: Vec<String> =

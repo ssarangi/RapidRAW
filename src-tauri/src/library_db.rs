@@ -331,7 +331,7 @@ pub(crate) fn mark_ai_tag_analysis_state(
 pub(crate) fn replace_clip_ai_tags(
     db_path: &Path,
     image_id: i64,
-    tags: &[String],
+    tags: &[crate::tagging::ScoredTag],
 ) -> Result<(), String> {
     let mut conn = open_connection(db_path)?;
     let tx = conn.transaction().map_err(|error| error.to_string())?;
@@ -339,17 +339,17 @@ pub(crate) fn replace_clip_ai_tags(
     for tag in tags {
         tx.execute(
             "INSERT OR IGNORE INTO tags(name, kind) VALUES(?1, 'ai')",
-            [tag],
+            [&tag.name],
         )
         .map_err(|error| error.to_string())?;
         let tag_id: i64 = tx
             .query_row(
                 "SELECT id FROM tags WHERE name = ?1 AND kind = 'ai'",
-                [tag],
+                [&tag.name],
                 |row| row.get(0),
             )
             .map_err(|error| error.to_string())?;
-        tx.execute("INSERT INTO image_ai_tags(image_id, tag_id, model_id, model_revision, confidence, review_state, source, created_at, updated_at) VALUES(?1, ?2, 'clip', 'rapidraw-clip-v1', 1.0, 'suggested', 'local', strftime('%s','now'), strftime('%s','now'))", params![image_id, tag_id]).map_err(|error| error.to_string())?;
+        tx.execute("INSERT INTO image_ai_tags(image_id, tag_id, model_id, model_revision, confidence, review_state, source, created_at, updated_at) VALUES(?1, ?2, 'clip', 'rapidraw-clip-v1', ?3, 'suggested', 'local', strftime('%s','now'), strftime('%s','now'))", params![image_id, tag_id, tag.confidence]).map_err(|error| error.to_string())?;
     }
     tx.commit().map_err(|error| error.to_string())
 }
