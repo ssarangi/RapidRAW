@@ -485,6 +485,7 @@ export function CatalogSearchDropdown() {
   const [isOpen, setIsOpen] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
   const [metrics, setMetrics] = useState<CatalogMetrics | null>(null);
+  const [collectionName, setCollectionName] = useState('');
   const [form, setForm] = useState({
     text: '',
     year: '',
@@ -599,6 +600,15 @@ export function CatalogSearchDropdown() {
     const emptyForm = { text: '', year: '', camera: '', lens: '', person: '', tags: '', aiTags: '', minRating: '' };
     setForm(emptyForm);
     await runCatalogSearch(emptyForm);
+  };
+
+  const saveSmartCollection = async () => {
+    const name = collectionName.trim();
+    if (!name) { toast.info('Enter a smart collection name.'); return; }
+    const tags = form.tags.split(',').map((tag) => tag.trim()).filter(Boolean);
+    const aiTags = form.aiTags.split(',').map((tag) => tag.trim()).filter(Boolean);
+    const query: CatalogSearchQuery = { rootId: activeRoot?.id ?? null, text: form.text.trim() || null, year: form.year ? Number(form.year) : null, camera: form.camera || null, lens: form.lens || null, person: form.person || null, tags: tags.length ? tags : null, aiTags: aiTags.length ? aiTags : null, minRating: form.minRating ? Number(form.minRating) : null, limit: 20_000 };
+    try { await invoke(Invokes.SaveSmartCollection, { name, queryJson: JSON.stringify(query) }); setCollectionName(''); toast.success('Smart collection saved.'); } catch (error) { toast.error(`Failed to save smart collection: ${error}`); }
   };
 
   return (
@@ -733,6 +743,8 @@ export function CatalogSearchDropdown() {
               )}
 
               <div className="mt-4 flex justify-end gap-2">
+                <input className="h-10 w-40 bg-bg-primary text-text-primary border border-border-color rounded-md px-3 text-sm" value={collectionName} onChange={(event) => setCollectionName(event.target.value)} placeholder="Collection name" />
+                <Button className="h-10 bg-bg-primary text-text-primary border border-border-color shadow-none" disabled={!isCatalogAvailable} onClick={() => void saveSmartCollection()}>Save</Button>
                 <Button
                   className="h-10 bg-bg-primary text-text-primary border border-border-color shadow-none"
                   disabled={isSearching || !isCatalogAvailable}
