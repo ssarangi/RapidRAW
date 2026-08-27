@@ -12,6 +12,14 @@ fn database_argument(arguments: &[String]) -> Result<PathBuf, String> {
         .ok_or_else(|| "--database <path> is required".to_string())
 }
 
+fn named_argument(arguments: &[String], flag: &str) -> Result<String, String> {
+    arguments
+        .windows(2)
+        .find(|pair| pair[0] == flag)
+        .map(|pair| pair[1].clone())
+        .ok_or_else(|| format!("{flag} <value> is required"))
+}
+
 fn main() {
     let arguments: Vec<String> = env::args().skip(1).collect();
     let result = match arguments.first().map(String::as_str) {
@@ -23,7 +31,9 @@ fn main() {
         Some("faces") if arguments.get(1).map(String::as_str) == Some("clusters") => face_clusters(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("status") => tag_status(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("top") => top_tags(&arguments),
-        _ => Err("Usage: rapidraw-cli library inspect|roots --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli faces status --database <catalog.db> | rapidraw-cli tags status --database <catalog.db>".to_string()),
+        Some("collections") if arguments.get(1).map(String::as_str) == Some("list") => list_collections(&arguments),
+        Some("collections") if arguments.get(1).map(String::as_str) == Some("show") => show_collection(&arguments),
+        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name>".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -169,4 +179,58 @@ fn top_tags(arguments: &[String]) -> Result<serde_json::Value, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     Ok(json!(tags))
+}
+
+fn list_collections(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let connection =
+        Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare("SELECT id, name, query_json, created_at, updated_at FROM smart_collections ORDER BY name COLLATE NOCASE")
+        .map_err(|error| error.to_string())?;
+    let collections = statement
+        .query_map([], |row| {
+            let query_json: String = row.get(2)?;
+            let query = serde_json::from_str::<serde_json::Value>(&query_json)
+                .unwrap_or_else(|_| json!({ "invalidQuery": true, "raw": query_json }));
+            Ok(json!({
+                "id": row.get::<_, i64>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "query": query,
+                "createdAt": row.get::<_, i64>(3)?,
+                "updatedAt": row.get::<_, i64>(4)?,
+            }))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(json!(collections))
+}
+
+fn show_collection(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let connection =
+        Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let name = named_argument(arguments, "--name")?;
+    connection
+        .query_row(
+            "SELECT id, name, query_json, created_at, updated_at FROM smart_collections WHERE name = ?1 COLLATE NOCASE",
+            [name],
+            |row| {
+                let query_json: String = row.get(2)?;
+                let query = serde_json::from_str::<serde_json::Value>(&query_json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        query_json.len(),
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+                Ok(json!({
+                    "id": row.get::<_, i64>(0)?,
+                    "name": row.get::<_, String>(1)?,
+                    "query": query,
+                    "createdAt": row.get::<_, i64>(3)?,
+                    "updatedAt": row.get::<_, i64>(4)?,
+                }))
+            },
+        )
+        .map_err(|error| error.to_string())
 }
