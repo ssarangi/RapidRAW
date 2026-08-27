@@ -3081,6 +3081,32 @@ pub fn rename_catalog_person(
 }
 
 #[tauri::command]
+pub fn remove_catalog_person(
+    person_id: i64,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let mut conn = open_connection(&active_library_path(&state)?)?;
+    let transaction = conn.transaction().map_err(|error| error.to_string())?;
+    let changed = transaction
+        .execute(
+            "UPDATE people SET state = 'ignored', merged_into_person_id = NULL, updated_at = ?1 WHERE id = ?2 AND state = 'active'",
+            params![now_secs(), person_id],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("Active catalog person was not found".to_string());
+    }
+    transaction
+        .execute(
+            "UPDATE faces SET person_id = NULL, review_state = 'unreviewed', updated_at = ?1 WHERE person_id = ?2",
+            params![now_secs(), person_id],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
 pub fn merge_catalog_people(
     source_person_id: i64,
     target_person_id: i64,
