@@ -212,6 +212,14 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
+fn can_pause_job(state: &str) -> bool {
+    matches!(state, "queued" | "running")
+}
+
+fn can_resume_job(state: &str) -> bool {
+    state == "paused"
+}
+
 pub(crate) fn active_library_path(
     state: &tauri::State<'_, crate::AppState>,
 ) -> Result<PathBuf, String> {
@@ -737,6 +745,17 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, "failed");
+    }
+
+    #[test]
+    fn job_pause_transitions_only_allow_active_jobs() {
+        assert!(can_pause_job("queued"));
+        assert!(can_pause_job("running"));
+        assert!(!can_pause_job("paused"));
+        assert!(!can_pause_job("completed"));
+        assert!(can_resume_job("paused"));
+        assert!(!can_resume_job("running"));
+        assert!(!can_resume_job("cancelled"));
     }
 
     #[test]
@@ -2072,6 +2091,17 @@ pub fn pause_background_job(
     job_id: String,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<(), String> {
+    let db_path = active_library_path(&state)?;
+    let job_state: String = open_connection(&db_path)?
+        .query_row(
+            "SELECT state FROM background_jobs WHERE id = ?1",
+            [&job_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if !can_pause_job(&job_state) {
+        return Err("This job is no longer pausable".to_string());
+    }
     let token = state
         .background_job_pauses
         .lock()
@@ -2081,7 +2111,7 @@ pub fn pause_background_job(
         .ok_or_else(|| "This job cannot be paused after an application restart".to_string())?;
     token.store(true, Ordering::SeqCst);
     update_job(
-        &active_library_path(&state)?,
+        &db_path,
         &job_id,
         "paused",
         "Pause requested",
@@ -2097,6 +2127,17 @@ pub fn resume_background_job(
     job_id: String,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<(), String> {
+    let db_path = active_library_path(&state)?;
+    let job_state: String = open_connection(&db_path)?
+        .query_row(
+            "SELECT state FROM background_jobs WHERE id = ?1",
+            [&job_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if !can_resume_job(&job_state) {
+        return Err("This job is not paused".to_string());
+    }
     let token = state
         .background_job_pauses
         .lock()
@@ -2106,7 +2147,7 @@ pub fn resume_background_job(
         .ok_or_else(|| "This job cannot be resumed after an application restart".to_string())?;
     token.store(false, Ordering::SeqCst);
     update_job(
-        &active_library_path(&state)?,
+        &db_path,
         &job_id,
         "running",
         "Resume requested",
