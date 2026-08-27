@@ -1,9 +1,9 @@
 import { useState, useEffect, useRef, useCallback, memo, useMemo } from 'react';
 import ReactCrop from 'react-image-crop';
 import 'react-image-crop/dist/ReactCrop.css';
-import { Stage, Layer, Ellipse, Line, Transformer, Group, Circle, Rect } from 'react-konva';
+import { Stage, Layer, Ellipse, Line, Transformer, Group, Circle, Rect, Arrow } from 'react-konva';
 import { PercentCrop, Crop } from 'react-image-crop';
-import { Stamp, Bandage } from 'lucide-react';
+import { Stamp, Bandage, Move } from 'lucide-react';
 import { Adjustments, AiPatch, Coord, MaskContainer } from '../../../utils/adjustments';
 import { Mask, SubMask, SubMaskMode, ToolType } from '../right/Masks';
 import { AppSettings, BrushSettings, SelectedImage } from '../../ui/AppProperties';
@@ -12,6 +12,7 @@ import { useOsPlatform } from '../../../hooks/useOsPlatform';
 import { useTranslation } from 'react-i18next';
 import type { OverlayMode } from '../right/CropPanel';
 import CompositionOverlays from './overlays/CompositionOverlays';
+import { calculateStraightenAngle } from '../../../utils/cropUtils';
 
 interface CursorPreview {
   visible: boolean;
@@ -186,6 +187,118 @@ const SourcePreviewLine = memo(
           perfectDrawEnabled={false}
           shadowForStrokeEnabled={false}
         />
+      </Group>
+    );
+  },
+);
+
+const LiquifyPreviewLine = memo(
+  ({ line, scale, cropX, cropY }: { line: DrawnLine; scale: number; cropX: number; cropY: number }) => {
+    const { flattenedPoints, flowArrows } = useMemo(() => {
+      const rawPts: Array<{ x: number; y: number }> = [];
+      const ptsArray = new Float32Array(line.points.length * 2);
+
+      for (let i = 0; i < line.points.length; i++) {
+        const sx = (line.points[i].x - cropX) * scale;
+        const sy = (line.points[i].y - cropY) * scale;
+        ptsArray[i * 2] = sx;
+        ptsArray[i * 2 + 1] = sy;
+        rawPts.push({ x: sx, y: sy });
+      }
+
+      const arrows: Array<{ startX: number; startY: number; endX: number; endY: number; key: number }> = [];
+      const ARROW_SPACING = 48;
+      const ARROW_HALF_LEN = 4;
+
+      let accumulatedDist = ARROW_SPACING / 2;
+
+      for (let i = 0; i < rawPts.length - 1; i++) {
+        const p1 = rawPts[i];
+        const p2 = rawPts[i + 1];
+        const dx = p2.x - p1.x;
+        const dy = p2.y - p1.y;
+        const segLen = Math.hypot(dx, dy);
+
+        if (segLen < 0.001) continue;
+
+        const dirX = dx / segLen;
+        const dirY = dy / segLen;
+
+        let distOnSeg = ARROW_SPACING - accumulatedDist;
+
+        while (distOnSeg <= segLen) {
+          const cx = p1.x + dirX * distOnSeg;
+          const cy = p1.y + dirY * distOnSeg;
+
+          arrows.push({
+            startX: cx - dirX * ARROW_HALF_LEN,
+            startY: cy - dirY * ARROW_HALF_LEN,
+            endX: cx + dirX * ARROW_HALF_LEN,
+            endY: cy + dirY * ARROW_HALF_LEN,
+            key: arrows.length,
+          });
+
+          distOnSeg += ARROW_SPACING;
+        }
+
+        accumulatedDist = (accumulatedDist + segLen) % ARROW_SPACING;
+      }
+
+      if (arrows.length === 0 && rawPts.length >= 2) {
+        const p1 = rawPts[0];
+        const p2 = rawPts[rawPts.length - 1];
+        const dx = p2.x - p1.x;
+        const dy = p2.y - p1.y;
+        const len = Math.hypot(dx, dy);
+        if (len > 2) {
+          arrows.push({
+            startX: p1.x,
+            startY: p1.y,
+            endX: p2.x,
+            endY: p2.y,
+            key: 0,
+          });
+        }
+      }
+
+      return {
+        flattenedPoints: Array.from(ptsArray),
+        flowArrows: arrows,
+      };
+    }, [line.points, scale, cropX, cropY]);
+
+    if (flattenedPoints.length < 4) return null;
+
+    return (
+      <Group>
+        <Line
+          lineCap="round"
+          lineJoin="round"
+          points={flattenedPoints}
+          stroke="rgba(255, 255, 255, 0.3)"
+          strokeWidth={1}
+          dash={[3, 3]}
+          strokeScaleEnabled={false}
+          perfectDrawEnabled={false}
+        />
+
+        {flowArrows.map((arr) => (
+          <Arrow
+            key={arr.key}
+            points={[arr.startX, arr.startY, arr.endX, arr.endY]}
+            pointerLength={6}
+            pointerWidth={6}
+            fill="#0ea5e9"
+            stroke="#0ea5e9"
+            strokeWidth={1.5}
+            pointerAtEnding={true}
+            opacity={0.6}
+            strokeScaleEnabled={false}
+            perfectDrawEnabled={false}
+            shadowColor="rgba(0, 0, 0, 0.4)"
+            shadowBlur={2}
+          />
+        ))}
       </Group>
     );
   },
@@ -696,7 +809,8 @@ const MaskOverlay = memo(
       subMask.type === Mask.Brush ||
       subMask.type === Mask.Flow ||
       subMask.type === Mask.Clone ||
-      subMask.type === Mask.Heal
+      subMask.type === Mask.Heal ||
+      subMask.type === Mask.Liquify
     ) {
       const { lines = [], sourceX, sourceY } = p;
 
@@ -739,9 +853,13 @@ const MaskOverlay = memo(
           onTouchStart={handleMaskTouchStart}
         >
           <Group visible={showBrushStrokes !== false}>
-            {lines.map((line: DrawnLine, i: number) => (
-              <OptimizedBrushLine key={i} line={line} scale={scale} cropX={cropX} cropY={cropY} />
-            ))}
+            {subMask.type === Mask.Liquify && isSelected
+              ? lines.map((line: DrawnLine, i: number) => (
+                  <LiquifyPreviewLine key={i} line={line} scale={scale} cropX={cropX} cropY={cropY} />
+                ))
+              : lines.map((line: DrawnLine, i: number) => (
+                  <OptimizedBrushLine key={i} line={line} scale={scale} cropX={cropX} cropY={cropY} />
+                ))}
 
             {hasSource &&
               isSelected &&
@@ -1455,12 +1573,17 @@ const ImageCanvas = memo(
       (activeSubMask?.type === Mask.Brush ||
         activeSubMask?.type === Mask.Flow ||
         activeSubMask?.type === Mask.Clone ||
-        activeSubMask?.type === Mask.Heal);
+        activeSubMask?.type === Mask.Heal ||
+        activeSubMask?.type === Mask.Liquify);
+
     const isManualCleanupActive =
       isAiEditing && (activeSubMask?.type === Mask.Clone || activeSubMask?.type === Mask.Heal);
 
+    const isLiquifyActive = isAiEditing && activeSubMask?.type === Mask.Liquify;
+
     const isCloneOrHealActive =
-      (isMasking || isAiEditing) && (activeSubMask?.type === Mask.Clone || activeSubMask?.type === Mask.Heal);
+      (isMasking || isAiEditing) &&
+      (activeSubMask?.type === Mask.Clone || activeSubMask?.type === Mask.Heal || activeSubMask?.type === Mask.Liquify);
 
     const activeLineFlow = activeSubMask?.type === Mask.Flow ? (activeSubMask?.parameters?.flow ?? 10) : undefined;
 
@@ -1585,7 +1708,7 @@ const ImageCanvas = memo(
       const processContainers = (containers: any[], isAi: boolean) => {
         containers.forEach((container) => {
           container.subMasks.forEach((sm: SubMask) => {
-            if (sm.type !== Mask.Clone && sm.type !== Mask.Heal) return;
+            if (sm.type !== Mask.Clone && sm.type !== Mask.Heal && sm.type !== Mask.Liquify) return;
             const lines = sm.parameters?.lines || [];
             if (lines.length === 0) return;
 
@@ -1612,7 +1735,10 @@ const ImageCanvas = memo(
             let cx = drawingCenterX;
             let cy = drawingCenterY;
 
-            if (sourceX !== undefined && sourceY !== undefined) {
+            if (sm.type === Mask.Liquify) {
+              cx = drawingCenterX + 16;
+              cy = drawingCenterY - 16;
+            } else if (sourceX !== undefined && sourceY !== undefined) {
               cx = (drawingCenterX + sourceX) / 2;
               cy = (drawingCenterY + sourceY) / 2;
             }
@@ -2101,7 +2227,7 @@ const ImageCanvas = memo(
 
           const activeId = isMasking ? activeMaskId : activeAiSubMaskId;
 
-          if (isManualCleanupActive && activeId) {
+          if ((isManualCleanupActive || isLiquifyActive) && activeId) {
             const { scale } = imageRenderSize;
 
             const imageSpaceLine: DrawnLine = {
@@ -2133,8 +2259,8 @@ const ImageCanvas = memo(
 
             const sourceX = activeSubMask?.parameters.sourceX;
             const sourceY = activeSubMask?.parameters.sourceY;
-            if (sourceX !== undefined && sourceY !== undefined) {
-              triggerManualCleanup(activeId, sourceX, sourceY);
+            if (isLiquifyActive || (sourceX !== undefined && sourceY !== undefined)) {
+              triggerManualCleanup(activeId, sourceX || 0, sourceY || 0);
             }
           } else if (onLiveMaskPreview && activeContainer && activeSubMask && isBrushActive) {
             const { scale } = imageRenderSize;
@@ -2183,6 +2309,7 @@ const ImageCanvas = memo(
         activeSubMask,
         isBrushActive,
         isManualCleanupActive,
+        isLiquifyActive,
         onManualCleanup,
         activeLineFlow,
         isAiSubjectActive,
@@ -2331,11 +2458,11 @@ const ImageCanvas = memo(
           };
         }
 
-        if (isManualCleanupActive && activeId) {
+        if ((isManualCleanupActive || isLiquifyActive) && activeId) {
           const sourceX = activeSubMask?.parameters.sourceX;
           const sourceY = activeSubMask?.parameters.sourceY;
-          if (sourceX !== undefined && sourceY !== undefined) {
-            triggerManualCleanup(activeId, sourceX, sourceY);
+          if (isLiquifyActive || (sourceX !== undefined && sourceY !== undefined)) {
+            triggerManualCleanup(activeId, sourceX || 0, sourceY || 0);
           }
         }
       }
@@ -2351,6 +2478,7 @@ const ImageCanvas = memo(
       isAiEditing,
       isBrushActive,
       isManualCleanupActive,
+      isLiquifyActive,
       triggerManualCleanup,
       activeLineFlow,
       isMasking,
@@ -2426,55 +2554,14 @@ const ImageCanvas = memo(
       isStraightening.current = false;
       if (
         !straightenLine ||
-        (straightenLine.start.x === straightenLine.end.x && straightenLine.start.y === straightenLine.start.y)
+        (straightenLine.start.x === straightenLine.end.x && straightenLine.start.y === straightenLine.end.y)
       ) {
         setStraightenLine(null);
         return;
       }
 
       const { start, end } = straightenLine;
-      const { rotation = 0 } = adjustments;
-      const theta_rad = (rotation * Math.PI) / 180;
-      const cos_t = Math.cos(theta_rad);
-      const sin_t = Math.sin(theta_rad);
-      const width = uncroppedImageRenderSize?.width ?? 0;
-      const height = uncroppedImageRenderSize?.height ?? 0;
-      const cx = width / 2;
-      const cy = height / 2;
-
-      const unrotate = (p: Coord) => {
-        const x = p.x - cx;
-        const y = p.y - cy;
-        return {
-          x: cx + x * cos_t + y * sin_t,
-          y: cy - x * sin_t + y * cos_t,
-        };
-      };
-
-      const start_unrotated = unrotate(start);
-      const end_unrotated = unrotate(end);
-      const dx = end_unrotated.x - start_unrotated.x;
-      const dy = end_unrotated.y - start_unrotated.y;
-      const angle = Math.atan2(dy, dx) * (180 / Math.PI);
-      let targetAngle;
-
-      if (angle > -45 && angle <= 45) {
-        targetAngle = 0;
-      } else if (angle > 45 && angle <= 135) {
-        targetAngle = 90;
-      } else if (angle > 135 || angle <= -135) {
-        targetAngle = 180;
-      } else {
-        targetAngle = -90;
-      }
-
-      let correction = targetAngle - angle;
-      if (correction > 180) {
-        correction -= 360;
-      }
-      if (correction < -180) {
-        correction += 360;
-      }
+      const correction = calculateStraightenAngle(end.x - start.x, end.y - start.y);
 
       onStraighten(correction);
       setStraightenLine(null);
@@ -2810,7 +2897,13 @@ const ImageCanvas = memo(
                       }}
                     >
                       <div className="p-1.5 rounded-full shadow-md transition-transform hover:scale-110 bg-surface/70 text-text-primary shadow-black/20">
-                        {m.type === Mask.Clone ? <Stamp size={16} /> : <Bandage size={16} />}
+                        {m.type === Mask.Clone ? (
+                          <Stamp size={16} />
+                        ) : m.type === Mask.Heal ? (
+                          <Bandage size={16} />
+                        ) : (
+                          <Move size={16} />
+                        )}
                       </div>
                     </div>
                   );
@@ -2881,7 +2974,10 @@ const ImageCanvas = memo(
                               ? { ...subMask, parameters: localInitialDrawParams }
                               : subMask;
 
-                          const isCloneOrHeal = renderSubMask.type === Mask.Clone || renderSubMask.type === Mask.Heal;
+                          const isCloneOrHeal =
+                            renderSubMask.type === Mask.Clone ||
+                            renderSubMask.type === Mask.Heal ||
+                            renderSubMask.type === Mask.Liquify;
                           const isThisSubMaskActive = renderSubMask.id === activeId;
                           const isActivelyDrawingThis = isThisSubMaskActive && isDrawing.current;
                           const isHoveringThisMarker = hoveredMarkerId === renderSubMask.id;
@@ -2891,7 +2987,8 @@ const ImageCanvas = memo(
                             showBrushStrokes =
                               isActivelyDrawingThis ||
                               isHoveringThisMarker ||
-                              (isThisSubMaskActive && isMaskControlHovered);
+                              (isThisSubMaskActive && isMaskControlHovered) ||
+                              (isThisSubMaskActive && renderSubMask.type === Mask.Liquify);
                           }
 
                           return (

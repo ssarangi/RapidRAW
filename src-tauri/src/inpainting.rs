@@ -2,6 +2,7 @@ use std::io::Cursor;
 
 use base64::{Engine as _, engine::general_purpose};
 use image::{DynamicImage, GenericImageView, Rgb, RgbImage, RgbaImage};
+use rayon::prelude::*;
 use serde_json::Value;
 
 use crate::ai_connector;
@@ -649,6 +650,322 @@ pub async fn invoke_generative_replace_with_mask_def(
     let mut mask_buf = Cursor::new(Vec::with_capacity(32768));
     output_mask
         .write_to(&mut mask_buf, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())?;
+    let mask_base64 = general_purpose::STANDARD.encode(mask_buf.get_ref());
+
+    let result_json = serde_json::json!({
+        "color": color_base64,
+        "mask": mask_base64,
+        "offsetX": min_x_u32,
+        "offsetY": min_y_u32,
+        "width": crop_w,
+        "height": crop_h,
+        "isSrgbEncoded": is_raw
+    })
+    .to_string();
+
+    Ok(result_json)
+}
+
+fn point_to_segment_dist_sq(px: f32, py: f32, x1: f32, y1: f32, x2: f32, y2: f32) -> f32 {
+    let dx = x2 - x1;
+    let dy = y2 - y1;
+    let l2 = dx * dx + dy * dy;
+    if l2 == 0.0 {
+        return (px - x1) * (px - x1) + (py - y1) * (py - y1);
+    }
+    let t = ((px - x1) * dx + (py - y1) * dy) / l2;
+    let t = t.clamp(0.0, 1.0);
+    let proj_x = x1 + t * dx;
+    let proj_y = y1 + t * dy;
+    (px - proj_x) * (px - proj_x) + (py - proj_y) * (py - proj_y)
+}
+
+fn bilinear_sample(img: &RgbImage, x: f32, y: f32) -> Rgb<u8> {
+    let w = img.width() as i32;
+    let h = img.height() as i32;
+
+    let x_floor = x.floor() as i32;
+    let y_floor = y.floor() as i32;
+    let x_frac = x - x_floor as f32;
+    let y_frac = y - y_floor as f32;
+
+    let x0 = x_floor.clamp(0, w - 1) as u32;
+    let y0 = y_floor.clamp(0, h - 1) as u32;
+    let x1 = (x_floor + 1).clamp(0, w - 1) as u32;
+    let y1 = (y_floor + 1).clamp(0, h - 1) as u32;
+
+    let p00 = img.get_pixel(x0, y0);
+    let p10 = img.get_pixel(x1, y0);
+    let p01 = img.get_pixel(x0, y1);
+    let p11 = img.get_pixel(x1, y1);
+
+    let mut out = [0u8; 3];
+    for c in 0..3 {
+        let val = (p00[c] as f32 * (1.0 - x_frac) * (1.0 - y_frac)
+            + p10[c] as f32 * x_frac * (1.0 - y_frac)
+            + p01[c] as f32 * (1.0 - x_frac) * y_frac
+            + p11[c] as f32 * x_frac * y_frac)
+            .clamp(0.0, 255.0);
+        out[c] = val as u8;
+    }
+    Rgb(out)
+}
+
+#[tauri::command]
+pub async fn generate_liquify_patch(
+    patch_definition: AiPatchDefinition,
+    current_adjustments: Value,
+    _source_point: (f64, f64),
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let mut source_image_adjustments = current_adjustments.clone();
+    if let Some(patches) = source_image_adjustments
+        .get_mut("aiPatches")
+        .and_then(|v| v.as_array_mut())
+    {
+        patches.retain(|p| p.get("id").and_then(|id| id.as_str()) != Some(&patch_definition.id));
+    }
+
+    let is_raw = {
+        let guard = state.original_image.lock().unwrap();
+        guard.as_ref().map(|img| img.is_raw).unwrap_or(false)
+    };
+
+    let (base_image, _) = crate::get_original_image(&state)?;
+    let composited = composite_patches_on_image(&base_image, &source_image_adjustments)
+        .map_err(|e| format!("Failed to prepare source image: {}", e))?;
+
+    let source_dynamic = if is_raw {
+        apply_linear_to_srgb(composited)
+    } else {
+        composited
+    };
+    let (img_w, img_h) = source_dynamic.dimensions();
+    let source_image = source_dynamic.to_rgb8();
+
+    let mut all_points = Vec::new();
+
+    #[derive(Clone)]
+    struct Stroke {
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        radius: f32,
+        radius_sq: f32,
+        feather: f32,
+        pressure: f32,
+        // AABB parameters for fast culling
+        aabb_min_x: f32,
+        aabb_max_x: f32,
+        aabb_min_y: f32,
+        aabb_max_y: f32,
+    }
+    let mut strokes = Vec::new();
+
+    let sub_masks_val = serde_json::to_value(&patch_definition.sub_masks).unwrap_or(Value::Null);
+
+    let mut max_brush_radius = 0.0_f32;
+
+    if let Some(arr) = sub_masks_val.as_array() {
+        for sm in arr {
+            let mask_type = sm.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if mask_type.eq_ignore_ascii_case("liquify") {
+                let params = sm.get("parameters");
+                let pressure_param = params
+                    .and_then(|p| p.get("pressure"))
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(50.0) as f32;
+                let force = (pressure_param / 100.0).clamp(0.01, 1.0);
+
+                if let Some(lines) = params
+                    .and_then(|p| p.get("lines"))
+                    .and_then(|v| v.as_array())
+                {
+                    for line in lines {
+                        let radius = line
+                            .get("brushSize")
+                            .and_then(|v| v.as_f64())
+                            .unwrap_or(50.0) as f32
+                            / 2.0;
+
+                        if radius > max_brush_radius {
+                            max_brush_radius = radius;
+                        }
+
+                        let feather =
+                            line.get("feather").and_then(|v| v.as_f64()).unwrap_or(0.5) as f32;
+
+                        if let Some(pts) = line.get("points").and_then(|v| v.as_array()) {
+                            let mut prev_pt: Option<(f32, f32)> = None;
+                            for p_val in pts {
+                                if let (Some(x), Some(y)) = (
+                                    p_val.get("x").and_then(|v| v.as_f64()),
+                                    p_val.get("y").and_then(|v| v.as_f64()),
+                                ) {
+                                    let (xf, yf) = (x as f32, y as f32);
+                                    all_points.push((xf, yf, radius));
+
+                                    if let Some((px, py)) = prev_pt {
+                                        strokes.push(Stroke {
+                                            x1: px,
+                                            y1: py,
+                                            x2: xf,
+                                            y2: yf,
+                                            radius,
+                                            radius_sq: radius * radius,
+                                            feather,
+                                            pressure: force,
+                                            aabb_min_x: px.min(xf) - radius,
+                                            aabb_max_x: px.max(xf) + radius,
+                                            aabb_min_y: py.min(yf) - radius,
+                                            aabb_max_y: py.max(yf) + radius,
+                                        });
+                                    }
+                                    prev_pt = Some((xf, yf));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if strokes.is_empty() {
+        return Err("No brush strokes found for Liquify.".to_string());
+    }
+
+    let mut min_x = img_w as f32;
+    let mut min_y = img_h as f32;
+    let mut max_x = 0.0_f32;
+    let mut max_y = 0.0_f32;
+
+    for (x, y, r) in &all_points {
+        if x - r < min_x {
+            min_x = x - r;
+        }
+        if y - r < min_y {
+            min_y = y - r;
+        }
+        if x + r > max_x {
+            max_x = x + r;
+        }
+        if y + r > max_y {
+            max_y = y + r;
+        }
+    }
+
+    let margin = (max_brush_radius * 2.5).clamp(50.0, 300.0);
+
+    min_x -= margin;
+    min_y -= margin;
+    max_x += margin;
+    max_y += margin;
+
+    let min_x_u32 = (min_x as i32).clamp(0, img_w as i32 - 1) as u32;
+    let min_y_u32 = (min_y as i32).clamp(0, img_h as i32 - 1) as u32;
+    let max_x_u32 = (max_x as i32).clamp(0, img_w as i32 - 1) as u32;
+    let max_y_u32 = (max_y as i32).clamp(0, img_h as i32 - 1) as u32;
+
+    let crop_w = max_x_u32 - min_x_u32 + 1;
+    let crop_h = max_y_u32 - min_y_u32 + 1;
+
+    let mut color_pixels = vec![0u8; (crop_w * crop_h * 3) as usize];
+    let mut mask_pixels = vec![0u8; (crop_w * crop_h) as usize];
+
+    strokes.reverse();
+
+    color_pixels
+        .par_chunks_mut((crop_w * 3) as usize)
+        .zip(mask_pixels.par_chunks_mut(crop_w as usize))
+        .enumerate()
+        .for_each(|(y, (color_row, mask_row))| {
+            let orig_y = y as f32 + min_y_u32 as f32;
+
+            for x in 0..(crop_w as usize) {
+                let orig_x = x as f32 + min_x_u32 as f32;
+                let mut src_x = orig_x;
+                let mut src_y = orig_y;
+
+                for stroke in &strokes {
+                    if src_x < stroke.aabb_min_x
+                        || src_x > stroke.aabb_max_x
+                        || src_y < stroke.aabb_min_y
+                        || src_y > stroke.aabb_max_y
+                    {
+                        continue;
+                    }
+
+                    let dist_sq = point_to_segment_dist_sq(
+                        src_x, src_y, stroke.x1, stroke.y1, stroke.x2, stroke.y2,
+                    );
+
+                    if dist_sq < stroke.radius_sq {
+                        let dist = dist_sq.sqrt();
+                        let feather = stroke.feather.clamp(0.01, 1.0);
+                        let inner_radius = stroke.radius * (1.0 - feather);
+
+                        let elastic_falloff = if dist <= inner_radius {
+                            1.0
+                        } else {
+                            let t = (dist - inner_radius) / (stroke.radius - inner_radius);
+                            let cos_val = 0.5 * (1.0 + (t * std::f32::consts::PI).cos());
+                            cos_val * cos_val
+                        };
+
+                        let dx = stroke.x2 - stroke.x1;
+                        let dy = stroke.y2 - stroke.y1;
+
+                        src_x -= dx * elastic_falloff * stroke.pressure;
+                        src_y -= dy * elastic_falloff * stroke.pressure;
+                    }
+                }
+
+                let disp_sq =
+                    (src_x - orig_x) * (src_x - orig_x) + (src_y - orig_y) * (src_y - orig_y);
+
+                if disp_sq > 0.001 {
+                    let displacement = disp_sq.sqrt();
+
+                    let mask_val = (displacement * 255.0).clamp(0.0, 255.0) as u8;
+                    let px = bilinear_sample(&source_image, src_x, src_y);
+
+                    color_row[x * 3] = px[0];
+                    color_row[x * 3 + 1] = px[1];
+                    color_row[x * 3 + 2] = px[2];
+                    mask_row[x] = mask_val;
+                } else {
+                    let px = source_image.get_pixel(orig_x as u32, orig_y as u32);
+                    color_row[x * 3] = px[0];
+                    color_row[x * 3 + 1] = px[1];
+                    color_row[x * 3 + 2] = px[2];
+                    mask_row[x] = 0;
+                }
+            }
+        });
+
+    let color_image = RgbImage::from_raw(crop_w, crop_h, color_pixels).unwrap();
+    let mask_image = image::GrayImage::from_raw(crop_w, crop_h, mask_pixels).unwrap();
+
+    let quality = 100;
+
+    let mut color_buf = Cursor::new(Vec::with_capacity(32768));
+    color_image
+        .write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(
+            &mut color_buf,
+            quality,
+        ))
+        .map_err(|e| e.to_string())?;
+    let color_base64 = general_purpose::STANDARD.encode(color_buf.get_ref());
+
+    let mut mask_buf = Cursor::new(Vec::with_capacity(32768));
+    mask_image
+        .write_with_encoder(image::codecs::jpeg::JpegEncoder::new_with_quality(
+            &mut mask_buf,
+            quality,
+        ))
         .map_err(|e| e.to_string())?;
     let mask_base64 = general_purpose::STANDARD.encode(mask_buf.get_ref());
 

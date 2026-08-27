@@ -52,7 +52,7 @@ export default function CropPanel() {
   const isStraightenActive = useEditorStore((s) => s.isStraightenActive);
   const activeOverlay = useEditorStore((s) => s.overlayMode);
   const setEditor = useEditorStore((s) => s.setEditor);
-  const { setAdjustments } = useEditorActions();
+  const { setAdjustments, handleRotate } = useEditorActions();
   const [customW, setCustomW] = useState('');
   const [customH, setCustomH] = useState('');
   const [isTransformModalOpen, setIsTransformModalOpen] = useState(false);
@@ -135,13 +135,6 @@ export default function CropPanel() {
   const lastSyncedRatio = useRef<number | null>(null);
 
   const { aspectRatio, rotation = 0, flipHorizontal = false, flipVertical = false, orientationSteps = 0 } = adjustments;
-
-  useEffect(() => {
-    if (isStraightenActive) {
-      updateLocalRotation(null);
-      setAdjustments((prev: Adjustments) => ({ ...prev, rotation: 0 }));
-    }
-  }, [isStraightenActive, setAdjustments, updateLocalRotation]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -410,25 +403,6 @@ export default function CropPanel() {
     }
   };
 
-  const handleStepRotate = (degrees: number) => {
-    const increment = degrees > 0 ? 1 : 3;
-    setAdjustments((prev: Adjustments) => {
-      const newAspectRatio = prev.aspectRatio && prev.aspectRatio !== 0 ? 1 / prev.aspectRatio : null;
-      const newOrientationSteps = ((prev.orientationSteps || 0) + increment) % 4;
-      const newCrop =
-        selectedImage?.width && selectedImage?.height
-          ? calculateCenteredCrop(selectedImage.width, selectedImage.height, newOrientationSteps, newAspectRatio, 0)
-          : null;
-      return {
-        ...prev,
-        aspectRatio: newAspectRatio,
-        orientationSteps: newOrientationSteps,
-        rotation: 0,
-        crop: newCrop,
-      };
-    });
-  };
-
   const resetFineRotation = () => {
     updateLocalRotation(null);
     setAdjustments((prev: Partial<Adjustments>) => ({ ...prev, rotation: 0 }));
@@ -604,14 +578,9 @@ export default function CropPanel() {
                     <div className="flex items-center gap-2">
                       <button
                         onClick={() => {
-                          setEditor((state) => {
-                            const willBeActive = !state.isStraightenActive;
-                            if (willBeActive) {
-                              updateLocalRotation(null);
-                              setAdjustments((prev: Adjustments) => ({ ...prev, rotation: 0 }));
-                            }
-                            return { isStraightenActive: willBeActive };
-                          });
+                          setEditor((state) => ({
+                            isStraightenActive: !state.isStraightenActive,
+                          }));
                         }}
                         className={clsx(
                           'p-1.5 rounded-md transition-colors',
@@ -652,7 +621,7 @@ export default function CropPanel() {
               <div className="grid grid-cols-2 gap-2">
                 <motion.div
                   className="flex flex-col items-center justify-center p-3 cursor-pointer rounded-lg transition-colors bg-surface text-text-secondary hover:bg-card-active hover:text-text-primary"
-                  onClick={() => handleStepRotate(-90)}
+                  onClick={() => handleRotate(-90)}
                   data-tooltip={t('editor.crop.tooltips.rotateLeft')}
                   whileTap={{ scale: 0.98 }}
                   transition={{ type: 'spring', stiffness: 400, damping: 17 }}
@@ -662,7 +631,7 @@ export default function CropPanel() {
                 </motion.div>
                 <motion.div
                   className="flex flex-col items-center justify-center p-3 cursor-pointer rounded-lg transition-colors bg-surface text-text-secondary hover:bg-card-active hover:text-text-primary"
-                  onClick={() => handleStepRotate(90)}
+                  onClick={() => handleRotate(90)}
                   data-tooltip={t('editor.crop.tooltips.rotateRight')}
                   whileTap={{ scale: 0.98 }}
                   transition={{ type: 'spring', stiffness: 400, damping: 17 }}

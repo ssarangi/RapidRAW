@@ -67,8 +67,10 @@ export function useAiMasking() {
 
       try {
         const patchDefinitionForBackend = adjustments.aiPatches.find((p: AiPatch) => p.id === patchId);
+        const isLiquify = patchDefinitionForBackend?.subMasks.some((sm: SubMask) => sm.type === 'liquify');
+        const command = isLiquify ? 'generate_liquify_patch' : 'generate_manual_cleanup_patch';
 
-        const newPatchDataJson: any = await invoke('generate_manual_cleanup_patch', {
+        const newPatchDataJson: any = await invoke(command, {
           currentAdjustments: adjustments,
           patchDefinition: patchDefinitionForBackend,
           sourcePoint: [sourceX, sourceY],

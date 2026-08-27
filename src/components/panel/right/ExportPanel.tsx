@@ -747,7 +747,7 @@ export default function ExportPanel({
                             <Slider
                               label={t('export.watermark.scale')}
                               min={1}
-                              max={50}
+                              max={100}
                               step={1}
                               value={watermarkScale}
                               onChange={(e) => setWatermarkScale(Number(e.target.value))}

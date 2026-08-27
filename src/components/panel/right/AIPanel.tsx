@@ -1,3 +1,5 @@
+// Liquify TODO: Add modes (Push, Pinch, Expand, Twirl), optimize performance, rename "CloneOrHeal" variables, allow erasing (with alt key) and add i18n
+
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { v4 as uuidv4 } from 'uuid';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -91,6 +93,10 @@ const SUB_MASK_CONFIG: any = {
   [Mask.Brush]: { showBrushTools: true },
   [Mask.Clone]: { showBrushTools: true },
   [Mask.Heal]: { showBrushTools: true },
+  [Mask.Liquify]: {
+    showBrushTools: true,
+    parameters: [{ key: 'pressure', min: 1, max: 100, step: 1, defaultValue: 50 }],
+  },
   [Mask.Linear]: { parameters: [] },
   [Mask.AiSubject]: {
     parameters: [
@@ -558,6 +564,11 @@ export default function AIPanel() {
         (adjustments.aiPatches || []).filter((p: AiPatch) => p.subMasks.some((sm: SubMask) => sm.type === Mask.Heal))
           .length + 1;
       name = t('editor.ai.patches.heal', { count });
+    } else if (type === Mask.Liquify) {
+      const count =
+        (adjustments.aiPatches || []).filter((p: AiPatch) => p.subMasks.some((sm: SubMask) => sm.type === Mask.Liquify))
+          .length + 1;
+      name = t('editor.ai.patches.liquify', { count, defaultValue: `Liquify ${count}` });
     } else {
       const count = (adjustments.aiPatches || []).length + 1;
       name = t('editor.ai.patches.aiEdit', { count });
@@ -577,14 +588,14 @@ export default function AIPanel() {
     setAdjustments((prev: Adjustments) => ({ ...prev, aiPatches: [...(prev.aiPatches || []), newContainer] }));
     onSelectPatchContainer(newContainer.id);
 
-    const isStandalone = [Mask.Clone, Mask.Heal].includes(type);
+    const isStandalone = [Mask.Clone, Mask.Heal, Mask.Liquify].includes(type);
 
     onSelectSubMask(subMask.id);
     if (!isStandalone) {
       setExpandedContainers((prev) => new Set(prev).add(newContainer.id));
     }
 
-    if (type === Mask.Brush || type === Mask.Clone || type === Mask.Heal) {
+    if (type === Mask.Brush || type === Mask.Clone || type === Mask.Heal || type === Mask.Liquify) {
       selectBrushToolForNewMask();
     }
 
@@ -627,7 +638,9 @@ export default function AIPanel() {
 
     const container = targetContainerId ? adjustments.aiPatches.find((m) => m.id === targetContainerId) : null;
     const isStandalone =
-      container && container.subMasks.length === 1 && [Mask.Clone, Mask.Heal].includes(container.subMasks[0].type);
+      container &&
+      container.subMasks.length === 1 &&
+      [Mask.Clone, Mask.Heal, Mask.Liquify].includes(container.subMasks[0].type);
 
     if (isStandalone && targetContainerId) {
       return;
@@ -635,7 +648,9 @@ export default function AIPanel() {
 
     const buildMenu = (types: MaskType[], mode: SubMaskMode = SubMaskMode.Additive) =>
       types
-        .filter((mt) => !mt.disabled && (!targetContainerId || ![Mask.Clone, Mask.Heal].includes(mt.type)))
+        .filter(
+          (mt) => !mt.disabled && (!targetContainerId || ![Mask.Clone, Mask.Heal, Mask.Liquify].includes(mt.type)),
+        )
         .map((maskType: MaskType) => ({
           label: formatMaskTypeName(maskType.type),
           icon: maskType.icon,
@@ -1395,7 +1410,8 @@ function ContainerRow({
   } = useDraggable({ id: container.id, data: { type: 'Container', item: container } });
   const { showContextMenu } = useContextMenu();
 
-  const isStandalone = container.subMasks.length === 1 && [Mask.Clone, Mask.Heal].includes(container.subMasks[0].type);
+  const isStandalone =
+    container.subMasks.length === 1 && [Mask.Clone, Mask.Heal, Mask.Liquify].includes(container.subMasks[0].type);
   const firstSubMask = container.subMasks[0];
   const isRowSelected = isStandalone ? container.id === activePatchContainerId : isSelected;
 
@@ -1900,11 +1916,12 @@ function SettingsPanel({
   }, [container?.id]);
 
   const isQuickErasePatch = displayContainer.subMasks?.some((sm: SubMask) => sm.type === Mask.QuickEraser);
-  const isCloneOrHealPatch = displayContainer.subMasks?.some(
-    (sm: SubMask) => sm.type === Mask.Clone || sm.type === Mask.Heal,
+  const isStandalonePatch = displayContainer.subMasks?.some((sm: SubMask) =>
+    [Mask.Clone, Mask.Heal, Mask.Liquify].includes(sm.type),
   );
   const isStandalone =
-    displayContainer?.subMasks?.length === 1 && [Mask.Clone, Mask.Heal].includes(displayContainer.subMasks[0].type);
+    displayContainer?.subMasks?.length === 1 &&
+    [Mask.Clone, Mask.Heal, Mask.Liquify].includes(displayContainer.subMasks[0].type);
 
   useEffect(() => {
     if (container) {
@@ -1940,7 +1957,7 @@ function SettingsPanel({
       className={`space-y-2 transition-opacity duration-300 ${!isActive ? 'opacity-50 pointer-events-none' : ''}`}
       onClick={(e) => e.stopPropagation()}
     >
-      {!isCloneOrHealPatch && (
+      {!isStandalonePatch && (
         <CollapsibleSection
           title={t('editor.ai.settings.generativeReplaceTitle')}
           isOpen={collapsibleState.generative}
@@ -2052,7 +2069,7 @@ function SettingsPanel({
         isContentVisible={true}
       >
         <div className="space-y-4 pt-2">
-          {!isCloneOrHealPatch && (
+          {!isStandalonePatch && (
             <Switch
               checked={!!(isComponentMode ? activeSubMask.invert : displayContainer.invert)}
               label={
@@ -2089,12 +2106,12 @@ function SettingsPanel({
               {subMaskConfig.parameters?.map((param: any) => (
                 <Slider
                   key={param.key}
-                  label={t('editor.ai.params.' + param.key)}
+                  label={t('editor.ai.params.' + param.key, param.key)}
                   min={param.min}
                   max={param.max}
                   step={param.step}
                   defaultValue={param.defaultValue}
-                  value={(activeSubMask.parameters[param.key] || 0) * (param.multiplier || 1)}
+                  value={(activeSubMask.parameters[param.key] ?? param.defaultValue) * (param.multiplier || 1)}
                   onChange={(e: any) =>
                     updateSubMask(activeSubMask.id, {
                       parameters: {
