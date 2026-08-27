@@ -48,6 +48,8 @@ pub struct VisualModelPackStatus {
 struct InstalledVisualModelPack {
     pack_id: String,
     installed_at: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_path: Option<String>,
 }
 
 fn artifact(file_name: &str) -> VisualModelArtifact {
@@ -76,7 +78,11 @@ pub fn visual_model_packs() -> Vec<VisualModelPack> {
             description: "Taxonomy-aware organism classification, including birds. Requires a pinned ONNX encoder and matching taxonomy embeddings.".to_string(),
             task: "Wildlife and species classification".to_string(),
             availability: VisualModelAvailability::BundleRequired,
-            artifacts: Vec::new(),
+            artifacts: vec![
+                VisualModelArtifact { file_name: "vision_encoder.onnx".to_string(), source_url: String::new() },
+                VisualModelArtifact { file_name: "species_embeddings.bin".to_string(), source_url: String::new() },
+                VisualModelArtifact { file_name: "species_labels.json".to_string(), source_url: String::new() },
+            ],
             license_name: "MIT".to_string(),
             license_url: "https://huggingface.co/imageomics/bioclip".to_string(),
             model_source_url: "https://github.com/Imageomics/bioclip".to_string(),
@@ -129,9 +135,60 @@ pub async fn download_visual_model_pack(pack_id: String, app_handle: AppHandle) 
         file.sync_all().map_err(|error| error.to_string())?;
         fs::rename(&temporary, &target).map_err(|error| error.to_string())?;
     }
-    let manifest = InstalledVisualModelPack { pack_id: pack.id.clone(), installed_at: Utc::now().timestamp() };
+    let manifest = InstalledVisualModelPack { pack_id: pack.id.clone(), installed_at: Utc::now().timestamp(), source_path: None };
     fs::write(manifest_path(&directory), serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?).map_err(|error| error.to_string())?;
     Ok(VisualModelPackStatus { installed: true, install_path: directory.to_string_lossy().into_owned(), pack })
+}
+
+#[tauri::command]
+pub fn install_visual_model_bundle(
+    pack_id: String,
+    source_directory: String,
+    app_handle: AppHandle,
+) -> Result<VisualModelPackStatus, String> {
+    let pack = visual_model_packs()
+        .into_iter()
+        .find(|candidate| candidate.id == pack_id)
+        .ok_or_else(|| format!("Unknown visual model pack: {pack_id}"))?;
+    if pack.availability != VisualModelAvailability::BundleRequired {
+        return Err(format!("{} is downloaded directly by RapidRAW", pack.display_name));
+    }
+
+    let source = PathBuf::from(&source_directory);
+    if !source.is_dir() {
+        return Err("Choose the folder containing the model bundle".to_string());
+    }
+    let missing = pack
+        .artifacts
+        .iter()
+        .filter(|artifact| !source.join(&artifact.file_name).is_file())
+        .map(|artifact| artifact.file_name.as_str())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(format!("The bundle is missing: {}", missing.join(", ")));
+    }
+
+    let directory = pack_dir(&app_handle, &pack.id)?;
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    for artifact in &pack.artifacts {
+        fs::copy(source.join(&artifact.file_name), directory.join(&artifact.file_name))
+            .map_err(|error| format!("Could not install {}: {error}", artifact.file_name))?;
+    }
+    let manifest = InstalledVisualModelPack {
+        pack_id: pack.id.clone(),
+        installed_at: Utc::now().timestamp(),
+        source_path: Some(source.to_string_lossy().into_owned()),
+    };
+    fs::write(
+        manifest_path(&directory),
+        serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(VisualModelPackStatus {
+        installed: true,
+        install_path: directory.to_string_lossy().into_owned(),
+        pack,
+    })
 }
 
 pub(crate) fn installed_visual_model_path(app_handle: &AppHandle, pack_id: &str, file_name: &str) -> Result<PathBuf, String> {
@@ -148,6 +205,14 @@ mod tests {
         for pack in visual_model_packs().iter().filter(|pack| pack.availability == VisualModelAvailability::DirectDownload) {
             assert!(!pack.artifacts.is_empty());
             assert!(pack.artifacts.iter().all(|artifact| artifact.source_url.starts_with("https://")));
+        }
+    }
+
+    #[test]
+    fn bundle_visual_packs_declare_required_artifacts() {
+        for pack in visual_model_packs().iter().filter(|pack| pack.availability == VisualModelAvailability::BundleRequired) {
+            assert!(!pack.artifacts.is_empty());
+            assert!(pack.artifacts.iter().all(|artifact| !artifact.file_name.is_empty()));
         }
     }
 }

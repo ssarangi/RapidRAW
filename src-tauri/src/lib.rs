@@ -2351,6 +2351,7 @@ pub fn run() {
             face_model_registry::download_face_model_pack,
             visual_model_registry::list_visual_model_pack_statuses,
             visual_model_registry::download_visual_model_pack,
+            visual_model_registry::install_visual_model_bundle,
             face_detection::start_face_detection,
             face_detection::start_face_recognition,
             ai_commands::generate_ai_subject_mask,

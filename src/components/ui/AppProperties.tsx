@@ -114,6 +114,7 @@ export enum Invokes {
   DownloadFaceModelPack = 'download_face_model_pack',
   ListVisualModelPackStatuses = 'list_visual_model_pack_statuses',
   DownloadVisualModelPack = 'download_visual_model_pack',
+  InstallVisualModelBundle = 'install_visual_model_bundle',
   ListCatalogPeople = 'list_catalog_people',
   ListSmartCollections = 'list_smart_collections',
   SaveSmartCollection = 'save_smart_collection',
