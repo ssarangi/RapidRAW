@@ -2,6 +2,7 @@ use std::env;
 use std::path::PathBuf;
 
 use rusqlite::Connection;
+use rapidraw_lib::visual_model_registry::visual_model_packs;
 use serde_json::json;
 
 fn database_argument(arguments: &[String]) -> Result<PathBuf, String> {
@@ -41,7 +42,8 @@ fn main() {
         Some("collections") if arguments.get(1).map(String::as_str) == Some("show") => show_collection(&arguments),
         Some("cull") if arguments.get(1).map(String::as_str) == Some("sessions") => cull_sessions(&arguments),
         Some("cull") if arguments.get(1).map(String::as_str) == Some("decisions") => cull_decisions(&arguments),
-        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id>".to_string()),
+        Some("models") if arguments.get(1).map(String::as_str) == Some("list") => list_models(),
+        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -50,6 +52,10 @@ fn main() {
             std::process::exit(2);
         }
     }
+}
+
+fn list_models() -> Result<serde_json::Value, String> {
+    serde_json::to_value(visual_model_packs()).map_err(|error| error.to_string())
 }
 
 fn inspect(arguments: &[String]) -> Result<serde_json::Value, String> {

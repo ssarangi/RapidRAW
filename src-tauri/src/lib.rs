@@ -43,7 +43,7 @@ mod preset_converter;
 mod raw_processing;
 mod tagging;
 mod tagging_utils;
-mod visual_model_registry;
+pub mod visual_model_registry;
 mod window_customizer;
 
 use std::collections::{HashMap, hash_map::DefaultHasher};
