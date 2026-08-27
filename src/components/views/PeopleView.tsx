@@ -5,10 +5,12 @@ import { ScanFace, ScanSearch, Users, X } from 'lucide-react';
 import Button from '../ui/Button';
 import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
-import { Invokes } from '../ui/AppProperties';
+import { CatalogSearchQuery, ImageFile, Invokes } from '../ui/AppProperties';
+import { useLibraryStore } from '../../store/useLibraryStore';
+import { useUIStore } from '../../store/useUIStore';
 
 interface FaceItem { face: { id: number; confidence: number; imageId: number; personId?: number | null; x: number; y: number; width: number; height: number }; imagePath: string; }
-interface Person { id: number; displayName: string; }
+interface Person { id: number; displayName: string; faceCount: number; }
 interface FaceCluster { id: number; faceCount: number; representativeImagePath: string; }
 
 export default function PeopleView() {
@@ -36,12 +38,24 @@ export default function PeopleView() {
     try { await invoke(Invokes.StartFaceRecognition, { rootId: null }); } catch (error) { setMessage(String(error)); }
     finally { setRecognizing(false); }
   };
+  const openPerson = async (person: Person) => {
+    try {
+      const query: CatalogSearchQuery = { person: person.displayName, limit: 20_000 };
+      const files = await invoke<ImageFile[]>(Invokes.SearchCatalogImages, { query });
+      const imageRatings: Record<string, number> = {};
+      files.forEach((file) => { imageRatings[file.path] = file.rating || 0; });
+      useLibraryStore.getState().setLibrary({ currentFolderPath: `Library: ${person.displayName}`, activeAlbumId: null, imageList: files, imageRatings, multiSelectedPaths: [], libraryActivePath: null, libraryScrollTop: 0 });
+      useLibraryStore.getState().setSearchCriteria({ text: '', tags: [], mode: 'OR' });
+      useUIStore.getState().setUI({ activeView: 'library' });
+    } catch (error) { setMessage(`Failed to open ${person.displayName}: ${String(error)}`); }
+  };
   return <div className="flex-1 overflow-y-auto p-5">
     <div className="flex flex-wrap justify-between gap-4 mb-6">
       <div><Text variant={TextVariants.title} color={TextColors.accent}>People</Text><Text variant={TextVariants.small}>Review detected faces and build your local people library.</Text></div>
       <div className="flex gap-2"><Button onClick={() => void recognize()} disabled={recognizing}><ScanSearch size={16} />{recognizing ? 'Starting Recognition' : 'Recognize Faces'}</Button><Button onClick={() => void scan()} disabled={starting}><ScanFace size={16} />{starting ? 'Starting Scan' : 'Scan Faces'}</Button></div>
     </div>
     {message && <div className="mb-4 rounded-md border border-border-color bg-bg-primary p-3"><Text variant={TextVariants.small}>{message}</Text></div>}
+    {people.length > 0 && <div className="mb-5"><Text variant={TextVariants.small} color={TextColors.secondary}>People</Text><div className="mt-2 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">{people.map((person) => <button key={person.id} className="rounded-md border border-border-color bg-bg-primary px-3 py-2 text-left hover:bg-surface" onClick={() => void openPerson(person)}><Text variant={TextVariants.small}>{person.displayName}</Text><Text as="div" variant={TextVariants.small} color={TextColors.secondary}>{person.faceCount} confirmed faces</Text></button>)}</div></div>}
     {clusters.length > 0 && <div className="mb-5"><Text variant={TextVariants.small} color={TextColors.secondary}>Unknown clusters</Text><div className="mt-2 flex gap-2 overflow-x-auto">{clusters.map((cluster) => <div key={cluster.id} className="w-28 shrink-0"><img src={convertFileSrc(cluster.representativeImagePath)} className="w-28 h-24 object-cover rounded-md border border-border-color" alt="Face cluster" /><Text variant={TextVariants.small}>{cluster.faceCount} faces</Text><select className="mt-1 w-full bg-surface border border-border-color rounded px-1 py-1 text-xs" defaultValue="" onChange={(event) => { if (event.target.value) void confirmCluster(cluster.id, Number(event.target.value)); }}><option value="">Assign...</option>{people.map((person) => <option key={person.id} value={person.id}>{person.displayName}</option>)}</select></div>)}</div></div>}
     <div className="mb-5 flex flex-wrap gap-2"><input value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void createPerson(); }} placeholder="Add person" className="bg-bg-primary border border-border-color rounded-md px-3 py-2 text-sm" /><Button onClick={() => void createPerson()} disabled={!name.trim()}>Add Person</Button></div>
     {faces.length === 0 ? <div className="min-h-64 flex flex-col items-center justify-center text-center"><Users size={32} className="text-text-secondary mb-3" /><Text variant={TextVariants.heading}>No unknown faces to review</Text><Text variant={TextVariants.small}>Run Scan Faces after installing the YuNet + SFace model pack.</Text></div> :
