@@ -474,4 +474,20 @@ mod tests {
         assert_eq!(tensor[2], 1024.0 / 4096.0); // G2
         assert_eq!(tensor[3], 2048.0 / 4096.0); // B
     }
+
+    #[test]
+    fn pack_bayer_cfa_rejects_odd_dimensions() {
+        let mosaic: Vec<u16> = vec![1, 2, 3];
+        assert!(pack_bayer_cfa(&mosaic, 3, 1, 0, 100).is_err());
+    }
+
+    #[test]
+    fn restoration_recipe_defaults_are_valid() {
+        let recipe = RestorationRecipe::default();
+        assert_eq!(recipe.operation_kind, "raw_denoise");
+        assert!(recipe.denoise_strength > 0.0 && recipe.denoise_strength <= 1.0);
+        assert!(recipe.microcontrast_strength >= 0.0);
+        assert!(recipe.tile_size >= 256);
+        assert!(recipe.tile_overlap < recipe.tile_size);
+    }
 }
