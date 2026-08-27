@@ -342,6 +342,19 @@ export default function MetadataPanel() {
 
   const hasGps = gpsData.lat !== null && gpsData.lon !== null;
   const fullPath = selectedImage?.path || '';
+  const [derivatives, setDerivatives] = useState<any[]>([]);
+  const [isDerivativesExpanded, setIsDerivativesExpanded] = useState(true);
+
+  useEffect(() => {
+    if (!selectedImage?.id) {
+      setDerivatives([]);
+      return;
+    }
+    invoke('list_image_derivatives', { imageId: selectedImage.id })
+      .then((res: any) => setDerivatives(res || []))
+      .catch((err) => console.error('Failed to load derivatives:', err));
+  }, [selectedImage?.id]);
+
   const isVirtualCopy = fullPath.includes('?vc=');
   const basePath = fullPath.split('?vc=')[0];
   const fileName = basePath.split(/[\\/]/).pop() || '';
@@ -749,6 +762,61 @@ export default function MetadataPanel() {
                 </AnimatePresence>
               </div>
             </div>
+
+            {derivatives.length > 0 && (
+              <div>
+                <Text variant={TextVariants.heading} className="mb-3">
+                  Restored Derivatives ({derivatives.length})
+                </Text>
+                <div className="bg-surface rounded-xl overflow-hidden">
+                  <button
+                    onClick={() => setIsDerivativesExpanded(!isDerivativesExpanded)}
+                    className="w-full flex items-center justify-between p-3 hover:bg-card-active transition-colors"
+                  >
+                    <Text
+                      as="span"
+                      variant={TextVariants.label}
+                      color={TextColors.primary}
+                      className="flex items-center gap-2"
+                    >
+                      <Tag size={16} /> AI Derivatives
+                    </Text>
+                    <Text color={TextColors.secondary}>
+                      {isDerivativesExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                    </Text>
+                  </button>
+
+                  <AnimatePresence initial={false}>
+                    {isDerivativesExpanded && (
+                      <motion.div
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: 'auto', opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
+                        className="overflow-hidden"
+                      >
+                        <div className="p-3 border-t border-surface/50 space-y-2">
+                          {derivatives.map((deriv) => (
+                            <div key={deriv.id} className="p-2.5 bg-bg-primary rounded-lg border border-border-color/30 text-xs">
+                              <div className="flex justify-between items-center mb-1">
+                                <span className="font-semibold capitalize text-accent">{deriv.operationKind.replace('_', ' ')}</span>
+                                <span className="text-emerald-400 uppercase font-medium">{deriv.state}</span>
+                              </div>
+                              <div className="text-text-secondary truncate mb-1">
+                                Path: <span className="text-text-primary">{deriv.outputPath}</span>
+                              </div>
+                              <div className="text-text-secondary">
+                                Model: {deriv.modelId} ({deriv.width}x{deriv.height})
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              </div>
+            )}
 
             {hasGps && gpsData?.lat && gpsData?.lon && (
               <div>
