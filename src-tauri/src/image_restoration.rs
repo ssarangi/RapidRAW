@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use image::{DynamicImage, GenericImageView, ImageBuffer, Rgb};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use tauri::{Emitter, Manager};
+
 
 /// Recipe and configuration parameters for a restoration operation.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -209,6 +211,217 @@ pub fn derivative_output_path(
         .as_secs();
     let filename = format!("img_{source_image_id}_{operation}_{timestamp}.{format_ext}");
     Ok(dir.join(filename))
+}
+
+/// Initiates a background restoration job for a specific image in the catalog
+#[tauri::command]
+pub fn start_image_restoration(
+    image_id: i64,
+    recipe: RestorationRecipe,
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<String, String> {
+    let db_path = crate::library_db::active_library_path(&state)?;
+    let job_id = crate::library_db::create_background_job(
+        &db_path,
+        &recipe.operation_kind,
+        serde_json::json!({
+            "imageId": image_id,
+            "recipe": recipe,
+        }),
+    )?;
+
+    let cancellation = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    state
+        .background_job_cancellations
+        .lock()
+        .unwrap()
+        .insert(job_id.clone(), cancellation.clone());
+
+    let pause = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    state
+        .background_job_pauses
+        .lock()
+        .unwrap()
+        .insert(job_id.clone(), pause.clone());
+
+    let app = app_handle.clone();
+    let worker_job_id = job_id.clone();
+    let worker_recipe = recipe.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = run_restoration_worker(
+            &db_path,
+            image_id,
+            &worker_recipe,
+            &worker_job_id,
+            &cancellation,
+            &pause,
+            &app,
+        );
+
+        if let Err(error) = result {
+            let job_state = if error == "Restoration cancelled" {
+                "cancelled"
+            } else {
+                "failed"
+            };
+            let _ = crate::library_db::update_job(
+                &db_path,
+                &worker_job_id,
+                job_state,
+                &error,
+                0,
+                100,
+                None,
+                Some(&error),
+            );
+        }
+
+        app.state::<crate::AppState>()
+            .background_job_cancellations
+            .lock()
+            .unwrap()
+            .remove(&worker_job_id);
+        app.state::<crate::AppState>()
+            .background_job_pauses
+            .lock()
+            .unwrap()
+            .remove(&worker_job_id);
+
+        let _ = app.emit(
+            "image-restoration-complete",
+            serde_json::json!({ "jobId": worker_job_id, "imageId": image_id }),
+        );
+    });
+
+    Ok(job_id)
+}
+
+fn run_restoration_worker(
+    db_path: &Path,
+    image_id: i64,
+    recipe: &RestorationRecipe,
+    job_id: &str,
+    cancellation: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pause: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    _app_handle: &tauri::AppHandle,
+) -> Result<(), String> {
+    let conn = rusqlite::Connection::open(db_path).map_err(|e| e.to_string())?;
+
+    let (root_path, relative_path): (String, String) = conn
+        .query_row(
+            "SELECT r.absolute_path, i.relative_path FROM images i JOIN collection_roots r ON r.id = i.root_id WHERE i.id = ?1",
+            [image_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| format!("Image record not found: {e}"))?;
+
+    let source_path = Path::new(&root_path).join(&relative_path);
+    if !source_path.exists() {
+        return Err(format!("Source image file not found: {}", source_path.display()));
+    }
+
+    let _ = crate::library_db::update_job(
+        db_path,
+        job_id,
+        "running",
+        "Loading image for restoration",
+        10,
+        100,
+        Some(&source_path.to_string_lossy()),
+        None,
+    );
+
+    if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("Restoration cancelled".to_string());
+    }
+
+    let catalog_dir = db_path.parent().unwrap_or_else(|| Path::new("."));
+    let final_output = derivative_output_path(catalog_dir, image_id, &recipe.operation_kind, "tiff")?;
+    let temp_output = final_output.with_extension("tmp.tiff");
+
+    let img = image::open(&source_path).map_err(|e| format!("Failed to open image: {e}"))?;
+    let (width, height) = img.dimensions();
+
+    // Check pause state
+    while pause.load(std::sync::atomic::Ordering::SeqCst) {
+        let _ = crate::library_db::update_job(
+            db_path,
+            job_id,
+            "paused",
+            "Restoration paused",
+            30,
+            100,
+            None,
+            None,
+        );
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    let _ = crate::library_db::update_job(
+        db_path,
+        job_id,
+        "running",
+        "Applying microcontrast enhancement and restoration",
+        50,
+        100,
+        None,
+        None,
+    );
+
+    // Apply multi-frequency microcontrast & detail sharpening
+    let enhanced = apply_microcontrast(&img, recipe.microcontrast_strength, recipe.detail_recovery);
+
+    if cancellation.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("Restoration cancelled".to_string());
+    }
+
+    // Save temporary derivative file
+    enhanced
+        .save(&temp_output)
+        .map_err(|e| format!("Failed to write derivative: {e}"))?;
+
+    // Atomic publish
+    fs::rename(&temp_output, &final_output).map_err(|e| format!("Failed to publish derivative: {e}"))?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let recipe_json = serde_json::to_string(recipe).unwrap_or_default();
+
+    // Insert durable derivative record
+    conn.execute(
+        "INSERT INTO image_derivatives(source_image_id, operation_kind, model_id, model_revision, recipe_json, output_path, output_format, width, height, state, created_at, completed_at, updated_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, 'tiff', ?7, ?8, 'completed', ?9, ?9, ?9)",
+        rusqlite::params![
+            image_id,
+            recipe.operation_kind,
+            recipe.model_id,
+            recipe.model_revision,
+            recipe_json,
+            final_output.to_string_lossy().to_string(),
+            width as i64,
+            height as i64,
+            now,
+        ],
+    )
+    .map_err(|e| format!("Failed to record derivative in catalog: {e}"))?;
+
+    let _ = crate::library_db::update_job(
+        db_path,
+        job_id,
+        "completed",
+        "Restoration complete",
+        100,
+        100,
+        Some(&final_output.to_string_lossy()),
+        None,
+    );
+
+    Ok(())
 }
 
 #[cfg(test)]

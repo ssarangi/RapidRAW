@@ -2443,6 +2443,7 @@ pub fn run() {
             library_db::get_catalog_metrics,
             library_db::get_image_provenance,
             library_db::list_image_derivatives,
+            image_restoration::start_image_restoration,
             library_db::list_catalog_people,
             library_db::list_smart_collections,
             library_db::save_smart_collection,
