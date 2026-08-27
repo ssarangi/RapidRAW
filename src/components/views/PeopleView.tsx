@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { Check, Pencil, ScanFace, ScanSearch, Users, X } from 'lucide-react';
+import { Check, Pencil, RefreshCw, ScanFace, ScanSearch, Users, X } from 'lucide-react';
 import Button from '../ui/Button';
 import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
@@ -32,6 +32,25 @@ export default function PeopleView() {
   const review = async (faceId: number, personId: number | null, reviewState: string) => { try { await invoke(Invokes.ReviewCatalogFace, { faceId, personId, reviewState }); await load(); } catch (error) { setMessage(String(error)); } };
   const confirmCluster = async (clusterId: number, personId: number) => { try { await invoke(Invokes.ConfirmFaceCluster, { clusterId, personId }); await load(); } catch (error) { setMessage(String(error)); } };
   useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    let disposed = false;
+    let sawActiveFaceJob = false;
+    const refreshAfterFaceJob = async () => {
+      try {
+        const jobs = await invoke<Array<{ kind: string; state: string }>>(Invokes.ListBackgroundJobs);
+        const active = jobs.some((job) => ['face_detection', 'face_recognition'].includes(job.kind) && ['queued', 'running', 'paused', 'cancelling'].includes(job.state));
+        if (active) { sawActiveFaceJob = true; return; }
+        if (sawActiveFaceJob && !disposed) {
+          sawActiveFaceJob = false;
+          await load();
+          if (!disposed) setMessage('Face analysis finished. Results refreshed.');
+        }
+      } catch { /* A library may be closed while this view is unmounting. */ }
+    };
+    const timer = window.setInterval(() => void refreshAfterFaceJob(), 3000);
+    void refreshAfterFaceJob();
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, []);
   const scan = async () => {
     setStarting(true); setMessage('Starting face detection. Progress is available in Background Jobs.');
     try { await invoke(Invokes.StartFaceDetection, { rootId: null }); } catch (error) { setMessage(String(error)); }
@@ -70,7 +89,7 @@ export default function PeopleView() {
   return <div className="flex-1 overflow-y-auto p-5">
     <div className="flex flex-wrap justify-between gap-4 mb-6">
       <div><Text variant={TextVariants.title} color={TextColors.accent}>People</Text><Text variant={TextVariants.small}>Review detected faces and build your local people library.</Text></div>
-      <div className="flex gap-2"><Button onClick={() => void recognize()} disabled={recognizing}><ScanSearch size={16} />{recognizing ? 'Starting Recognition' : 'Recognize Faces'}</Button><Button onClick={() => void scan()} disabled={starting}><ScanFace size={16} />{starting ? 'Starting Scan' : 'Scan Faces'}</Button></div>
+      <div className="flex gap-2"><Button className="h-9 w-9 p-0 bg-surface text-text-primary shadow-none" onClick={() => void load()} data-tooltip="Refresh people"><RefreshCw size={16} /></Button><Button onClick={() => void recognize()} disabled={recognizing}><ScanSearch size={16} />{recognizing ? 'Starting Recognition' : 'Recognize Faces'}</Button><Button onClick={() => void scan()} disabled={starting}><ScanFace size={16} />{starting ? 'Starting Scan' : 'Scan Faces'}</Button></div>
     </div>
     {message && <div className="mb-4 rounded-md border border-border-color bg-bg-primary p-3"><Text variant={TextVariants.small}>{message}</Text></div>}
     {people.length > 0 && <div className="mb-5"><Text variant={TextVariants.small} color={TextColors.secondary}>People</Text><div className="mt-2 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">{people.map((person) => <div key={person.id} className="rounded-md border border-border-color bg-bg-primary px-3 py-2"><div className="flex items-start gap-2"><button className="min-w-0 flex-1 text-left hover:text-accent" onClick={() => void openPerson(person)}>{editingPersonId === person.id ? <input autoFocus className="w-full bg-surface border border-border-color rounded px-2 py-1 text-sm" value={editingPersonName} onChange={(event) => setEditingPersonName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void renamePerson(); if (event.key === 'Escape') setEditingPersonId(null); }} /> : <Text variant={TextVariants.small}>{person.displayName}</Text>}<Text as="div" variant={TextVariants.small} color={TextColors.secondary}>{person.faceCount} confirmed faces</Text></button>{editingPersonId === person.id ? <button className="p-1 text-accent hover:bg-surface rounded" onClick={() => void renamePerson()} data-tooltip="Save person name"><Check size={15} /></button> : <button className="p-1 text-text-secondary hover:bg-surface rounded" onClick={() => { setEditingPersonId(person.id); setEditingPersonName(person.displayName); }} data-tooltip={`Rename ${person.displayName}`}><Pencil size={14} /></button>}</div></div>)}</div></div>}
