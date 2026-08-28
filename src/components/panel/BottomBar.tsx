@@ -352,7 +352,7 @@ export default function BottomBar({
     }
   };
   const handleRetryAllEligibleJobs = async () => {
-    const retryableKinds = new Set(['catalog_scan', 'cull_analysis', 'ram_plus_tagging', 'ai_tagging', 'face_detection', 'face_recognition', 'raw_denoise', 'rgb_denoise', 'deblur', 'upscale']);
+    const retryableKinds = new Set(['catalog_scan', 'cull_analysis', 'model_download', 'ram_plus_tagging', 'ai_tagging', 'face_detection', 'face_recognition', 'raw_denoise', 'rgb_denoise']);
     const eligible = backgroundJobs.filter((job) => retryableKinds.has(job.kind) && ['failed', 'cancelled'].includes(job.state));
     const retriedKinds = new Set<string>();
     if (eligible.length === 0) return;
@@ -1111,7 +1111,7 @@ export default function BottomBar({
                     <Text variant={TextVariants.label}>Recent Jobs</Text>
                     <div className="flex items-center gap-2">
                       <Text variant={TextVariants.small} color={TextColors.secondary}>{backgroundJobs.length}</Text>
-                      {backgroundJobs.some((job) => ['catalog_scan', 'cull_analysis', 'ram_plus_tagging', 'ai_tagging', 'face_detection', 'face_recognition', 'raw_denoise', 'rgb_denoise', 'deblur', 'upscale'].includes(job.kind) && ['failed', 'cancelled'].includes(job.state)) && (
+                      {backgroundJobs.some((job) => ['catalog_scan', 'cull_analysis', 'model_download', 'ram_plus_tagging', 'ai_tagging', 'face_detection', 'face_recognition', 'raw_denoise', 'rgb_denoise'].includes(job.kind) && ['failed', 'cancelled'].includes(job.state)) && (
                         <button className="p-1 text-accent hover:bg-surface rounded" onClick={() => void handleRetryAllEligibleJobs()} data-tooltip="Retry all eligible jobs">
                           <RotateCcw size={14} />
                         </button>
@@ -1136,7 +1136,7 @@ export default function BottomBar({
                                   <Square size={13} />
                                 </button>
                               )}
-                              {['catalog_scan', 'cull_analysis', 'ram_plus_tagging', 'ai_tagging', 'face_detection', 'face_recognition', 'raw_denoise', 'rgb_denoise', 'deblur', 'upscale'].includes(job.kind) && ['failed', 'cancelled'].includes(job.state) && (
+                              {['catalog_scan', 'cull_analysis', 'model_download', 'ram_plus_tagging', 'ai_tagging', 'face_detection', 'face_recognition', 'raw_denoise', 'rgb_denoise'].includes(job.kind) && ['failed', 'cancelled'].includes(job.state) && (
                                 <button className="p-1 text-accent hover:bg-bg-primary rounded" onClick={() => void handleRetryBackgroundJob(job.id)} data-tooltip="Retry job">
                                   <RotateCcw size={13} />
                                 </button>
