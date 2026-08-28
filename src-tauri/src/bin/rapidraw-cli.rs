@@ -14,6 +14,7 @@ use rapidraw_lib::scan_library_root_headless;
 use rapidraw_lib::tagging::run_catalog_ram_plus_tagging_headless;
 use rapidraw_lib::visual_model_registry::visual_model_packs;
 use rapidraw_lib::{CullingSettings, cull_images_headless};
+use rapidraw_lib::{add_library_root_headless, create_library_headless};
 use rusqlite::Connection;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -58,6 +59,8 @@ fn main() {
     let arguments: Vec<String> = env::args().skip(1).collect();
     let result = match arguments.first().map(String::as_str) {
         Some("library") if arguments.get(1).map(String::as_str) == Some("inspect") => inspect(&arguments),
+        Some("library") if arguments.get(1).map(String::as_str) == Some("create") => create_library_cli(&arguments),
+        Some("library") if arguments.get(1).map(String::as_str) == Some("add-root") => add_library_root_cli(&arguments),
         Some("library") if arguments.get(1).map(String::as_str) == Some("roots") => list_roots(&arguments),
         Some("library") if arguments.get(1).map(String::as_str) == Some("metrics") => metrics(&arguments),
         Some("library") if arguments.get(1).map(String::as_str) == Some("scan") => run_catalog_scan_cli(&arguments),
@@ -81,7 +84,7 @@ fn main() {
         Some("models") if arguments.get(1).map(String::as_str) == Some("verify") => verify_installed_model(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("list") => list_derivatives(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("run") => run_restore_cli(&arguments),
-        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics|scan --database <catalog.db> | rapidraw-cli library scan --database <catalog.db> --root <id> [--non-recursive] | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli faces detect|recognize --database <catalog.db> --face-models-dir <models/face> [--root <id>] | rapidraw-cli tags status|top|export-suggestions|run --database <catalog.db> | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions|decisions|analyze --database <catalog.db> | rapidraw-cli cull analyze --database <catalog.db> --root <id> [--similarity-threshold <n>] [--blur-threshold <n>] | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
+        _ => Err("Usage: rapidraw-cli library create --name <name> --database <catalog.db> | rapidraw-cli library add-root --database <catalog.db> --path <folder> [--label <name>] | rapidraw-cli library inspect|roots|metrics|scan --database <catalog.db> | rapidraw-cli library scan --database <catalog.db> --root <id> [--non-recursive] | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli faces detect|recognize --database <catalog.db> --face-models-dir <models/face> [--root <id>] | rapidraw-cli tags status|top|export-suggestions|run --database <catalog.db> | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions|decisions|analyze --database <catalog.db> | rapidraw-cli cull analyze --database <catalog.db> --root <id> [--similarity-threshold <n>] [--blur-threshold <n>] | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -94,6 +97,24 @@ fn main() {
 
 fn list_models() -> Result<serde_json::Value, String> {
     serde_json::to_value(visual_model_packs()).map_err(|error| error.to_string())
+}
+
+fn create_library_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let db_path = database_argument(arguments)?;
+    let name = named_argument(arguments, "--name")?;
+    serde_json::to_value(create_library_headless(&name, &db_path)?)
+        .map_err(|error| error.to_string())
+}
+
+fn add_library_root_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let db_path = database_argument(arguments)?;
+    let path = named_argument(arguments, "--path")?;
+    let label = arguments
+        .windows(2)
+        .find(|pair| pair[0] == "--label")
+        .map(|pair| pair[1].clone());
+    serde_json::to_value(add_library_root_headless(&db_path, &path, label)?)
+        .map_err(|error| error.to_string())
 }
 
 fn inspect(arguments: &[String]) -> Result<serde_json::Value, String> {

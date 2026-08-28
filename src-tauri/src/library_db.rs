@@ -994,6 +994,27 @@ mod tests {
     }
 
     #[test]
+    fn headless_library_creation_and_root_addition_do_not_need_a_tauri_handle() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("catalog.db");
+        let photos = directory.path().join("photos");
+        fs::create_dir_all(&photos).unwrap();
+
+        let library = create_library_headless("Archive", &db_path).unwrap();
+        assert_eq!(library.name, "Archive");
+        assert_eq!(library.db_path, db_path.to_string_lossy());
+
+        let root = add_library_root_headless(
+            &db_path,
+            &photos.to_string_lossy(),
+            Some("Photos".to_string()),
+        )
+        .unwrap();
+        assert_eq!(root.label.as_deref(), Some("Photos"));
+        assert!(root.is_available);
+    }
+
+    #[test]
     fn headless_catalog_scan_indexes_a_local_image_without_an_app_handle() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("photos");
@@ -1352,6 +1373,35 @@ fn default_library_dir(app_handle: &AppHandle, library_id: &str) -> Result<PathB
     Ok(data_dir.join("libraries").join(library_id))
 }
 
+/// Creates a catalog at an explicit database path without requiring a Tauri
+/// window. The caller owns the directory choice, which keeps automation from
+/// writing into the desktop application's data directory unexpectedly.
+pub fn create_library_headless(name: &str, db_path: &Path) -> Result<LibraryInfo, String> {
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        return Err("Library name cannot be empty".to_string());
+    }
+    if db_path.exists() {
+        return Err(format!(
+            "Library database already exists: {}",
+            db_path.display()
+        ));
+    }
+    let parent = db_path
+        .parent()
+        .ok_or_else(|| "Library database path has no parent directory".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let conn = open_connection(db_path)?;
+    migrate(&conn)?;
+    let now = now_secs();
+    conn.execute(
+        "INSERT INTO libraries(id, name, created_at, updated_at) VALUES(?1, ?2, ?3, ?3)",
+        params![Uuid::new_v4().to_string(), trimmed_name, now],
+    )
+    .map_err(|error| error.to_string())?;
+    library_info(&conn, db_path)
+}
+
 #[tauri::command]
 pub fn create_library(
     name: String,
@@ -1545,6 +1595,44 @@ pub fn add_library_root(
         )
         .map_err(|e| e.to_string())?;
 
+    get_root(&conn, id)
+}
+
+/// Adds a collection root to a catalog without an active desktop library.
+/// Availability is recorded rather than treated as an error so NAS roots can
+/// be configured while temporarily offline.
+pub fn add_library_root_headless(
+    db_path: &Path,
+    path: &str,
+    label: Option<String>,
+) -> Result<CatalogRoot, String> {
+    let conn = open_connection(db_path)?;
+    migrate(&conn)?;
+    let library_id = current_library_id(&conn)?;
+    let root_path = PathBuf::from(path);
+    let canonical_path = root_path
+        .canonicalize()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned());
+    conn.execute(
+        "INSERT OR IGNORE INTO collection_roots(library_id, label, absolute_path, canonical_path, is_available)
+         VALUES(?1, ?2, ?3, ?4, ?5)",
+        params![
+            library_id,
+            label,
+            path,
+            canonical_path,
+            if root_path.exists() { 1 } else { 0 }
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    let id = conn
+        .query_row(
+            "SELECT id FROM collection_roots WHERE library_id = ?1 AND absolute_path = ?2",
+            params![current_library_id(&conn)?, path],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| error.to_string())?;
     get_root(&conn, id)
 }
 
