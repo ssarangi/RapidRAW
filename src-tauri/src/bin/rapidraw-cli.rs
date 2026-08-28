@@ -194,9 +194,17 @@ fn metrics(arguments: &[String]) -> Result<serde_json::Value, String> {
             .query_row(sql, [], |row| row.get::<_, i64>(0))
             .map_err(|error| error.to_string())
     };
-    Ok(
-        json!({ "images": count("SELECT COUNT(*) FROM images WHERE status = 'present'")?, "missing": count("SELECT COUNT(*) FROM images WHERE status = 'missing'")?, "aiSuggested": count("SELECT COUNT(*) FROM image_ai_tags WHERE review_state = 'suggested'")?, "aiAccepted": count("SELECT COUNT(*) FROM image_ai_tags WHERE review_state = 'accepted'")?, "ramPlusAnalyzed": count("SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.model_revision = 'onnx-v1' AND s.image_modified_at = i.modified_at AND s.state = 'completed')")?, "ramPlusPending": count("SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND NOT EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.model_revision = 'onnx-v1' AND s.image_modified_at = i.modified_at AND s.state = 'completed')")?, "ramPlusFailed": count("SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.model_revision = 'onnx-v1' AND s.image_modified_at = i.modified_at AND s.state = 'failed')")?, "cullSessions": count("SELECT COUNT(*) FROM cull_sessions")?, "cullOverrides": count("SELECT COUNT(*) FROM cull_decision_events")? }),
-    )
+    Ok(json!({
+        "images": count("SELECT COUNT(*) FROM images WHERE status = 'present'")?,
+        "missing": count("SELECT COUNT(*) FROM images WHERE status = 'missing'")?,
+        "aiSuggested": count("SELECT COUNT(*) FROM image_ai_tags WHERE review_state = 'suggested'")?,
+        "aiAccepted": count("SELECT COUNT(*) FROM image_ai_tags WHERE review_state = 'accepted'")?,
+        "ramPlusAnalyzed": count("SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.image_modified_at = i.modified_at AND s.state = 'completed')")?,
+        "ramPlusPending": count("SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND NOT EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.image_modified_at = i.modified_at AND s.state = 'completed')")?,
+        "ramPlusFailed": count("SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.image_modified_at = i.modified_at AND s.state = 'failed') AND NOT EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.image_modified_at = i.modified_at AND s.state = 'completed')")?,
+        "cullSessions": count("SELECT COUNT(*) FROM cull_sessions")?,
+        "cullOverrides": count("SELECT COUNT(*) FROM cull_decision_events")?
+    }))
 }
 
 fn run_catalog_scan_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
@@ -1468,5 +1476,40 @@ mod tests {
     #[test]
     fn face_runtime_verification_never_claims_conversion_packs_are_runnable() {
         assert!(verify_face_runtime(Path::new("/tmp"), "insightface-buffalo-sc").is_err());
+    }
+
+    #[test]
+    fn cli_metrics_reports_artifact_revision_tagging_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("catalog.db");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        conn.execute(
+            "CREATE TABLE images (id INTEGER PRIMARY KEY, root_id INTEGER, folder_id INTEGER, file_name TEXT, relative_path TEXT, modified_at INTEGER, imported_at INTEGER, updated_at INTEGER, status TEXT)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "CREATE TABLE image_ai_tags (id INTEGER PRIMARY KEY, review_state TEXT)",
+            [],
+        ).unwrap();
+        conn.execute(
+            "CREATE TABLE image_ai_analysis_state (image_id INTEGER, analysis_kind TEXT, model_id TEXT, model_revision TEXT, image_modified_at INTEGER, state TEXT, error_message TEXT, processed_at INTEGER, updated_at INTEGER)",
+            [],
+        ).unwrap();
+        conn.execute("CREATE TABLE cull_sessions (id TEXT)", []).unwrap();
+        conn.execute("CREATE TABLE cull_decision_events (id TEXT)", []).unwrap();
+
+        conn.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'img1.jpg', 'img1.jpg', 100, 0, 0, 'present')", []).unwrap();
+        conn.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(2, 1, 1, 'img2.jpg', 'img2.jpg', 200, 0, 0, 'present')", []).unwrap();
+        // Insert tagging state with sha256:... revision
+        conn.execute("INSERT INTO image_ai_analysis_state(image_id, analysis_kind, model_id, model_revision, image_modified_at, state, processed_at, updated_at) VALUES(1, 'tagging', 'ram-plus', 'sha256:abcd1234efgh5678', 100, 'completed', 100, 100)", []).unwrap();
+        conn.execute("INSERT INTO image_ai_analysis_state(image_id, analysis_kind, model_id, model_revision, image_modified_at, state, processed_at, updated_at) VALUES(2, 'tagging', 'ram-plus', 'sha256:abcd1234efgh5678', 200, 'failed', 200, 200)", []).unwrap();
+        drop(conn);
+
+        let db_path_str = db_path.to_str().unwrap().to_string();
+        let result = super::metrics(&["--database".to_string(), db_path_str]).unwrap();
+        assert_eq!(result["images"], 2);
+        assert_eq!(result["ramPlusAnalyzed"], 1);
+        assert_eq!(result["ramPlusPending"], 1);
+        assert_eq!(result["ramPlusFailed"], 1);
     }
 }
