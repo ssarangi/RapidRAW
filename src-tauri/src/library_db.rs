@@ -1119,6 +1119,76 @@ mod tests {
     }
 
     #[test]
+    fn cull_override_updates_the_plan_records_feedback_and_applies_the_override() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("catalog.db");
+        let connection = Connection::open(&path).unwrap();
+        migrate(&connection).unwrap();
+        insert_test_image(&connection);
+        drop(connection);
+
+        let session_id = record_cull_session(
+            &path,
+            "/photos",
+            "{}",
+            &[(
+                "/photos/photo.jpg".to_string(),
+                false,
+                "blurry".to_string(),
+                0.2,
+                "[]".to_string(),
+            )],
+        )
+        .unwrap()
+        .unwrap();
+
+        update_cull_session_decision_at_path(
+            &path,
+            session_id,
+            "/photos/photo.jpg",
+            true,
+            Some("Intentional motion blur"),
+        )
+        .unwrap();
+        mark_cull_session_applied(&path, session_id).unwrap();
+
+        let connection = Connection::open(&path).unwrap();
+        let (proposed, final_status): (String, String) = connection
+            .query_row(
+                "SELECT proposed_status, final_status FROM cull_decisions WHERE session_id = ?1",
+                [session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let events: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM cull_decision_events d JOIN cull_decisions c ON c.id = d.decision_id WHERE c.session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let feedback: String = connection
+            .query_row(
+                "SELECT feedback_reason FROM cull_preference_feedback f JOIN cull_decisions c ON c.id = f.decision_id WHERE c.session_id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let rejected_count: i64 = connection
+            .query_row(
+                "SELECT rejected_count FROM cull_sessions WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(proposed, "keep");
+        assert_eq!(final_status, "keep");
+        assert_eq!(events, 1);
+        assert_eq!(feedback, "Intentional motion blur");
+        assert_eq!(rejected_count, 0);
+    }
+
+    #[test]
     fn cull_personalization_waits_for_feedback_then_learns_a_quality_ranking() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("catalog.db");
@@ -3415,7 +3485,23 @@ pub fn update_cull_session_decision(
     feedback_reason: Option<String>,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<(), String> {
-    let mut connection = open_connection(&active_library_path(&state)?)?;
+    update_cull_session_decision_at_path(
+        &active_library_path(&state)?,
+        session_id,
+        &representative_path,
+        keep,
+        feedback_reason.as_deref(),
+    )
+}
+
+fn update_cull_session_decision_at_path(
+    db_path: &Path,
+    session_id: i64,
+    representative_path: &str,
+    keep: bool,
+    feedback_reason: Option<&str>,
+) -> Result<(), String> {
+    let mut connection = open_connection(db_path)?;
     let transaction = connection
         .transaction()
         .map_err(|error| error.to_string())?;
@@ -3433,7 +3519,6 @@ pub fn update_cull_session_decision(
         transaction.execute("UPDATE cull_decisions SET proposed_status = ?1, updated_at = strftime('%s','now') WHERE id = ?2", params![next_status, decision_id]).map_err(|error| error.to_string())?;
     }
     if let Some(reason) = feedback_reason
-        .as_deref()
         .map(str::trim)
         .filter(|reason| !reason.is_empty())
     {
