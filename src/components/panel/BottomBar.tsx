@@ -351,6 +351,24 @@ export default function BottomBar({
       console.error('Failed to retry background job:', error);
     }
   };
+  const handleRetryAllEligibleJobs = async () => {
+    const retryableKinds = new Set(['catalog_scan', 'cull_analysis', 'ram_plus_tagging', 'ai_tagging', 'face_detection', 'face_recognition', 'raw_denoise', 'rgb_denoise', 'deblur', 'upscale']);
+    const eligible = backgroundJobs.filter((job) => retryableKinds.has(job.kind) && ['failed', 'cancelled'].includes(job.state));
+    const retriedKinds = new Set<string>();
+    if (eligible.length === 0) return;
+    try {
+      for (const job of eligible.filter((job) => {
+        if (retriedKinds.has(job.kind)) return false;
+        retriedKinds.add(job.kind);
+        return true;
+      })) {
+        await invoke(Invokes.RetryBackgroundJob, { jobId: job.id });
+      }
+      setBackgroundJobs(await invoke<BackgroundJob[]>(Invokes.ListBackgroundJobs));
+    } catch (error) {
+      setBackgroundJobsError(`Could not retry all eligible jobs: ${String(error)}`);
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -1091,7 +1109,14 @@ export default function BottomBar({
                 <div className="rounded-md border border-border-color bg-bg-primary overflow-hidden">
                   <div className="px-3 py-2 border-b border-border-color flex justify-between items-center">
                     <Text variant={TextVariants.label}>Recent Jobs</Text>
-                    <Text variant={TextVariants.small} color={TextColors.secondary}>{backgroundJobs.length}</Text>
+                    <div className="flex items-center gap-2">
+                      <Text variant={TextVariants.small} color={TextColors.secondary}>{backgroundJobs.length}</Text>
+                      {backgroundJobs.some((job) => ['catalog_scan', 'cull_analysis', 'ram_plus_tagging', 'ai_tagging', 'face_detection', 'face_recognition', 'raw_denoise', 'rgb_denoise', 'deblur', 'upscale'].includes(job.kind) && ['failed', 'cancelled'].includes(job.state)) && (
+                        <button className="p-1 text-accent hover:bg-surface rounded" onClick={() => void handleRetryAllEligibleJobs()} data-tooltip="Retry all eligible jobs">
+                          <RotateCcw size={14} />
+                        </button>
+                      )}
+                    </div>
                   </div>
                   {backgroundJobsError ? (
                     <Text variant={TextVariants.small} className="p-3 text-red-300">{backgroundJobsError}</Text>
