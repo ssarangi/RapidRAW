@@ -1,10 +1,9 @@
-use std::fs;
-use std::path::{Path, PathBuf};
 use image::{DynamicImage, GenericImageView, ImageBuffer, Rgb};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
 use tauri::{Emitter, Manager};
-
 
 /// Recipe and configuration parameters for a restoration operation.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -37,9 +36,15 @@ impl Default for RestorationRecipe {
     }
 }
 
-fn validate_restoration_recipe(recipe: &RestorationRecipe) -> Result<(), String> {
-    if !matches!(recipe.operation_kind.as_str(), "raw_denoise" | "rgb_denoise" | "deblur" | "upscale") {
-        return Err(format!("Unsupported restoration operation: {}", recipe.operation_kind));
+pub fn validate_restoration_recipe(recipe: &RestorationRecipe) -> Result<(), String> {
+    if !matches!(
+        recipe.operation_kind.as_str(),
+        "raw_denoise" | "rgb_denoise" | "deblur" | "upscale"
+    ) {
+        return Err(format!(
+            "Unsupported restoration operation: {}",
+            recipe.operation_kind
+        ));
     }
     if !(0.0..=1.0).contains(&recipe.denoise_strength)
         || !(0.0..=1.0).contains(&recipe.microcontrast_strength)
@@ -48,11 +53,18 @@ fn validate_restoration_recipe(recipe: &RestorationRecipe) -> Result<(), String>
         return Err("Restoration strengths must be between 0 and 1".to_string());
     }
     if recipe.tile_size < 64 || recipe.tile_overlap >= recipe.tile_size {
-        return Err("Tile size must be at least 64 and overlap must be smaller than the tile size".to_string());
+        return Err(
+            "Tile size must be at least 64 and overlap must be smaller than the tile size"
+                .to_string(),
+        );
     }
     match recipe.operation_kind.as_str() {
-        "raw_denoise" if recipe.model_id != "rawnind-utnet2-bayer" => Err("RAW denoise requires the RawNIND Bayer model".to_string()),
-        "rgb_denoise" if recipe.model_id != "nafnet-sidd-rgb" => Err("RGB denoise requires the NAFNet SIDD model".to_string()),
+        "raw_denoise" if recipe.model_id != "rawnind-utnet2-bayer" => {
+            Err("RAW denoise requires the RawNIND Bayer model".to_string())
+        }
+        "rgb_denoise" if recipe.model_id != "nafnet-sidd-rgb" => {
+            Err("RGB denoise requires the NAFNet SIDD model".to_string())
+        }
         _ => Ok(()),
     }
 }
@@ -128,8 +140,8 @@ pub fn apply_microcontrast(
             let l_orig = lum[idx];
             let l_base = blurred_lum[idx];
             let high_pass = l_orig - l_base;
-            let l_new = (l_base + high_pass * boost + high_pass.signum() * detail_boost)
-                .clamp(0.0, 255.0);
+            let l_new =
+                (l_base + high_pass * boost + high_pass.signum() * detail_boost).clamp(0.0, 255.0);
 
             let scale = if l_orig > 1e-4 { l_new / l_orig } else { 1.0 };
             let r = (p[0] as f32 * scale).clamp(0.0, 255.0) as u8;
@@ -214,8 +226,16 @@ pub fn run_neural_restoration_tiled(
             .map_err(|e| e.to_string())?;
 
         let shape = out_array.shape();
-        if shape.len() != 4 || shape[0] != 1 || shape[1] != 3 || shape[2] != th as usize || shape[3] != tw as usize {
-            return Err(format!("Model output shape mismatch. Expected [1, 3, {}, {}], got {:?}", th, tw, shape));
+        if shape.len() != 4
+            || shape[0] != 1
+            || shape[1] != 3
+            || shape[2] != th as usize
+            || shape[3] != tw as usize
+        {
+            return Err(format!(
+                "Model output shape mismatch. Expected [1, 3, {}, {}], got {:?}",
+                th, tw, shape
+            ));
         }
 
         for y in 0..th {
@@ -296,7 +316,12 @@ pub fn run_rawnind_restoration_tiled(
     let bayer_tile_size = tile_size / 2;
     let bayer_tile_overlap = tile_overlap / 2;
 
-    let tiles = calculate_tiles(bayer_w as u32, bayer_h as u32, bayer_tile_size, bayer_tile_overlap);
+    let tiles = calculate_tiles(
+        bayer_w as u32,
+        bayer_h as u32,
+        bayer_tile_size,
+        bayer_tile_overlap,
+    );
 
     let mut output_accum = vec![0.0f32; (width * height * 3) as usize];
     let mut weight_accum = vec![0.0f32; (width * height) as usize];
@@ -327,8 +352,16 @@ pub fn run_rawnind_restoration_tiled(
             .map_err(|e| e.to_string())?;
 
         let shape = out_array.shape();
-        if shape.len() != 4 || shape[0] != 1 || shape[1] != 3 || shape[2] != out_h as usize || shape[3] != out_w as usize {
-            return Err(format!("Model output shape mismatch. Expected [1, 3, {}, {}], got {:?}", out_h, out_w, shape));
+        if shape.len() != 4
+            || shape[0] != 1
+            || shape[1] != 3
+            || shape[2] != out_h as usize
+            || shape[3] != out_w as usize
+        {
+            return Err(format!(
+                "Model output shape mismatch. Expected [1, 3, {}, {}], got {:?}",
+                out_h, out_w, shape
+            ));
         }
 
         for y in 0..out_h {
@@ -420,7 +453,11 @@ pub fn pack_bayer_cfa_with_pattern(
         "BGGR" => [3, 2, 1, 0],
         "GRBG" => [1, 0, 3, 2],
         "GBRG" => [2, 3, 0, 1],
-        _ => return Err(format!("RawNIND supports RGGB/BGGR/GRBG/GBRG CFA patterns, got {cfa_pattern}")),
+        _ => {
+            return Err(format!(
+                "RawNIND supports RGGB/BGGR/GRBG/GBRG CFA patterns, got {cfa_pattern}"
+            ));
+        }
     };
     let half_w = width / 2;
     let half_h = height / 2;
@@ -439,9 +476,12 @@ pub fn pack_bayer_cfa_with_pattern(
                 raw_mosaic[(src_y + 1) * width + src_x + 1],
             ];
             for (channel, &position) in positions.iter().enumerate() {
-                let range = white_levels[position].saturating_sub(black_levels[position]).max(1) as f32;
+                let range = white_levels[position]
+                    .saturating_sub(black_levels[position])
+                    .max(1) as f32;
                 tensor[channel * channel_size + dest_idx] =
-                    (samples[position].saturating_sub(black_levels[position]) as f32 / range).clamp(0.0, 1.0);
+                    (samples[position].saturating_sub(black_levels[position]) as f32 / range)
+                        .clamp(0.0, 1.0);
             }
         }
     }
@@ -463,7 +503,8 @@ pub fn derivative_output_path(
         .unwrap_or_default()
         .as_nanos();
     let uuid_suffix = &uuid::Uuid::new_v4().to_string()[..8];
-    let filename = format!("img_{source_image_id}_{operation}_{timestamp_nanos}_{uuid_suffix}.{format_ext}");
+    let filename =
+        format!("img_{source_image_id}_{operation}_{timestamp_nanos}_{uuid_suffix}.{format_ext}");
     Ok(dir.join(filename))
 }
 
@@ -499,15 +540,23 @@ pub fn start_image_restoration(
 
     tauri::async_runtime::spawn_blocking(move || {
         let ai_semaphore = app.state::<crate::AppState>().ai_job_semaphore.clone();
-        let result = run_restoration_worker(
-            &db_path,
-            image_id,
-            &worker_recipe,
-            &worker_job_id,
-            &job_control,
-            &app,
-            ai_semaphore,
-        );
+        let visual_models_dir = app
+            .path()
+            .app_data_dir()
+            .map(|path| path.join("models").join("visual"))
+            .map_err(|error| error.to_string());
+        let result = match visual_models_dir {
+            Ok(visual_models_dir) => run_restoration_worker(
+                &db_path,
+                image_id,
+                &worker_recipe,
+                &worker_job_id,
+                &job_control,
+                &visual_models_dir,
+                ai_semaphore,
+            ),
+            Err(error) => Err(error),
+        };
 
         if let Err(error) = result {
             let job_state = if error == "Restoration cancelled" {
@@ -542,13 +591,13 @@ pub fn start_image_restoration(
     Ok(job_id)
 }
 
-fn run_restoration_worker(
+pub fn run_restoration_worker(
     db_path: &Path,
     image_id: i64,
     recipe: &RestorationRecipe,
     job_id: &str,
     job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
-    _app_handle: &tauri::AppHandle,
+    visual_models_dir: &Path,
     ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 ) -> Result<(), String> {
     let conn = rusqlite::Connection::open(db_path).map_err(|e| e.to_string())?;
@@ -563,7 +612,10 @@ fn run_restoration_worker(
 
     let source_path = Path::new(&root_path).join(&relative_path);
     if !source_path.exists() {
-        return Err(format!("Source image file not found: {}", source_path.display()));
+        return Err(format!(
+            "Source image file not found: {}",
+            source_path.display()
+        ));
     }
 
     let _ = crate::library_db::update_job(
@@ -582,7 +634,8 @@ fn run_restoration_worker(
     }
 
     let catalog_dir = db_path.parent().unwrap_or_else(|| Path::new("."));
-    let final_output = derivative_output_path(catalog_dir, image_id, &recipe.operation_kind, "tiff")?;
+    let final_output =
+        derivative_output_path(catalog_dir, image_id, &recipe.operation_kind, "tiff")?;
     let temp_output = final_output.with_extension("tmp.tiff");
 
     let now = std::time::SystemTime::now()
@@ -636,16 +689,28 @@ fn run_restoration_worker(
 
     // Check pause state with cancellation awareness
     if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
-        let _ = conn.execute("UPDATE image_derivatives SET state = 'cancelled', updated_at = ?1 WHERE id = ?2", rusqlite::params![now, derivative_id]);
+        let _ = conn.execute(
+            "UPDATE image_derivatives SET state = 'cancelled', updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![now, derivative_id],
+        );
         return Err("Restoration cancelled".to_string());
     }
 
-    let _ = crate::library_db::update_job(db_path, job_id, "running", "Executing neural restoration", 50, 100, None, None);
+    let _ = crate::library_db::update_job(
+        db_path,
+        job_id,
+        "running",
+        "Executing neural restoration",
+        50,
+        100,
+        None,
+        None,
+    );
 
     // Check if neural model is installed and load session
     let restored = if recipe.operation_kind.contains("denoise") {
-        match crate::visual_model_registry::installed_visual_model_path(
-            _app_handle,
+        match crate::visual_model_registry::installed_visual_model_path_in_dir(
+            visual_models_dir,
             &recipe.model_id,
             if recipe.model_id.contains("rawnind") {
                 "rawnind_bayer.onnx"
@@ -656,16 +721,24 @@ fn run_restoration_worker(
             },
         ) {
             Ok(model_file) if model_file.exists() => {
-                match ort::session::Session::builder().and_then(|b| b.commit_from_file(&model_file)) {
+                match ort::session::Session::builder().and_then(|b| b.commit_from_file(&model_file))
+                {
                     Ok(mut session) => {
                         if recipe.model_id.contains("rawnind") && is_raw {
                             // Extract Bayer mosaic
                             let bytes = file_bytes.as_ref().unwrap();
                             let source = rawler::rawsource::RawSource::new_from_slice(bytes);
-                            let raw_image = match rawler::get_decoder(&source).and_then(|d| d.raw_image(&source, &rawler::decoders::RawDecodeParams::default(), false)) {
+                            let raw_image = match rawler::get_decoder(&source).and_then(|d| {
+                                d.raw_image(
+                                    &source,
+                                    &rawler::decoders::RawDecodeParams::default(),
+                                    false,
+                                )
+                            }) {
                                 Ok(ri) => ri,
                                 Err(e) => {
-                                    let error_msg = format!("Failed to decode RAW mosaic for RawNIND: {}", e);
+                                    let error_msg =
+                                        format!("Failed to decode RAW mosaic for RawNIND: {}", e);
                                     let _ = conn.execute("UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3", rusqlite::params![error_msg, now, derivative_id]);
                                     return Err(error_msg);
                                 }
@@ -673,7 +746,8 @@ fn run_restoration_worker(
                             let raw_data = match &raw_image.data {
                                 rawler::rawimage::RawImageData::Integer(data) => data,
                                 _ => {
-                                    let error_msg = "Unsupported float RAW data for RawNIND".to_string();
+                                    let error_msg =
+                                        "Unsupported float RAW data for RawNIND".to_string();
                                     let _ = conn.execute("UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3", rusqlite::params![error_msg, now, derivative_id]);
                                     return Err(error_msg);
                                 }
@@ -688,7 +762,10 @@ fn run_restoration_worker(
                                 .as_bayer_array()
                                 .map(|level| level.clamp(0.0, u16::MAX as f32) as u16);
 
-                            let _permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
+                            let _permit = tauri::async_runtime::block_on(
+                                ai_semaphore.clone().acquire_owned(),
+                            )
+                            .ok();
                             let result = run_rawnind_restoration_tiled(
                                 raw_data,
                                 raw_image.width,
@@ -713,10 +790,19 @@ fn run_restoration_worker(
                         } else {
                             // Standard RGB fallback/neural run
                             let img = if is_raw {
-                                match crate::image_loader::load_base_image_from_bytes(file_bytes.as_ref().unwrap(), &source_path.to_string_lossy(), false, &crate::app_settings::AppSettings::default(), None) {
+                                match crate::image_loader::load_base_image_from_bytes(
+                                    file_bytes.as_ref().unwrap(),
+                                    &source_path.to_string_lossy(),
+                                    false,
+                                    &crate::app_settings::AppSettings::default(),
+                                    None,
+                                ) {
                                     Ok(loaded) => loaded,
                                     Err(e) => {
-                                        let error_msg = format!("Failed to develop RAW file for restoration: {}", e);
+                                        let error_msg = format!(
+                                            "Failed to develop RAW file for restoration: {}",
+                                            e
+                                        );
                                         let _ = conn.execute("UPDATE image_derivatives SET state = 'failed', error_message = ?1, updated_at = ?2 WHERE id = ?3", rusqlite::params![error_msg, now, derivative_id]);
                                         return Err(error_msg);
                                     }
@@ -732,7 +818,10 @@ fn run_restoration_worker(
                                 }
                             };
 
-                            let _permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
+                            let _permit = tauri::async_runtime::block_on(
+                                ai_semaphore.clone().acquire_owned(),
+                            )
+                            .ok();
                             let result = run_neural_restoration_tiled(
                                 &img,
                                 &mut session,
@@ -767,7 +856,13 @@ fn run_restoration_worker(
     } else {
         // Non-neural fallback operation
         let img = if is_raw {
-            match crate::image_loader::load_base_image_from_bytes(file_bytes.as_ref().unwrap(), &source_path.to_string_lossy(), false, &crate::app_settings::AppSettings::default(), None) {
+            match crate::image_loader::load_base_image_from_bytes(
+                file_bytes.as_ref().unwrap(),
+                &source_path.to_string_lossy(),
+                false,
+                &crate::app_settings::AppSettings::default(),
+                None,
+            ) {
                 Ok(loaded) => loaded,
                 Err(e) => {
                     let error_msg = format!("Failed to develop RAW file for restoration: {}", e);
@@ -903,10 +998,7 @@ mod tests {
 
     #[test]
     fn pack_bayer_cfa_normalizes_to_unit_range_and_nchw_layout() {
-        let mosaic: Vec<u16> = vec![
-            512, 1024,
-            1024, 2048,
-        ];
+        let mosaic: Vec<u16> = vec![512, 1024, 1024, 2048];
         let tensor = pack_bayer_cfa(&mosaic, 2, 2, 0, 4096).unwrap();
         assert_eq!(tensor.len(), 4);
         assert_eq!(tensor[0], 512.0 / 4096.0); // R
@@ -935,15 +1027,7 @@ mod tests {
     #[test]
     fn pack_bayer_cfa_reorders_bggr_to_canonical_channels() {
         let mosaic = vec![40, 30, 20, 10]; // BGGR: B, G, G, R
-        let packed = pack_bayer_cfa_with_pattern(
-            &mosaic,
-            2,
-            2,
-            "BGGR",
-            [0; 4],
-            [100; 4],
-        )
-        .unwrap();
+        let packed = pack_bayer_cfa_with_pattern(&mosaic, 2, 2, "BGGR", [0; 4], [100; 4]).unwrap();
         assert_eq!(packed, vec![0.1, 0.2, 0.3, 0.4]);
     }
 

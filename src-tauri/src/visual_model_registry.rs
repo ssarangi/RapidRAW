@@ -55,7 +55,9 @@ struct InstalledVisualModelPack {
 fn artifact(file_name: &str) -> VisualModelArtifact {
     VisualModelArtifact {
         file_name: file_name.to_string(),
-        source_url: format!("https://huggingface.co/benjaminjonard/ram-plus-onnx/resolve/main/{file_name}"),
+        source_url: format!(
+            "https://huggingface.co/benjaminjonard/ram-plus-onnx/resolve/main/{file_name}"
+        ),
     }
 }
 
@@ -143,7 +145,12 @@ pub fn visual_model_packs() -> Vec<VisualModelPack> {
 }
 
 fn models_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
-    let path = app_handle.path().app_data_dir().map_err(|error| error.to_string())?.join("models").join("visual");
+    let path = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("models")
+        .join("visual");
     fs::create_dir_all(&path).map_err(|error| error.to_string())?;
     Ok(path)
 }
@@ -157,7 +164,11 @@ fn manifest_path(directory: &Path) -> PathBuf {
 }
 
 fn installed(pack: &VisualModelPack, directory: &Path) -> bool {
-    manifest_path(directory).exists() && pack.artifacts.iter().all(|artifact| directory.join(&artifact.file_name).is_file())
+    manifest_path(directory).exists()
+        && pack
+            .artifacts
+            .iter()
+            .all(|artifact| directory.join(&artifact.file_name).is_file())
 }
 
 fn fail_download_job(
@@ -184,11 +195,20 @@ fn fail_download_job(
 }
 
 #[tauri::command]
-pub fn list_visual_model_pack_statuses(app_handle: AppHandle) -> Result<Vec<VisualModelPackStatus>, String> {
-    visual_model_packs().into_iter().map(|pack| {
-        let directory = pack_dir(&app_handle, &pack.id)?;
-        Ok(VisualModelPackStatus { installed: installed(&pack, &directory), install_path: directory.to_string_lossy().into_owned(), pack })
-    }).collect()
+pub fn list_visual_model_pack_statuses(
+    app_handle: AppHandle,
+) -> Result<Vec<VisualModelPackStatus>, String> {
+    visual_model_packs()
+        .into_iter()
+        .map(|pack| {
+            let directory = pack_dir(&app_handle, &pack.id)?;
+            Ok(VisualModelPackStatus {
+                installed: installed(&pack, &directory),
+                install_path: directory.to_string_lossy().into_owned(),
+                pack,
+            })
+        })
+        .collect()
 }
 
 #[tauri::command]
@@ -197,9 +217,15 @@ pub async fn download_visual_model_pack(
     app_handle: AppHandle,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<VisualModelPackStatus, String> {
-    let pack = visual_model_packs().into_iter().find(|candidate| candidate.id == pack_id).ok_or_else(|| format!("Unknown visual model pack: {pack_id}"))?;
+    let pack = visual_model_packs()
+        .into_iter()
+        .find(|candidate| candidate.id == pack_id)
+        .ok_or_else(|| format!("Unknown visual model pack: {pack_id}"))?;
     if pack.availability != VisualModelAvailability::DirectDownload {
-        return Err(format!("{} requires a pinned ONNX bundle before it can be installed", pack.display_name));
+        return Err(format!(
+            "{} requires a pinned ONNX bundle before it can be installed",
+            pack.display_name
+        ));
     }
     let directory = pack_dir(&app_handle, &pack.id)?;
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
@@ -229,16 +255,29 @@ pub async fn download_visual_model_pack(
     }
     let job_control = crate::app_state::BackgroundJobControl::new();
     if let Some((_, job_id)) = job.as_ref() {
-        state.background_job_controls.lock().unwrap().insert(job_id.clone(), job_control.clone());
+        state
+            .background_job_controls
+            .lock()
+            .unwrap()
+            .insert(job_id.clone(), job_control.clone());
     }
 
     for (index, artifact) in pack.artifacts.iter().enumerate() {
         let current = index as i64;
-        
+
         let is_runnable = job_control.wait_until_runnable().await;
         if !is_runnable || *job_control.cancellation_receiver().borrow() {
             if let Some((db_path, job_id)) = job.as_ref() {
-                let _ = crate::library_db::update_job(db_path, job_id, "cancelled", "Model download cancelled", current, total, None, None);
+                let _ = crate::library_db::update_job(
+                    db_path,
+                    job_id,
+                    "cancelled",
+                    "Model download cancelled",
+                    current,
+                    total,
+                    None,
+                    None,
+                );
                 state.background_job_controls.lock().unwrap().remove(job_id);
             }
             return Err("Model download cancelled".to_string());
@@ -256,7 +295,7 @@ pub async fn download_visual_model_pack(
                 None,
             );
         }
-        
+
         let target = directory.join(&artifact.file_name);
         let temporary = target.with_extension("download");
 
@@ -298,24 +337,51 @@ pub async fn download_visual_model_pack(
 
         if bytes.is_empty() {
             let _ = fs::remove_file(&temporary);
-            return Err(fail_download_job(&job, &state, format!("Downloaded {} was empty", artifact.file_name), current, total));
+            return Err(fail_download_job(
+                &job,
+                &state,
+                format!("Downloaded {} was empty", artifact.file_name),
+                current,
+                total,
+            ));
         }
-        
-        let mut file = fs::File::create(&temporary).map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
-        file.write_all(&bytes).map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
-        file.sync_all().map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
-        fs::rename(&temporary, &target).map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
+
+        let mut file = fs::File::create(&temporary)
+            .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
+        file.write_all(&bytes)
+            .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
+        file.sync_all()
+            .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
+        fs::rename(&temporary, &target)
+            .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
     }
-    let manifest = InstalledVisualModelPack { pack_id: pack.id.clone(), installed_at: Utc::now().timestamp(), source_path: None };
+    let manifest = InstalledVisualModelPack {
+        pack_id: pack.id.clone(),
+        installed_at: Utc::now().timestamp(),
+        source_path: None,
+    };
     let manifest = serde_json::to_vec_pretty(&manifest)
         .map_err(|error| fail_download_job(&job, &state, error.to_string(), total, total))?;
     fs::write(manifest_path(&directory), manifest)
         .map_err(|error| fail_download_job(&job, &state, error.to_string(), total, total))?;
     if let Some((db_path, job_id)) = job.as_ref() {
-        let _ = crate::library_db::update_job(db_path, job_id, "completed", "Model download complete", total, total, None, None);
+        let _ = crate::library_db::update_job(
+            db_path,
+            job_id,
+            "completed",
+            "Model download complete",
+            total,
+            total,
+            None,
+            None,
+        );
         state.background_job_controls.lock().unwrap().remove(job_id);
     }
-    Ok(VisualModelPackStatus { installed: true, install_path: directory.to_string_lossy().into_owned(), pack })
+    Ok(VisualModelPackStatus {
+        installed: true,
+        install_path: directory.to_string_lossy().into_owned(),
+        pack,
+    })
 }
 
 #[tauri::command]
@@ -329,7 +395,10 @@ pub fn install_visual_model_bundle(
         .find(|candidate| candidate.id == pack_id)
         .ok_or_else(|| format!("Unknown visual model pack: {pack_id}"))?;
     if pack.availability != VisualModelAvailability::BundleRequired {
-        return Err(format!("{} is downloaded directly by RapidRAW", pack.display_name));
+        return Err(format!(
+            "{} is downloaded directly by RapidRAW",
+            pack.display_name
+        ));
     }
 
     let source = PathBuf::from(&source_directory);
@@ -349,8 +418,11 @@ pub fn install_visual_model_bundle(
     let directory = pack_dir(&app_handle, &pack.id)?;
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     for artifact in &pack.artifacts {
-        fs::copy(source.join(&artifact.file_name), directory.join(&artifact.file_name))
-            .map_err(|error| format!("Could not install {}: {error}", artifact.file_name))?;
+        fs::copy(
+            source.join(&artifact.file_name),
+            directory.join(&artifact.file_name),
+        )
+        .map_err(|error| format!("Could not install {}: {error}", artifact.file_name))?;
     }
     let manifest = InstalledVisualModelPack {
         pack_id: pack.id.clone(),
@@ -382,9 +454,31 @@ pub fn remove_visual_model_pack(pack_id: String, app_handle: AppHandle) -> Resul
     Ok(())
 }
 
-pub(crate) fn installed_visual_model_path(app_handle: &AppHandle, pack_id: &str, file_name: &str) -> Result<PathBuf, String> {
-    let path = pack_dir(app_handle, pack_id)?.join(file_name);
-    if path.is_file() { Ok(path) } else { Err(format!("Install the {} visual model pack before running this analysis", pack_id)) }
+pub(crate) fn installed_visual_model_path(
+    app_handle: &AppHandle,
+    pack_id: &str,
+    file_name: &str,
+) -> Result<PathBuf, String> {
+    installed_visual_model_path_in_dir(&models_dir(app_handle)?, pack_id, file_name)
+}
+
+/// Resolves an installed artifact from an explicit visual-model root. This is
+/// used by headless callers such as `rapidraw-cli`, which do not have a Tauri
+/// application handle but must execute the same verified model packs.
+pub fn installed_visual_model_path_in_dir(
+    visual_models_dir: &Path,
+    pack_id: &str,
+    file_name: &str,
+) -> Result<PathBuf, String> {
+    let path = visual_models_dir.join(pack_id).join(file_name);
+    if path.is_file() {
+        Ok(path)
+    } else {
+        Err(format!(
+            "Install the {} visual model pack before running this analysis",
+            pack_id
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -393,17 +487,31 @@ mod tests {
 
     #[test]
     fn direct_visual_packs_have_https_artifacts() {
-        for pack in visual_model_packs().iter().filter(|pack| pack.availability == VisualModelAvailability::DirectDownload) {
+        for pack in visual_model_packs()
+            .iter()
+            .filter(|pack| pack.availability == VisualModelAvailability::DirectDownload)
+        {
             assert!(!pack.artifacts.is_empty());
-            assert!(pack.artifacts.iter().all(|artifact| artifact.source_url.starts_with("https://")));
+            assert!(
+                pack.artifacts
+                    .iter()
+                    .all(|artifact| artifact.source_url.starts_with("https://"))
+            );
         }
     }
 
     #[test]
     fn bundle_visual_packs_declare_required_artifacts() {
-        for pack in visual_model_packs().iter().filter(|pack| pack.availability == VisualModelAvailability::BundleRequired) {
+        for pack in visual_model_packs()
+            .iter()
+            .filter(|pack| pack.availability == VisualModelAvailability::BundleRequired)
+        {
             assert!(!pack.artifacts.is_empty());
-            assert!(pack.artifacts.iter().all(|artifact| !artifact.file_name.is_empty()));
+            assert!(
+                pack.artifacts
+                    .iter()
+                    .all(|artifact| !artifact.file_name.is_empty())
+            );
         }
     }
 }

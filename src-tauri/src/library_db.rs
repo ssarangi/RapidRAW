@@ -16,7 +16,7 @@ use crate::file_management::{ImageFile, parse_virtual_path};
 use crate::file_management::{assign_group_ids, read_file_mapped};
 use crate::formats::{is_raw_file, is_supported_image_file};
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -235,8 +235,6 @@ pub struct ImageDerivative {
     pub updated_at: i64,
 }
 
-
-
 /// A human-maintained identity. Detection and clustering may propose links to
 /// a person, but the person record is deliberately independent from any
 /// specific model or embedding.
@@ -366,7 +364,7 @@ fn record_job_event(
     Ok(())
 }
 
-pub(crate) fn update_job(
+pub fn update_job(
     db_path: &Path,
     job_id: &str,
     state: &str,
@@ -406,7 +404,7 @@ fn create_catalog_scan_job(
     Ok(id)
 }
 
-pub(crate) fn create_background_job(
+pub fn create_background_job(
     db_path: &Path,
     kind: &str,
     payload: serde_json::Value,
@@ -436,7 +434,9 @@ pub(crate) fn list_ai_tag_candidates_for_model(
     let conn = open_connection(db_path)?;
     let mut statement = conn.prepare("SELECT i.id, r.absolute_path || '/' || i.relative_path, i.modified_at FROM images i JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present' AND NOT EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = ?1 AND s.model_revision = ?2 AND s.image_modified_at = i.modified_at AND s.state = 'completed') ORDER BY i.id").map_err(|error| error.to_string())?;
     statement
-        .query_map(params![model_id, model_revision], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .query_map(params![model_id, model_revision], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
@@ -449,7 +449,15 @@ pub(crate) fn mark_ai_tag_analysis_state(
     state: &str,
     error_message: Option<&str>,
 ) -> Result<(), String> {
-    mark_ai_tag_analysis_state_for_model(db_path, image_id, image_modified_at, "clip", "rapidraw-clip-v1", state, error_message)
+    mark_ai_tag_analysis_state_for_model(
+        db_path,
+        image_id,
+        image_modified_at,
+        "clip",
+        "rapidraw-clip-v1",
+        state,
+        error_message,
+    )
 }
 
 pub(crate) fn mark_ai_tag_analysis_state_for_model(
@@ -483,7 +491,11 @@ pub(crate) fn replace_ai_tags_for_model(
 ) -> Result<(), String> {
     let mut conn = open_connection(db_path)?;
     let tx = conn.transaction().map_err(|error| error.to_string())?;
-    tx.execute("DELETE FROM image_ai_tags WHERE image_id = ?1 AND model_id = ?2 AND model_revision = ?3", params![image_id, model_id, model_revision]).map_err(|error| error.to_string())?;
+    tx.execute(
+        "DELETE FROM image_ai_tags WHERE image_id = ?1 AND model_id = ?2 AND model_revision = ?3",
+        params![image_id, model_id, model_revision],
+    )
+    .map_err(|error| error.to_string())?;
     for tag in tags {
         tx.execute(
             "INSERT OR IGNORE INTO tags(name, kind) VALUES(?1, 'ai')",
@@ -858,12 +870,38 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         );
         CREATE INDEX IF NOT EXISTS idx_image_derivatives_source ON image_derivatives(source_image_id, operation_kind);
         CREATE INDEX IF NOT EXISTS idx_image_derivatives_state ON image_derivatives(state);
+
+        CREATE TABLE IF NOT EXISTS cull_analysis_cache (
+          image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+          feature_set_version TEXT NOT NULL,
+          image_modified_at INTEGER NOT NULL,
+          perceptual_hash BLOB NOT NULL,
+          quality_score REAL NOT NULL,
+          sharpness_metric REAL NOT NULL,
+          center_focus_metric REAL NOT NULL,
+          exposure_metric REAL NOT NULL,
+          subject_focus_metric REAL,
+          subject_composition_metric REAL,
+          subject_edge_contact_ratio REAL,
+          width INTEGER NOT NULL,
+          height INTEGER NOT NULL,
+          created_at INTEGER NOT NULL,
+          PRIMARY KEY(image_id, feature_set_version, image_modified_at)
+        );
+        CREATE INDEX IF NOT EXISTS idx_cull_analysis_cache_revision ON cull_analysis_cache(image_id, image_modified_at);
         ",
     )
     .map_err(|e| e.to_string())?;
 
     let _ = conn.execute("ALTER TABLE faces ADD COLUMN thumbnail_jpeg BLOB", []);
-    let _ = conn.execute("ALTER TABLE cull_decisions ADD COLUMN factors_json TEXT NOT NULL DEFAULT '[]'", []);
+    let _ = conn.execute(
+        "ALTER TABLE cull_decisions ADD COLUMN factors_json TEXT NOT NULL DEFAULT '[]'",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE cull_analysis_cache ADD COLUMN exposure_metric REAL NOT NULL DEFAULT 0.0",
+        [],
+    );
 
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(?1, ?2)",
@@ -939,6 +977,20 @@ mod tests {
             })
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migration_creates_revision_keyed_culling_cache() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrate(&connection).unwrap();
+        let exists: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cull_analysis_cache'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(exists, 1);
     }
 
     #[test]
@@ -1025,8 +1077,20 @@ mod tests {
             "/photos",
             "{}",
             &[
-                ("/photos/photo.jpg".to_string(), true, "unique".to_string(), 0.8, "[]".to_string()),
-                ("/photos/missing.jpg".to_string(), false, "blurry".to_string(), 0.2, "[]".to_string()),
+                (
+                    "/photos/photo.jpg".to_string(),
+                    true,
+                    "unique".to_string(),
+                    0.8,
+                    "[]".to_string(),
+                ),
+                (
+                    "/photos/missing.jpg".to_string(),
+                    false,
+                    "blurry".to_string(),
+                    0.2,
+                    "[]".to_string(),
+                ),
             ],
         )
         .unwrap()
@@ -1034,11 +1098,11 @@ mod tests {
         mark_cull_session_applied(&path, session_id).unwrap();
 
         let connection = Connection::open(&path).unwrap();
-        let (state, decisions): (String, i64) = connection
+        let (state, feature_set_version, decisions): (String, String, i64) = connection
             .query_row(
-                "SELECT s.state, COUNT(d.id) FROM cull_sessions s JOIN cull_decisions d ON d.session_id = s.id WHERE s.id = ?1 GROUP BY s.id",
+                "SELECT s.state, s.feature_set_version, COUNT(d.id) FROM cull_sessions s JOIN cull_decisions d ON d.session_id = s.id WHERE s.id = ?1 GROUP BY s.id",
                 [session_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap();
         let rejected: i64 = connection
@@ -1049,6 +1113,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, "applied");
+        assert_eq!(feature_set_version, "culling-v3-geometry");
         assert_eq!(decisions, 2);
         assert_eq!(rejected, 1);
     }
@@ -1234,7 +1299,9 @@ pub fn reconcile_catalog_moved_paths(
             .prepare("SELECT id, absolute_path FROM collection_roots")
             .map_err(|error| error.to_string())?;
         statement
-            .query_map([], |row| Ok((row.get(0)?, PathBuf::from(row.get::<_, String>(1)?))))
+            .query_map([], |row| {
+                Ok((row.get(0)?, PathBuf::from(row.get::<_, String>(1)?)))
+            })
             .map_err(|error| error.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?
@@ -1243,9 +1310,10 @@ pub fn reconcile_catalog_moved_paths(
     for (old_path, new_path) in moves {
         let old_path = Path::new(old_path);
         let new_path = Path::new(new_path);
-        let Some((root_id, root_path)) = roots.iter().find(|(_, root)| {
-            old_path.starts_with(root) && new_path.starts_with(root)
-        }) else {
+        let Some((root_id, root_path)) = roots
+            .iter()
+            .find(|(_, root)| old_path.starts_with(root) && new_path.starts_with(root))
+        else {
             continue;
         };
         let old_relative = old_path
@@ -1872,7 +1940,6 @@ fn wait_for_catalog_scan_control(
         return Err("Catalog scan cancelled".to_string());
     }
 
-
     Ok(())
 }
 
@@ -2180,8 +2247,12 @@ pub fn start_catalog_scan(
     state_control.begin(root_id)?;
     *state_control.active_job_id.lock().unwrap() = Some(job_id.clone());
     let job_control = crate::app_state::BackgroundJobControl::new();
-    state.background_job_controls.lock().unwrap().insert(job_id.clone(), job_control.clone());
-    
+    state
+        .background_job_controls
+        .lock()
+        .unwrap()
+        .insert(job_id.clone(), job_control.clone());
+
     update_job(
         &db_path,
         &job_id,
@@ -2283,7 +2354,13 @@ pub fn pause_catalog_scan(state: tauri::State<'_, crate::AppState>) -> Result<()
         .unwrap()
         .clone()
     {
-        if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
+        if let Some(control) = state
+            .background_job_controls
+            .lock()
+            .unwrap()
+            .get(&job_id)
+            .cloned()
+        {
             control.set_paused(true);
         }
         update_job(
@@ -2318,7 +2395,13 @@ pub fn resume_catalog_scan(state: tauri::State<'_, crate::AppState>) -> Result<(
         .unwrap()
         .clone()
     {
-        if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
+        if let Some(control) = state
+            .background_job_controls
+            .lock()
+            .unwrap()
+            .get(&job_id)
+            .cloned()
+        {
             control.set_paused(false);
         }
         update_job(
@@ -2353,7 +2436,13 @@ pub fn cancel_catalog_scan(state: tauri::State<'_, crate::AppState>) -> Result<(
         .unwrap()
         .clone()
     {
-        if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
+        if let Some(control) = state
+            .background_job_controls
+            .lock()
+            .unwrap()
+            .get(&job_id)
+            .cloned()
+        {
             control.cancel();
         }
         update_job(
@@ -2456,8 +2545,14 @@ pub fn cancel_background_job(
             return Err("The catalog scan is not active in this application session".to_string());
         }
     }
-    
-    if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
+
+    if let Some(control) = state
+        .background_job_controls
+        .lock()
+        .unwrap()
+        .get(&job_id)
+        .cloned()
+    {
         control.cancel();
     } else {
         return Err("This job cannot be cancelled after an application restart".to_string());
@@ -2502,7 +2597,13 @@ pub fn pause_background_job(
         {
             return Err("The catalog scan is not active in this application session".to_string());
         }
-        if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
+        if let Some(control) = state
+            .background_job_controls
+            .lock()
+            .unwrap()
+            .get(&job_id)
+            .cloned()
+        {
             control.set_paused(true);
         }
         return update_job(
@@ -2516,7 +2617,13 @@ pub fn pause_background_job(
             None,
         );
     }
-    if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
+    if let Some(control) = state
+        .background_job_controls
+        .lock()
+        .unwrap()
+        .get(&job_id)
+        .cloned()
+    {
         control.set_paused(true);
     } else {
         return Err("This job cannot be paused after an application restart".to_string());
@@ -2560,7 +2667,13 @@ pub fn resume_background_job(
         {
             return Err("The catalog scan is not active in this application session".to_string());
         }
-        if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
+        if let Some(control) = state
+            .background_job_controls
+            .lock()
+            .unwrap()
+            .get(&job_id)
+            .cloned()
+        {
             control.set_paused(false);
         }
         return update_job(
@@ -2574,7 +2687,13 @@ pub fn resume_background_job(
             None,
         );
     }
-    if let Some(control) = state.background_job_controls.lock().unwrap().get(&job_id).cloned() {
+    if let Some(control) = state
+        .background_job_controls
+        .lock()
+        .unwrap()
+        .get(&job_id)
+        .cloned()
+    {
         control.set_paused(false);
     } else {
         return Err("This job cannot be resumed after an application restart".to_string());
@@ -3114,19 +3233,26 @@ pub(crate) fn record_cull_session(
             .prepare("SELECT id, absolute_path FROM collection_roots")
             .map_err(|error| error.to_string())?;
         statement
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(|error| error.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?
     };
     let scope = Path::new(scope_path);
-    let Some((root_id, root_path)) = roots.into_iter().find(|(_, root_path)| scope.starts_with(root_path)) else {
+    let Some((root_id, root_path)) = roots
+        .into_iter()
+        .find(|(_, root_path)| scope.starts_with(root_path))
+    else {
         return Ok(None);
     };
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     transaction
         .execute(
-            "INSERT INTO cull_sessions(root_id, scope_path, state, settings_json, feature_set_version, total_count, rejected_count, created_at, updated_at) VALUES(?1, ?2, 'planned', ?3, 'culling-v2-explainable', ?4, ?5, strftime('%s','now'), strftime('%s','now'))",
+            "INSERT INTO cull_sessions(root_id, scope_path, state, settings_json, feature_set_version, total_count, rejected_count, created_at, updated_at) VALUES(?1, ?2, 'planned', ?3, 'culling-v3-geometry', ?4, ?5, strftime('%s','now'), strftime('%s','now'))",
             params![root_id, scope_path, settings_json, decisions.len() as i64, decisions.iter().filter(|(_, keep, _, _, _)| !*keep).count() as i64],
         )
         .map_err(|error| error.to_string())?;
@@ -3136,10 +3262,20 @@ pub(crate) fn record_cull_session(
             .prepare("SELECT id, relative_path FROM images WHERE root_id = ?1")
             .map_err(|error| error.to_string())?;
         statement
-            .query_map([root_id], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+            .query_map([root_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(|error| error.to_string())?
             .filter_map(Result::ok)
-            .map(|(id, relative_path)| (Path::new(&root_path).join(relative_path).to_string_lossy().into_owned(), id))
+            .map(|(id, relative_path)| {
+                (
+                    Path::new(&root_path)
+                        .join(relative_path)
+                        .to_string_lossy()
+                        .into_owned(),
+                    id,
+                )
+            })
             .collect::<HashMap<_, _>>()
     };
     for (path, keep, reason, quality_score, factors_json) in decisions {
@@ -3172,7 +3308,9 @@ pub(crate) fn load_cull_personalization_model(
         )
         .map_err(|error| error.to_string())?;
     let examples = statement
-        .query_map([], |row| Ok((row.get::<_, f64>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, f64>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
@@ -3227,7 +3365,18 @@ pub fn list_cull_sessions(
         .prepare("SELECT id, root_id, scope_path, state, total_count, rejected_count, created_at, updated_at FROM cull_sessions ORDER BY updated_at DESC LIMIT 100")
         .map_err(|error| error.to_string())?;
     statement
-        .query_map([], |row| Ok(CullSessionSummary { id: row.get(0)?, root_id: row.get(1)?, scope_path: row.get(2)?, state: row.get(3)?, total_count: row.get(4)?, rejected_count: row.get(5)?, created_at: row.get(6)?, updated_at: row.get(7)? }))
+        .query_map([], |row| {
+            Ok(CullSessionSummary {
+                id: row.get(0)?,
+                root_id: row.get(1)?,
+                scope_path: row.get(2)?,
+                state: row.get(3)?,
+                total_count: row.get(4)?,
+                rejected_count: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
@@ -3243,7 +3392,16 @@ pub fn list_cull_session_decisions(
         .prepare("SELECT id, representative_path, proposed_status, final_status, quality_score, reason FROM cull_decisions WHERE session_id = ?1 ORDER BY quality_score DESC")
         .map_err(|error| error.to_string())?;
     statement
-        .query_map([session_id], |row| Ok(CullSessionDecision { id: row.get(0)?, representative_path: row.get(1)?, proposed_status: row.get(2)?, final_status: row.get(3)?, quality_score: row.get(4)?, reason: row.get(5)? }))
+        .query_map([session_id], |row| {
+            Ok(CullSessionDecision {
+                id: row.get(0)?,
+                representative_path: row.get(1)?,
+                proposed_status: row.get(2)?,
+                final_status: row.get(3)?,
+                quality_score: row.get(4)?,
+                reason: row.get(5)?,
+            })
+        })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
@@ -3258,19 +3416,27 @@ pub fn update_cull_session_decision(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<(), String> {
     let mut connection = open_connection(&active_library_path(&state)?)?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     let decision: Option<(i64, String)> = transaction.query_row(
         "SELECT id, proposed_status FROM cull_decisions WHERE session_id = ?1 AND representative_path = ?2",
         params![session_id, representative_path],
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional().map_err(|error| error.to_string())?;
-    let Some((decision_id, previous_status)) = decision else { return Err("Culling decision was not found".to_string()); };
+    let Some((decision_id, previous_status)) = decision else {
+        return Err("Culling decision was not found".to_string());
+    };
     let next_status = if keep { "keep" } else { "reject" };
     if previous_status != next_status {
         transaction.execute("INSERT INTO cull_decision_events(decision_id, previous_status, next_status, created_at) VALUES(?1, ?2, ?3, strftime('%s','now'))", params![decision_id, previous_status, next_status]).map_err(|error| error.to_string())?;
         transaction.execute("UPDATE cull_decisions SET proposed_status = ?1, updated_at = strftime('%s','now') WHERE id = ?2", params![next_status, decision_id]).map_err(|error| error.to_string())?;
     }
-    if let Some(reason) = feedback_reason.as_deref().map(str::trim).filter(|reason| !reason.is_empty()) {
+    if let Some(reason) = feedback_reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|reason| !reason.is_empty())
+    {
         transaction.execute(
             "INSERT INTO cull_preference_feedback(decision_id, feedback_reason, created_at) VALUES(?1, ?2, strftime('%s','now'))",
             params![decision_id, reason],
@@ -3397,13 +3563,23 @@ pub fn merge_catalog_people(
         return Err("Choose two different people to merge".to_string());
     }
     let mut connection = open_connection(&active_library_path(&state)?)?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     let source_exists: Option<i64> = transaction
-        .query_row("SELECT id FROM people WHERE id = ?1 AND state = 'active'", [source_person_id], |row| row.get(0))
+        .query_row(
+            "SELECT id FROM people WHERE id = ?1 AND state = 'active'",
+            [source_person_id],
+            |row| row.get(0),
+        )
         .optional()
         .map_err(|error| error.to_string())?;
     let target_exists: Option<i64> = transaction
-        .query_row("SELECT id FROM people WHERE id = ?1 AND state = 'active'", [target_person_id], |row| row.get(0))
+        .query_row(
+            "SELECT id FROM people WHERE id = ?1 AND state = 'active'",
+            [target_person_id],
+            |row| row.get(0),
+        )
         .optional()
         .map_err(|error| error.to_string())?;
     if source_exists.is_none() || target_exists.is_none() {
@@ -3443,13 +3619,18 @@ pub fn list_catalog_face_review_items_for_path(
         .prepare("SELECT id, absolute_path FROM collection_roots")
         .map_err(|error| error.to_string())?;
     let root_rows = roots
-        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|error| error.to_string())?;
 
     let mut matched_root: Option<(i64, String)> = None;
     for root in root_rows {
         let (root_id, root_path) = root.map_err(|error| error.to_string())?;
-        let normalized_root = root_path.replace('\\', "/").trim_end_matches('/').to_string();
+        let normalized_root = root_path
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_string();
         if let Some(relative_path) = requested_path
             .strip_prefix(&(normalized_root.clone() + "/"))
             .or_else(|| (requested_path == normalized_root).then_some(""))
@@ -3491,7 +3672,10 @@ pub fn list_catalog_face_review_items_for_path(
         .query_map([image_id], |row| {
             let face_id: i64 = row.get(0)?;
             let thumbnail_data_url = row.get::<_, Option<Vec<u8>>>(10)?.map(|bytes| {
-                format!("data:image/jpeg;base64,{}", base64::prelude::BASE64_STANDARD.encode(bytes))
+                format!(
+                    "data:image/jpeg;base64,{}",
+                    base64::prelude::BASE64_STANDARD.encode(bytes)
+                )
             });
             let crop_path = face_crops_dir.as_ref().and_then(|directory| {
                 let crop = directory.join(format!("{face_id}.jpg"));
@@ -3567,7 +3751,10 @@ pub fn list_unreviewed_catalog_faces(
             let face_id: i64 = row.get(0)?;
             let thumb_blob: Option<Vec<u8>> = row.get(11)?;
             let thumbnail_data_url = thumb_blob.map(|b| {
-                format!("data:image/jpeg;base64,{}", base64::prelude::BASE64_STANDARD.encode(&b))
+                format!(
+                    "data:image/jpeg;base64,{}",
+                    base64::prelude::BASE64_STANDARD.encode(&b)
+                )
             });
             let crop_path = face_crops_dir.as_ref().and_then(|dir| {
                 let p = dir.join(format!("{face_id}.jpg"));
@@ -3614,7 +3801,10 @@ pub fn list_unreviewed_face_clusters(
             let rep_face_id: Option<i64> = row.get(3)?;
             let thumb_blob: Option<Vec<u8>> = row.get(4)?;
             let representative_thumbnail_data_url = thumb_blob.map(|b| {
-                format!("data:image/jpeg;base64,{}", base64::prelude::BASE64_STANDARD.encode(&b))
+                format!(
+                    "data:image/jpeg;base64,{}",
+                    base64::prelude::BASE64_STANDARD.encode(&b)
+                )
             });
             let representative_crop_path = rep_face_id.and_then(|id| {
                 face_crops_dir.as_ref().and_then(|dir| {
@@ -3656,12 +3846,20 @@ pub fn get_or_generate_face_crop(
         .map_err(|e| e.to_string())?;
 
     if let Some(blob) = thumb_blob {
-        return Ok(format!("data:image/jpeg;base64,{}", base64::prelude::BASE64_STANDARD.encode(&blob)));
+        return Ok(format!(
+            "data:image/jpeg;base64,{}",
+            base64::prelude::BASE64_STANDARD.encode(&blob)
+        ));
     }
 
     let img = crate::face_detection::load_image_for_face_ai(Path::new(&img_path), &app_handle)?;
-    let thumb_bytes = crate::face_detection::extract_square_face_crop_jpeg(&img, bbox_x, bbox_y, bbox_w, bbox_h, 256)?;
-    let _ = conn.execute("UPDATE faces SET thumbnail_jpeg = ?1 WHERE id = ?2", params![&thumb_bytes, face_id]);
+    let thumb_bytes = crate::face_detection::extract_square_face_crop_jpeg(
+        &img, bbox_x, bbox_y, bbox_w, bbox_h, 256,
+    )?;
+    let _ = conn.execute(
+        "UPDATE faces SET thumbnail_jpeg = ?1 WHERE id = ?2",
+        params![&thumb_bytes, face_id],
+    );
     let _ = crate::face_detection::save_face_crop_image(
         &img,
         bbox_x,
@@ -3671,7 +3869,10 @@ pub fn get_or_generate_face_crop(
         face_id,
         &app_handle,
     );
-    Ok(format!("data:image/jpeg;base64,{}", base64::prelude::BASE64_STANDARD.encode(&thumb_bytes)))
+    Ok(format!(
+        "data:image/jpeg;base64,{}",
+        base64::prelude::BASE64_STANDARD.encode(&thumb_bytes)
+    ))
 }
 
 #[tauri::command]
@@ -3908,7 +4109,9 @@ pub fn get_catalog_metrics(
         .query_row("SELECT COUNT(*) FROM cull_sessions", [], |row| row.get(0))
         .map_err(|e| e.to_string())?;
     let cull_overrides = conn
-        .query_row("SELECT COUNT(*) FROM cull_decision_events", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM cull_decision_events", [], |row| {
+            row.get(0)
+        })
         .map_err(|e| e.to_string())?;
 
     Ok(CatalogMetrics {

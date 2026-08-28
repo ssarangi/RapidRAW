@@ -182,7 +182,7 @@ fn insightface_pack(
         recognizer: "ArcFace/MobileFaceNet".to_string(),
         detector_landmarks: 5,
         embedding_dimensions: Some(512),
-        availability: ModelAvailability::DirectDownload,
+        availability: ModelAvailability::ConversionRequired,
         artifacts: vec![artifact(file_name, ModelArtifactFormat::Zip, source_url)],
         license_name: "InsightFace public pretrained model license".to_string(),
         license_url: "https://github.com/deepinsight/insightface/tree/master/model_zoo".to_string(),
@@ -408,7 +408,11 @@ pub async fn download_face_model_pack(
     }
     let job_control = crate::app_state::BackgroundJobControl::new();
     if let Some((_, job_id)) = job.as_ref() {
-        state.background_job_controls.lock().unwrap().insert(job_id.clone(), job_control.clone());
+        state
+            .background_job_controls
+            .lock()
+            .unwrap()
+            .insert(job_id.clone(), job_control.clone());
     }
 
     for (index, artifact) in pack.artifacts.iter().enumerate() {
@@ -554,11 +558,7 @@ pub async fn download_face_model_pack(
             None,
             None,
         );
-        state
-            .background_job_controls
-            .lock()
-            .unwrap()
-            .remove(job_id);
+        state.background_job_controls.lock().unwrap().remove(job_id);
     }
 
     let _ = app_handle.emit(

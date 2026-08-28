@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use image::{imageops::FilterType, DynamicImage};
+use image::{DynamicImage, imageops::FilterType};
 use ndarray::Array4;
 use ort::session::Session;
 use ort::value::Tensor;
@@ -1223,6 +1223,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires a locally installed ONNX Runtime and private developer fixture image"]
     fn test_yunet_detection() {
         let model_path = Path::new(
             "/home/ssarangi/.local/share/io.github.CyberTimon.RapidRAW/models/face/opencv-yunet-sface/face_detection_yunet_2023mar.onnx",

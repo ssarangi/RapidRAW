@@ -1,14 +1,14 @@
-use crate::ai_processing::{get_or_init_ai_models, run_u2netp_model, AiModels};
+use crate::ai_processing::{AiModels, get_or_init_ai_models, run_u2netp_model};
 use crate::app_settings::load_settings;
 use crate::app_state::AppState;
-use image::{imageops, GenericImageView, GrayImage};
+use image::{GenericImageView, GrayImage, imageops};
 use image_hasher::{HashAlg, HasherConfig};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::{AppHandle, Emitter};
 
 use crate::image_loader;
@@ -79,6 +79,7 @@ struct CullingProgress {
     stage: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct ImageAnalysisData {
     pub(crate) hash: image_hasher::ImageHash,
     pub(crate) result: ImageAnalysisResult,
@@ -519,7 +520,7 @@ pub async fn cull_images(
 
 #[cfg(test)]
 mod tests {
-    use super::{calculate_subject_composition_metrics, CullingSettings};
+    use super::{CullingSettings, calculate_subject_composition_metrics};
     use image::{GrayImage, Luma};
 
     #[test]

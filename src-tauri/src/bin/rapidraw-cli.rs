@@ -1,10 +1,14 @@
 use std::env;
 use std::path::PathBuf;
 
-use rusqlite::Connection;
+use rapidraw_lib::BackgroundJobControl;
+use rapidraw_lib::image_restoration::{
+    RestorationRecipe, run_restoration_worker, validate_restoration_recipe,
+};
 use rapidraw_lib::visual_model_registry::visual_model_packs;
+use rusqlite::Connection;
 use serde_json::json;
-
+use std::sync::Arc;
 
 fn database_argument(arguments: &[String]) -> Result<PathBuf, String> {
     arguments
@@ -48,7 +52,7 @@ fn main() {
         Some("models") if arguments.get(1).map(String::as_str) == Some("info") => verify_model(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("list") => list_derivatives(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("run") => run_restore_cli(&arguments),
-        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top|export-suggestions --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id>".to_string()),
+        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top|export-suggestions --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -261,16 +265,18 @@ fn cull_sessions(arguments: &[String]) -> Result<serde_json::Value, String> {
         .prepare("SELECT id, root_id, scope_path, state, total_count, rejected_count, created_at, updated_at FROM cull_sessions ORDER BY updated_at DESC LIMIT 100")
         .map_err(|error| error.to_string())?;
     let sessions = statement
-        .query_map([], |row| Ok(json!({
-            "id": row.get::<_, i64>(0)?,
-            "rootId": row.get::<_, Option<i64>>(1)?,
-            "scopePath": row.get::<_, String>(2)?,
-            "state": row.get::<_, String>(3)?,
-            "total": row.get::<_, i64>(4)?,
-            "rejected": row.get::<_, i64>(5)?,
-            "createdAt": row.get::<_, i64>(6)?,
-            "updatedAt": row.get::<_, i64>(7)?,
-        })))
+        .query_map([], |row| {
+            Ok(json!({
+                "id": row.get::<_, i64>(0)?,
+                "rootId": row.get::<_, Option<i64>>(1)?,
+                "scopePath": row.get::<_, String>(2)?,
+                "state": row.get::<_, String>(3)?,
+                "total": row.get::<_, i64>(4)?,
+                "rejected": row.get::<_, i64>(5)?,
+                "createdAt": row.get::<_, i64>(6)?,
+                "updatedAt": row.get::<_, i64>(7)?,
+            }))
+        })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
@@ -285,13 +291,15 @@ fn cull_decisions(arguments: &[String]) -> Result<serde_json::Value, String> {
         .prepare("SELECT representative_path, proposed_status, final_status, quality_score, reason FROM cull_decisions WHERE session_id = ?1 ORDER BY quality_score DESC")
         .map_err(|error| error.to_string())?;
     let decisions = statement
-        .query_map([session_id], |row| Ok(json!({
-            "path": row.get::<_, String>(0)?,
-            "proposed": row.get::<_, String>(1)?,
-            "final": row.get::<_, String>(2)?,
-            "qualityScore": row.get::<_, f64>(3)?,
-            "reason": row.get::<_, String>(4)?,
-        })))
+        .query_map([session_id], |row| {
+            Ok(json!({
+                "path": row.get::<_, String>(0)?,
+                "proposed": row.get::<_, String>(1)?,
+                "final": row.get::<_, String>(2)?,
+                "qualityScore": row.get::<_, f64>(3)?,
+                "reason": row.get::<_, String>(4)?,
+            }))
+        })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
@@ -299,18 +307,21 @@ fn cull_decisions(arguments: &[String]) -> Result<serde_json::Value, String> {
 }
 
 fn export_tag_suggestions(arguments: &[String]) -> Result<serde_json::Value, String> {
-    let connection = Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let connection =
+        Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
     let mut statement = connection
         .prepare("SELECT iat.id, r.absolute_path || '/' || i.relative_path, t.name, iat.confidence, iat.model_id FROM image_ai_tags iat JOIN images i ON i.id = iat.image_id JOIN collection_roots r ON r.id = i.root_id JOIN tags t ON t.id = iat.tag_id WHERE i.status = 'present' AND iat.review_state = 'suggested' ORDER BY iat.confidence DESC")
         .map_err(|error| error.to_string())?;
     let suggestions = statement
-        .query_map([], |row| Ok(json!({
-            "id": row.get::<_, i64>(0)?,
-            "path": row.get::<_, String>(1)?,
-            "tag": row.get::<_, String>(2)?,
-            "confidence": row.get::<_, f64>(3)?,
-            "modelId": row.get::<_, String>(4)?,
-        })))
+        .query_map([], |row| {
+            Ok(json!({
+                "id": row.get::<_, i64>(0)?,
+                "path": row.get::<_, String>(1)?,
+                "tag": row.get::<_, String>(2)?,
+                "confidence": row.get::<_, f64>(3)?,
+                "modelId": row.get::<_, String>(4)?,
+            }))
+        })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
@@ -320,7 +331,9 @@ fn export_tag_suggestions(arguments: &[String]) -> Result<serde_json::Value, Str
 fn verify_model(arguments: &[String]) -> Result<serde_json::Value, String> {
     let model_id = named_argument(arguments, "--id")?;
     let visual_pack = visual_model_packs().into_iter().find(|p| p.id == model_id);
-    let face_pack = rapidraw_lib::face_model_registry::face_model_packs().into_iter().find(|p| p.id == model_id);
+    let face_pack = rapidraw_lib::face_model_registry::face_model_packs()
+        .into_iter()
+        .find(|p| p.id == model_id);
     match (visual_pack, face_pack) {
         (Some(pack), _) => Ok(json!({
             "id": pack.id,
@@ -344,24 +357,27 @@ fn verify_model(arguments: &[String]) -> Result<serde_json::Value, String> {
 }
 
 fn list_derivatives(arguments: &[String]) -> Result<serde_json::Value, String> {
-    let connection = Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let connection =
+        Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
     let image_id = numeric_argument(arguments, "--image")?;
     let mut stmt = connection
         .prepare("SELECT id, operation_kind, model_id, model_revision, output_path, output_format, width, height, state, created_at FROM image_derivatives WHERE source_image_id = ?1 ORDER BY created_at DESC")
         .map_err(|e| e.to_string())?;
     let derivatives = stmt
-        .query_map([image_id], |row| Ok(json!({
-            "id": row.get::<_, i64>(0)?,
-            "operationKind": row.get::<_, String>(1)?,
-            "modelId": row.get::<_, String>(2)?,
-            "modelRevision": row.get::<_, String>(3)?,
-            "outputPath": row.get::<_, String>(4)?,
-            "outputFormat": row.get::<_, String>(5)?,
-            "width": row.get::<_, Option<i64>>(6)?,
-            "height": row.get::<_, Option<i64>>(7)?,
-            "state": row.get::<_, String>(8)?,
-            "createdAt": row.get::<_, i64>(9)?,
-        })))
+        .query_map([image_id], |row| {
+            Ok(json!({
+                "id": row.get::<_, i64>(0)?,
+                "operationKind": row.get::<_, String>(1)?,
+                "modelId": row.get::<_, String>(2)?,
+                "modelRevision": row.get::<_, String>(3)?,
+                "outputPath": row.get::<_, String>(4)?,
+                "outputFormat": row.get::<_, String>(5)?,
+                "width": row.get::<_, Option<i64>>(6)?,
+                "height": row.get::<_, Option<i64>>(7)?,
+                "state": row.get::<_, String>(8)?,
+                "createdAt": row.get::<_, i64>(9)?,
+            }))
+        })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
@@ -371,9 +387,52 @@ fn list_derivatives(arguments: &[String]) -> Result<serde_json::Value, String> {
 fn run_restore_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
     let db_path = database_argument(arguments)?;
     let image_id = numeric_argument(arguments, "--image")?;
-    let _ = (db_path, image_id);
-    Err(
-        "restore run is temporarily unavailable: it previously wrote a display-referred microcontrast image while recording it as a RawNIND derivative. Use the catalog RAW Restore/RGB Denoise jobs until the CLI uses the same model-backed restoration service."
-            .to_string(),
-    )
+    let visual_models_dir = PathBuf::from(named_argument(arguments, "--models-dir")?);
+    let operation_kind = arguments
+        .windows(2)
+        .find(|pair| pair[0] == "--operation")
+        .map(|pair| pair[1].clone())
+        .unwrap_or_else(|| "raw_denoise".to_string());
+    let model_id = arguments
+        .windows(2)
+        .find(|pair| pair[0] == "--model")
+        .map(|pair| pair[1].clone())
+        .unwrap_or_else(|| {
+            if operation_kind == "rgb_denoise" {
+                "nafnet-sidd-rgb".to_string()
+            } else {
+                "rawnind-utnet2-bayer".to_string()
+            }
+        });
+    let recipe = RestorationRecipe {
+        operation_kind,
+        model_id,
+        ..RestorationRecipe::default()
+    };
+    validate_restoration_recipe(&recipe)?;
+    let job_id = rapidraw_lib::create_background_job(
+        &db_path,
+        &recipe.operation_kind,
+        json!({ "imageId": image_id, "recipe": recipe }),
+    )?;
+    let control = BackgroundJobControl::new();
+    if let Err(error) = run_restoration_worker(
+        &db_path,
+        image_id,
+        &recipe,
+        &job_id,
+        &control,
+        &visual_models_dir,
+        Arc::new(tokio::sync::Semaphore::new(1)),
+    ) {
+        let state = if error == "Restoration cancelled" {
+            "cancelled"
+        } else {
+            "failed"
+        };
+        let _ =
+            rapidraw_lib::update_job(&db_path, &job_id, state, &error, 0, 100, None, Some(&error));
+        return Err(error);
+    }
+    Ok(json!({ "jobId": job_id, "imageId": image_id, "state": "completed" }))
 }

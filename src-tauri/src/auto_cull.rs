@@ -2,10 +2,11 @@ use crate::ai_processing::get_or_init_ai_models;
 use crate::app_settings::load_settings;
 use crate::app_state::AppState;
 use crate::culling::{
-    analyze_image, build_culling_suggestions, CullingSettings, ImageAnalysisData,
+    CullingSettings, ImageAnalysisData, ImageAnalysisResult, analyze_image,
+    build_culling_suggestions,
 };
-use crate::file_management::{resolve_auto_cull_candidates, AutoCullCandidate};
-use image_hasher::{HashAlg, HasherConfig};
+use crate::file_management::{AutoCullCandidate, resolve_auto_cull_candidates};
+use image_hasher::{HashAlg, HasherConfig, ImageHash};
 use rayon::prelude::*;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -20,6 +21,91 @@ struct AutoCullProgress {
     current: usize,
     total: usize,
     stage: String,
+}
+
+const CULL_FEATURE_SET_VERSION: &str = "culling-v3-geometry";
+
+fn load_catalog_cull_cache(
+    db_path: &Path,
+    image_ids: &HashMap<String, i64>,
+) -> HashMap<String, ImageAnalysisData> {
+    let Ok(connection) = Connection::open(db_path) else {
+        return HashMap::new();
+    };
+    let mut cached = HashMap::new();
+    for (path, image_id) in image_ids {
+        let row = connection
+            .query_row(
+                "SELECT c.perceptual_hash, c.quality_score, c.sharpness_metric, c.center_focus_metric, c.exposure_metric, c.subject_focus_metric, c.subject_composition_metric, c.subject_edge_contact_ratio, c.width, c.height
+                 FROM cull_analysis_cache c JOIN images i ON i.id = c.image_id
+                 WHERE c.image_id = ?1 AND c.feature_set_version = ?2 AND c.image_modified_at = i.modified_at",
+                rusqlite::params![image_id, CULL_FEATURE_SET_VERSION],
+                |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, f64>(1)?, row.get::<_, f64>(2)?, row.get::<_, f64>(3)?, row.get::<_, f64>(4)?, row.get::<_, Option<f64>>(5)?, row.get::<_, Option<f64>>(6)?, row.get::<_, Option<f64>>(7)?, row.get::<_, u32>(8)?, row.get::<_, u32>(9)?)),
+            )
+            .ok();
+        let Some((
+            hash_bytes,
+            quality_score,
+            sharpness_metric,
+            center_focus_metric,
+            exposure_metric,
+            subject_focus_metric,
+            subject_composition_metric,
+            subject_edge_contact_ratio,
+            width,
+            height,
+        )) = row
+        else {
+            continue;
+        };
+        let Ok(hash) = ImageHash::from_bytes(&hash_bytes) else {
+            continue;
+        };
+        cached.insert(
+            path.clone(),
+            ImageAnalysisData {
+                hash,
+                result: ImageAnalysisResult {
+                    path: path.clone(),
+                    quality_score,
+                    sharpness_metric,
+                    center_focus_metric,
+                    subject_focus_metric,
+                    subject_composition_metric,
+                    subject_edge_contact_ratio,
+                    exposure_metric,
+                    width,
+                    height,
+                },
+            },
+        );
+    }
+    cached
+}
+
+fn store_catalog_cull_cache(
+    db_path: &Path,
+    image_ids: &HashMap<String, i64>,
+    analyses: &[(AutoCullCandidate, ImageAnalysisData)],
+) {
+    let Ok(mut connection) = Connection::open(db_path) else {
+        return;
+    };
+    let Ok(transaction) = connection.transaction() else {
+        return;
+    };
+    for (candidate, analysis) in analyses {
+        let Some(image_id) = image_ids.get(&candidate.representative_path) else {
+            continue;
+        };
+        let _ = transaction.execute(
+            "INSERT INTO cull_analysis_cache(image_id, feature_set_version, image_modified_at, perceptual_hash, quality_score, sharpness_metric, center_focus_metric, exposure_metric, subject_focus_metric, subject_composition_metric, subject_edge_contact_ratio, width, height, created_at)
+             SELECT ?1, ?2, modified_at, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, strftime('%s','now') FROM images WHERE id = ?1
+             ON CONFLICT(image_id, feature_set_version, image_modified_at) DO UPDATE SET perceptual_hash=excluded.perceptual_hash, quality_score=excluded.quality_score, sharpness_metric=excluded.sharpness_metric, center_focus_metric=excluded.center_focus_metric, exposure_metric=excluded.exposure_metric, subject_focus_metric=excluded.subject_focus_metric, subject_composition_metric=excluded.subject_composition_metric, subject_edge_contact_ratio=excluded.subject_edge_contact_ratio, width=excluded.width, height=excluded.height, created_at=excluded.created_at",
+            rusqlite::params![image_id, CULL_FEATURE_SET_VERSION, analysis.hash.as_bytes(), analysis.result.quality_score, analysis.result.sharpness_metric, analysis.result.center_focus_metric, analysis.result.exposure_metric, analysis.result.subject_focus_metric, analysis.result.subject_composition_metric, analysis.result.subject_edge_contact_ratio, analysis.result.width, analysis.result.height],
+        );
+    }
+    let _ = transaction.commit();
 }
 
 async fn collect_profile_subject_factors(
@@ -479,9 +565,38 @@ pub async fn plan_auto_cull(
         .hash_size(16, 16)
         .to_hasher();
 
-    let completed = AtomicUsize::new(0);
+    let catalog_cache = catalog_image_ids
+        .as_ref()
+        .and_then(|image_ids| {
+            crate::library_db::active_library_path(&state)
+                .ok()
+                .map(|path| (path, image_ids))
+        })
+        .map(|(path, image_ids)| load_catalog_cull_cache(&path, image_ids))
+        .unwrap_or_default();
+    let mut successful: Vec<(AutoCullCandidate, ImageAnalysisData)> = Vec::new();
+    let mut candidates_to_analyze = Vec::new();
+    for candidate in candidates {
+        if let Some(cached) = catalog_cache.get(&candidate.representative_path) {
+            successful.push((candidate, cached.clone()));
+        } else {
+            candidates_to_analyze.push(candidate);
+        }
+    }
+    if !successful.is_empty() {
+        let _ = app_handle.emit(
+            "auto-cull-plan-progress",
+            AutoCullProgress {
+                current: successful.len(),
+                total: progress_total,
+                stage: format!("Reused cached analysis for {} images...", successful.len()),
+            },
+        );
+    }
+
+    let completed = AtomicUsize::new(successful.len());
     let analysis_results: Vec<Result<(AutoCullCandidate, ImageAnalysisData), (String, String)>> =
-        candidates
+        candidates_to_analyze
             .into_par_iter()
             .map(|candidate| {
                 let n = completed.fetch_add(1, Ordering::Relaxed) + 1;
@@ -507,7 +622,6 @@ pub async fn plan_auto_cull(
             })
             .collect();
 
-    let mut successful: Vec<(AutoCullCandidate, ImageAnalysisData)> = Vec::new();
     let mut failed_paths = Vec::new();
     for res in analysis_results {
         match res {
@@ -517,6 +631,13 @@ pub async fn plan_auto_cull(
                 failed_paths.push(path);
             }
         }
+    }
+
+    if let (Some(image_ids), Ok(db_path)) = (
+        catalog_image_ids.as_ref(),
+        crate::library_db::active_library_path(&state),
+    ) {
+        store_catalog_cull_cache(&db_path, image_ids, &successful);
     }
 
     let subject_paths = successful
@@ -996,6 +1117,85 @@ pub async fn undo_auto_cull(result: AutoCullResult, app_handle: AppHandle) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{DynamicImage, Rgb, RgbImage};
+
+    #[test]
+    fn catalog_cull_cache_reuses_matching_revision_and_invalidates_changed_images() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("catalog.db");
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE images(id INTEGER PRIMARY KEY, modified_at INTEGER NOT NULL);
+                CREATE TABLE cull_analysis_cache(
+                    image_id INTEGER NOT NULL,
+                    feature_set_version TEXT NOT NULL,
+                    image_modified_at INTEGER NOT NULL,
+                    perceptual_hash BLOB NOT NULL,
+                    quality_score REAL NOT NULL,
+                    sharpness_metric REAL NOT NULL,
+                    center_focus_metric REAL NOT NULL,
+                    exposure_metric REAL NOT NULL,
+                    subject_focus_metric REAL,
+                    subject_composition_metric REAL,
+                    subject_edge_contact_ratio REAL,
+                    width INTEGER NOT NULL,
+                    height INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY(image_id, feature_set_version, image_modified_at)
+                );
+                INSERT INTO images(id, modified_at) VALUES(7, 100);
+                ",
+            )
+            .unwrap();
+        drop(connection);
+
+        let path = "/photos/example.ARW".to_string();
+        let image_ids = HashMap::from([(path.clone(), 7)]);
+        let candidate = AutoCullCandidate {
+            representative_path: path.clone(),
+            backing_paths: vec![path.clone()],
+        };
+        let image = DynamicImage::ImageRgb8(RgbImage::from_pixel(4, 4, Rgb([24, 48, 72])));
+        let hash = HasherConfig::new()
+            .hash_alg(HashAlg::DoubleGradient)
+            .hash_size(16, 16)
+            .to_hasher()
+            .hash_image(&image);
+        let analysis = ImageAnalysisData {
+            hash,
+            result: ImageAnalysisResult {
+                path: path.clone(),
+                quality_score: 0.8,
+                sharpness_metric: 12.0,
+                center_focus_metric: 9.0,
+                subject_focus_metric: Some(10.0),
+                subject_composition_metric: Some(0.7),
+                subject_edge_contact_ratio: Some(0.1),
+                exposure_metric: 0.9,
+                width: 4,
+                height: 4,
+            },
+        };
+
+        store_catalog_cull_cache(
+            &database_path,
+            &image_ids,
+            &[(candidate, analysis)],
+        );
+        let cached = load_catalog_cull_cache(&database_path, &image_ids);
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[&path].result.quality_score, 0.8);
+        assert_eq!(cached[&path].result.subject_composition_metric, Some(0.7));
+
+        let connection = Connection::open(&database_path).unwrap();
+        connection
+            .execute("UPDATE images SET modified_at = 101 WHERE id = 7", [])
+            .unwrap();
+        drop(connection);
+        assert!(load_catalog_cull_cache(&database_path, &image_ids).is_empty());
+    }
 
     #[test]
     fn auto_cull_plan_item_overrides_persist_in_struct() {
