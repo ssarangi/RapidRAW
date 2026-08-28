@@ -1240,6 +1240,22 @@ mod tests {
     }
 
     #[test]
+    fn job_control_reads_existing_progress_without_resetting_it() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrate(&connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO background_jobs(id, kind, state, payload_json, current, total, current_item, message, created_at, updated_at) VALUES('job-1', 'cull_analysis', 'running', '{}', 17, 42, '/photos/frame-17.arw', 'Analyzing images', 0, 0)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            read_job_progress(&connection, "job-1").unwrap(),
+            (17, 42, Some("/photos/frame-17.arw".to_string()))
+        );
+    }
+
+    #[test]
     fn cull_sessions_persist_catalog_decisions_and_final_state() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("catalog.db");
@@ -2845,6 +2861,18 @@ fn read_background_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<BackgroundJo
     })
 }
 
+fn read_job_progress(
+    conn: &Connection,
+    job_id: &str,
+) -> Result<(i64, i64, Option<String>), String> {
+    conn.query_row(
+        "SELECT current, total, current_item FROM background_jobs WHERE id = ?1",
+        [job_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub fn list_background_jobs(
     state: tauri::State<'_, crate::AppState>,
@@ -2896,6 +2924,7 @@ pub fn cancel_background_job(
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|error| error.to_string())?;
+    let (current, total, current_item) = read_job_progress(&conn, &job_id)?;
     if !matches!(
         job_state.as_str(),
         "queued" | "running" | "paused" | "cancelling"
@@ -2933,9 +2962,9 @@ pub fn cancel_background_job(
         &job_id,
         "cancelling",
         "Cancellation requested",
-        0,
-        0,
-        None,
+        current,
+        total,
+        current_item.as_deref(),
         None,
     )
 }
@@ -2946,13 +2975,15 @@ pub fn pause_background_job(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<(), String> {
     let db_path = active_library_path(&state)?;
-    let (kind, job_state): (String, String) = open_connection(&db_path)?
+    let conn = open_connection(&db_path)?;
+    let (kind, job_state): (String, String) = conn
         .query_row(
             "SELECT kind, state FROM background_jobs WHERE id = ?1",
             [&job_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|error| error.to_string())?;
+    let (current, total, current_item) = read_job_progress(&conn, &job_id)?;
     if !can_pause_job(&job_state) {
         return Err("This job is no longer pausable".to_string());
     }
@@ -2981,9 +3012,9 @@ pub fn pause_background_job(
             &job_id,
             "paused",
             "Indexing paused",
-            0,
-            0,
-            None,
+            current,
+            total,
+            current_item.as_deref(),
             None,
         );
     }
@@ -3003,9 +3034,9 @@ pub fn pause_background_job(
         &job_id,
         "paused",
         "Pause requested",
-        0,
-        0,
-        None,
+        current,
+        total,
+        current_item.as_deref(),
         None,
     )
 }
@@ -3016,13 +3047,15 @@ pub fn resume_background_job(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<(), String> {
     let db_path = active_library_path(&state)?;
-    let (kind, job_state): (String, String) = open_connection(&db_path)?
+    let conn = open_connection(&db_path)?;
+    let (kind, job_state): (String, String) = conn
         .query_row(
             "SELECT kind, state FROM background_jobs WHERE id = ?1",
             [&job_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|error| error.to_string())?;
+    let (current, total, current_item) = read_job_progress(&conn, &job_id)?;
     if !can_resume_job(&job_state) {
         return Err("This job is not paused".to_string());
     }
@@ -3051,9 +3084,9 @@ pub fn resume_background_job(
             &job_id,
             "running",
             "Resuming catalog scan",
-            0,
-            0,
-            None,
+            current,
+            total,
+            current_item.as_deref(),
             None,
         );
     }
@@ -3073,9 +3106,9 @@ pub fn resume_background_job(
         &job_id,
         "running",
         "Resume requested",
-        0,
-        0,
-        None,
+        current,
+        total,
+        current_item.as_deref(),
         None,
     )
 }
