@@ -9,7 +9,7 @@ use tauri::{Emitter, Manager};
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RestorationRecipe {
-    pub operation_kind: String, // "raw_denoise", "rgb_denoise", "deblur", "upscale"
+    pub operation_kind: String, // "raw_denoise" or "rgb_denoise"
     pub model_id: String,
     pub model_revision: String,
     pub denoise_strength: f32,
@@ -39,7 +39,7 @@ impl Default for RestorationRecipe {
 pub fn validate_restoration_recipe(recipe: &RestorationRecipe) -> Result<(), String> {
     if !matches!(
         recipe.operation_kind.as_str(),
-        "raw_denoise" | "rgb_denoise" | "deblur" | "upscale"
+        "raw_denoise" | "rgb_denoise"
     ) {
         return Err(format!(
             "Unsupported restoration operation: {}",
@@ -65,7 +65,8 @@ pub fn validate_restoration_recipe(recipe: &RestorationRecipe) -> Result<(), Str
         "rgb_denoise" if recipe.model_id != "nafnet-sidd-rgb" => {
             Err("RGB denoise requires the NAFNet SIDD model".to_string())
         }
-        _ => Ok(()),
+        "raw_denoise" | "rgb_denoise" => Ok(()),
+        _ => unreachable!("operation kinds are checked above"),
     }
 }
 
@@ -1079,6 +1080,9 @@ mod tests {
         assert!(validate_restoration_recipe(&recipe).is_err());
         recipe.model_id = "rawnind-utnet2-bayer".to_string();
         recipe.tile_overlap = recipe.tile_size;
+        assert!(validate_restoration_recipe(&recipe).is_err());
+        recipe.tile_overlap = 64;
+        recipe.operation_kind = "upscale".to_string();
         assert!(validate_restoration_recipe(&recipe).is_err());
     }
 }

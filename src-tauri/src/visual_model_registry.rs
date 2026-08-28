@@ -128,19 +128,6 @@ pub fn visual_model_packs() -> Vec<VisualModelPack> {
             license_url: "https://github.com/megvii-research/NAFNet".to_string(),
             model_source_url: "https://github.com/darktable-org/darktable-ai/blob/master/models/denoise-nafnet/README.md".to_string(),
         },
-        VisualModelPack {
-            id: "realplksr-2x".to_string(),
-            display_name: "RealPLKSR 2x Upscale".to_string(),
-            description: "Conservative super-resolution and structural enlargement using pre-GAN MSSIM weights.".to_string(),
-            task: "Image enlargement".to_string(),
-            availability: VisualModelAvailability::BundleRequired,
-            artifacts: vec![
-                VisualModelArtifact { file_name: "realplksr_2x.onnx".to_string(), source_url: String::new() },
-            ],
-            license_name: "Apache-2.0".to_string(),
-            license_url: "https://github.com/dslisleedh/PLKSR".to_string(),
-            model_source_url: "https://github.com/darktable-org/darktable-ai/blob/master/models/upscale-realplksr/README.md".to_string(),
-        },
     ]
 }
 
@@ -505,5 +492,22 @@ mod tests {
                     .all(|artifact| !artifact.file_name.is_empty())
             );
         }
+    }
+
+    #[test]
+    fn registry_only_advertises_visual_packs_with_an_active_runtime_adapter() {
+        let ids = visual_model_packs()
+            .into_iter()
+            .map(|pack| pack.id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids,
+            vec![
+                "ram-plus-onnx".to_string(),
+                "bioclip-v1".to_string(),
+                "rawnind-utnet2-bayer".to_string(),
+                "nafnet-sidd-rgb".to_string(),
+            ]
+        );
     }
 }
