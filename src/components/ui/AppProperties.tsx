@@ -621,6 +621,7 @@ export interface CullingSettings {
   blurThreshold: number;
   groupSimilar: boolean;
   filterBlurry: boolean;
+  useSubjectDetection: boolean;
 }
 
 export interface ImageAnalysisResult {
@@ -644,12 +645,20 @@ export interface CullingSuggestions {
   failedPaths: string[];
 }
 
+export interface CullDecisionFactor {
+  id: string;
+  label: string;
+  detail: string;
+  impact: 'reject' | 'supporting' | 'context';
+}
+
 export interface AutoCullPlanItem {
   representativePath: string;
   backingPaths: string[];
   keep: boolean;
   reason: string;
   qualityScore: number;
+  decisionFactors: CullDecisionFactor[];
   hasConflict: boolean;
 }
 

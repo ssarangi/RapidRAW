@@ -29,6 +29,7 @@ export default function AutoCullModal() {
   const [settings, setSettings] = useState<CullingSettings>(DEFAULT_SETTINGS);
   const [rejectedFolderName, setRejectedFolderName] = useState('_rejected');
   const [deleteInsteadOfMove, setDeleteInsteadOfMove] = useState(false);
+  const [feedbackItemPath, setFeedbackItemPath] = useState<string | null>(null);
 
   const close = useCallback(() => {
     setUI({
@@ -121,6 +122,25 @@ export default function AutoCullModal() {
     if (plan.sessionId) {
       try { await invoke(Invokes.UpdateCullSessionDecision, { sessionId: plan.sessionId, representativePath, keep }); }
       catch (err) { setUI((s) => ({ autoCullModalState: { ...s.autoCullModalState, plan, error: String(err) } })); }
+    }
+    if (item.keep === false && keep) setFeedbackItemPath(representativePath);
+  };
+
+  const recordFeedback = async (representativePath: string, feedbackReason: string) => {
+    if (!plan?.sessionId) return;
+    const item = plan.items.find((candidate) => candidate.representativePath === representativePath);
+    if (!item) return;
+    try {
+      await invoke(Invokes.UpdateCullSessionDecision, {
+        sessionId: plan.sessionId,
+        representativePath,
+        keep: item.keep,
+        feedbackReason,
+      });
+    } catch (err) {
+      setUI((s) => ({ autoCullModalState: { ...s.autoCullModalState, error: String(err) } }));
+    } finally {
+      setFeedbackItemPath(null);
     }
   };
 
@@ -311,12 +331,13 @@ export default function AutoCullModal() {
             plan.items.map((item) => (
               <div
                 key={item.representativePath}
-                className="flex items-center justify-between px-2 py-1.5 border-b border-surface last:border-0"
+                className="px-2 py-2 border-b border-surface last:border-0"
               >
-                <Text variant={TextVariants.small} className="truncate max-w-[60%]" data-tooltip={item.representativePath}>
-                  {item.representativePath.split(/[\\/]/).pop()}
-                </Text>
-                <div className="flex items-center gap-2">
+                <div className="flex items-center justify-between gap-2">
+                  <Text variant={TextVariants.small} className="truncate max-w-[60%]" data-tooltip={item.representativePath}>
+                    {item.representativePath.split(/[\\/]/).pop()}
+                  </Text>
+                  <div className="flex items-center gap-2">
                   <button className={item.keep ? 'text-green-300 text-xs hover:text-green-200' : 'text-red-300 text-xs hover:text-red-200'} onClick={() => void togglePlanItem(item.representativePath)} data-tooltip={item.keep ? 'Mark as reject' : 'Keep this image'}>{item.keep ? 'Keep' : 'Reject'}</button>
                   {item.hasConflict && (
                     <Text variant={TextVariants.small} className="text-yellow-500">
@@ -328,7 +349,18 @@ export default function AutoCullModal() {
                       ? t('modals.autoCull.reasonDuplicate')
                       : t('modals.autoCull.reasonBlurry')}
                   </Text>
+                  </div>
                 </div>
+                {item.decisionFactors.length > 0 && <details className="mt-1 text-xs text-text-secondary">
+                  <summary className="cursor-pointer hover:text-text-primary">Why this decision</summary>
+                  <div className="mt-1 space-y-1 pl-2 border-l border-border-color">
+                    {item.decisionFactors.map((factor) => <div key={factor.id}><span className={factor.impact === 'reject' ? 'text-red-300' : ''}>{factor.label}:</span> {factor.detail}</div>)}
+                  </div>
+                </details>}
+                {feedbackItemPath === item.representativePath && <div className="mt-2 flex flex-wrap gap-1.5">
+                  {['Better moment', 'Expression or eyes', 'Pose', 'Composition', 'Subject detail', 'Technical quality', 'Sentimental value'].map((reason) => <button key={reason} className="text-xs px-2 py-1 border border-border-color rounded text-text-secondary hover:text-text-primary hover:bg-surface" onClick={() => void recordFeedback(item.representativePath, reason)}>{reason}</button>)}
+                  <button className="text-xs px-2 py-1 text-text-secondary" onClick={() => setFeedbackItemPath(null)}>Skip</button>
+                </div>}
               </div>
             ))
           )}

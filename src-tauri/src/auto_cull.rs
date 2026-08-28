@@ -22,12 +22,22 @@ struct AutoCullProgress {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct CullDecisionFactor {
+    pub id: String,
+    pub label: String,
+    pub detail: String,
+    pub impact: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct AutoCullPlanItem {
     pub representative_path: String,
     pub backing_paths: Vec<String>,
     pub keep: bool,
     pub reason: String,
     pub quality_score: f64,
+    pub decision_factors: Vec<CullDecisionFactor>,
     /// True if a file with the same name already exists in the destination
     /// folder (e.g. left over from a previous auto-cull run on this same
     /// folder). Computed at plan time so the preview/apply flow can ask how
@@ -151,6 +161,20 @@ pub async fn plan_auto_cull(
         }
     }
 
+    let personalization = crate::library_db::active_library_path(&state)
+        .ok()
+        .and_then(|db_path| crate::library_db::load_cull_personalization_model(&db_path).ok().flatten());
+    let mut personalization_adjustments: HashMap<String, f64> = HashMap::new();
+    if let Some(model) = personalization.as_ref().filter(|model| model.is_ready()) {
+        for (_, analysis) in &mut successful {
+            let baseline = analysis.result.quality_score;
+            let learned = model.score(baseline);
+            let adjusted = baseline * 0.8 + learned * 0.2;
+            personalization_adjustments.insert(analysis.result.path.clone(), adjusted - baseline);
+            analysis.result.quality_score = adjusted;
+        }
+    }
+
     let _ = app_handle.emit(
         "auto-cull-plan-progress",
         AutoCullProgress {
@@ -176,15 +200,24 @@ pub async fn plan_auto_cull(
         .iter()
         .map(|(_, a)| (a.result.path.clone(), a.result.quality_score))
         .collect();
+    let analysis_by_path: HashMap<String, crate::culling::ImageAnalysisResult> = successful
+        .iter()
+        .map(|(_, analysis)| (analysis.result.path.clone(), analysis.result.clone()))
+        .collect();
     let analyses: Vec<ImageAnalysisData> = successful.into_iter().map(|(_, data)| data).collect();
 
     let suggestions = build_culling_suggestions(analyses, failed_paths.clone(), &settings);
 
     let mut reject_reasons: HashMap<String, String> = HashMap::new();
     let mut representative_paths: HashSet<String> = HashSet::new();
+    let mut duplicate_references: HashMap<String, (String, f64)> = HashMap::new();
     for group in &suggestions.similar_groups {
         representative_paths.insert(group.representative.path.clone());
         for dup in &group.duplicates {
+            duplicate_references.insert(
+                dup.path.clone(),
+                (group.representative.path.clone(), group.representative.quality_score),
+            );
             reject_reasons.insert(
                 dup.path.clone(),
                 format!("duplicate_of:{}", group.representative.path),
@@ -213,6 +246,49 @@ pub async fn plan_auto_cull(
                 }
                 None => (true, "unique".to_string()),
             };
+            let analysis = analysis_by_path.get(&candidate.representative_path);
+            let mut decision_factors = Vec::new();
+            if let Some((representative, representative_score)) = duplicate_references.get(&candidate.representative_path) {
+                decision_factors.push(CullDecisionFactor {
+                    id: "duplicate".to_string(),
+                    label: "Near duplicate".to_string(),
+                    detail: format!(
+                        "Lower quality score ({quality_score:.2}) than {} ({representative_score:.2})",
+                        Path::new(representative).file_name().and_then(|name| name.to_str()).unwrap_or(representative),
+                    ),
+                    impact: "reject".to_string(),
+                });
+            }
+            if reason == "blurry" {
+                let sharpness = analysis.map(|item| item.sharpness_metric).unwrap_or_default();
+                decision_factors.push(CullDecisionFactor {
+                    id: "sharpness".to_string(),
+                    label: "Low sharpness".to_string(),
+                    detail: format!("Laplacian sharpness {sharpness:.1}; rejection threshold {:.1}", base_plan.settings.blur_threshold),
+                    impact: "reject".to_string(),
+                });
+            }
+            if let Some(analysis) = analysis {
+                decision_factors.push(CullDecisionFactor {
+                    id: "technical_quality".to_string(),
+                    label: "Technical quality score".to_string(),
+                    detail: format!(
+                        "Score {quality_score:.2}: sharpness {:.1}, focus {:.1}, exposure {:.2}",
+                        analysis.sharpness_metric,
+                        analysis.subject_focus_metric.unwrap_or(analysis.center_focus_metric),
+                        analysis.exposure_metric,
+                    ),
+                    impact: if keep { "context".to_string() } else { "supporting".to_string() },
+                });
+            }
+            if let Some(adjustment) = personalization_adjustments.get(&candidate.representative_path) {
+                decision_factors.push(CullDecisionFactor {
+                    id: "personalization".to_string(),
+                    label: "Personalized ranking adjustment".to_string(),
+                    detail: format!("Local preference model adjusted this image by {adjustment:+.2}"),
+                    impact: "context".to_string(),
+                });
+            }
 
             // Only relevant for the move path - deleted files go to the
             // system trash, not a folder, so they can't collide with
@@ -232,6 +308,7 @@ pub async fn plan_auto_cull(
                 keep,
                 reason,
                 quality_score,
+                decision_factors,
                 has_conflict,
             }
         })
@@ -247,7 +324,13 @@ pub async fn plan_auto_cull(
         .and_then(|db_path| {
             let decisions = items
                 .iter()
-                .map(|item| (item.representative_path.clone(), item.keep, item.reason.clone(), item.quality_score))
+                .map(|item| (
+                    item.representative_path.clone(),
+                    item.keep,
+                    item.reason.clone(),
+                    item.quality_score,
+                    serde_json::to_string(&item.decision_factors).unwrap_or_else(|_| "[]".to_string()),
+                ))
                 .collect::<Vec<_>>();
             crate::library_db::record_cull_session(
                 &db_path,
@@ -473,6 +556,7 @@ mod tests {
             keep: false,
             reason: "Blurry background".to_string(),
             quality_score: 0.35,
+            decision_factors: Vec::new(),
             has_conflict: false,
         };
 

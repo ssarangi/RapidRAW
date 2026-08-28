@@ -798,6 +798,15 @@ Training signals include:
 
 Pairwise ranking is preferable to predicting an absolute universal score. The question is usually `which of these near-duplicates does this photographer prefer?`
 
+Use a staged model roadmap:
+
+1. Collect explicit overrides and optional one-click reasons from the first cull onward, but do not personalize recommendations yet.
+2. After at least 200 meaningful cross-group preference pairs, activate a regularized local linear ranker as the conservative, explainable fallback.
+3. After several thousand diverse pairs and a held-out improvement over the linear ranker, train a small per-user DNN ranking head over frozen visual embeddings plus technical, face, subject, composition, and metadata features. Keep its output as a bounded adjustment to the transparent baseline rather than a deletion authority.
+4. Use a contextual-bandit policy only to select the most informative uncertain comparisons to ask the user. It must never autonomously decide which source images to remove.
+
+Every proposed keep or reject stores measured values, comparative evidence, model versions, the personalized adjustment, and the final user decision. The review UI must distinguish direct measurements from model inferences and personalized preferences.
+
 Keep separate genre profiles and a global fallback. Show sample count and confidence. Provide reset, export, and disable controls. A correction updates the lightweight preference model without re-running image feature extraction.
 
 ## Search and Smart Collections

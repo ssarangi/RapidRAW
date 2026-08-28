@@ -190,9 +190,6 @@ fn insightface_pack(
         model_source_url: "https://github.com/deepinsight/insightface".to_string(),
     }
 }
-        model_source_url: source_url.to_string(),
-    }
-}
 
 #[tauri::command]
 pub fn list_face_model_packs() -> Vec<FaceModelPack> {

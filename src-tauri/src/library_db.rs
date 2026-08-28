@@ -16,7 +16,7 @@ use crate::file_management::{ImageFile, parse_virtual_path};
 use crate::file_management::{assign_group_ids, read_file_mapped};
 use crate::formats::{is_raw_file, is_supported_image_file};
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -122,6 +122,26 @@ pub struct CullSessionSummary {
     pub rejected_count: i64,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+pub(crate) const PERSONALIZATION_MIN_EXAMPLES: i64 = 200;
+
+#[derive(Debug, Clone)]
+pub(crate) struct CullPersonalizationModel {
+    pub sample_count: i64,
+    bias: f64,
+    quality_weight: f64,
+}
+
+impl CullPersonalizationModel {
+    pub(crate) fn is_ready(&self) -> bool {
+        self.sample_count >= PERSONALIZATION_MIN_EXAMPLES
+    }
+
+    pub(crate) fn score(&self, quality_score: f64) -> f64 {
+        let logit = self.bias + self.quality_weight * quality_score.clamp(0.0, 1.0);
+        1.0 / (1.0 + (-logit).exp())
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -762,6 +782,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           final_status TEXT NOT NULL DEFAULT 'pending' CHECK(final_status IN ('pending', 'keep', 'reject', 'skipped')),
           quality_score REAL NOT NULL,
           reason TEXT NOT NULL,
+          factors_json TEXT NOT NULL DEFAULT '[]',
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
           UNIQUE(session_id, representative_path)
@@ -777,6 +798,14 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           created_at INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_cull_decision_events_decision ON cull_decision_events(decision_id, created_at DESC);
+
+        CREATE TABLE IF NOT EXISTS cull_preference_feedback (
+          id INTEGER PRIMARY KEY,
+          decision_id INTEGER NOT NULL REFERENCES cull_decisions(id) ON DELETE CASCADE,
+          feedback_reason TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_cull_preference_feedback_decision ON cull_preference_feedback(decision_id, created_at DESC);
 
         CREATE TABLE IF NOT EXISTS image_ai_analysis_state (
           image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
@@ -834,6 +863,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     let _ = conn.execute("ALTER TABLE faces ADD COLUMN thumbnail_jpeg BLOB", []);
+    let _ = conn.execute("ALTER TABLE cull_decisions ADD COLUMN factors_json TEXT NOT NULL DEFAULT '[]'", []);
 
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(?1, ?2)",
@@ -995,8 +1025,8 @@ mod tests {
             "/photos",
             "{}",
             &[
-                ("/photos/photo.jpg".to_string(), true, "unique".to_string(), 0.8),
-                ("/photos/missing.jpg".to_string(), false, "blurry".to_string(), 0.2),
+                ("/photos/photo.jpg".to_string(), true, "unique".to_string(), 0.8, "[]".to_string()),
+                ("/photos/missing.jpg".to_string(), false, "blurry".to_string(), 0.2, "[]".to_string()),
             ],
         )
         .unwrap()
@@ -1021,6 +1051,40 @@ mod tests {
         assert_eq!(state, "applied");
         assert_eq!(decisions, 2);
         assert_eq!(rejected, 1);
+    }
+
+    #[test]
+    fn cull_personalization_waits_for_feedback_then_learns_a_quality_ranking() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("catalog.db");
+        let connection = Connection::open(&path).unwrap();
+        migrate(&connection).unwrap();
+        assert!(load_cull_personalization_model(&path).unwrap().is_none());
+
+        connection.execute(
+            "INSERT INTO cull_sessions(scope_path, state, settings_json, feature_set_version, total_count, rejected_count, created_at, updated_at) VALUES('/photos', 'planned', '{}', 'test', 2, 1, 0, 0)",
+            [],
+        ).unwrap();
+        let session_id = connection.last_insert_rowid();
+        connection.execute(
+            "INSERT INTO cull_decisions(session_id, representative_path, proposed_status, quality_score, reason, factors_json, created_at, updated_at) VALUES(?1, 'keep.jpg', 'reject', 0.9, 'test', '[]', 0, 0)",
+            [session_id],
+        ).unwrap();
+        let keep_id = connection.last_insert_rowid();
+        connection.execute(
+            "INSERT INTO cull_decisions(session_id, representative_path, proposed_status, quality_score, reason, factors_json, created_at, updated_at) VALUES(?1, 'reject.jpg', 'keep', 0.1, 'test', '[]', 0, 0)",
+            [session_id],
+        ).unwrap();
+        let reject_id = connection.last_insert_rowid();
+        for _ in 0..100 {
+            connection.execute("INSERT INTO cull_decision_events(decision_id, previous_status, next_status, source, created_at) VALUES(?1, 'reject', 'keep', 'user', 0)", [keep_id]).unwrap();
+            connection.execute("INSERT INTO cull_decision_events(decision_id, previous_status, next_status, source, created_at) VALUES(?1, 'keep', 'reject', 'user', 0)", [reject_id]).unwrap();
+        }
+        drop(connection);
+
+        let model = load_cull_personalization_model(&path).unwrap().unwrap();
+        assert!(model.is_ready());
+        assert!(model.score(0.9) > model.score(0.1));
     }
 
     #[test]
@@ -2971,7 +3035,7 @@ pub(crate) fn record_cull_session(
     db_path: &Path,
     scope_path: &str,
     settings_json: &str,
-    decisions: &[(String, bool, String, f64)],
+    decisions: &[(String, bool, String, f64, String)],
 ) -> Result<Option<i64>, String> {
     let mut connection = open_connection(db_path)?;
     let roots = {
@@ -2991,8 +3055,8 @@ pub(crate) fn record_cull_session(
     let transaction = connection.transaction().map_err(|error| error.to_string())?;
     transaction
         .execute(
-            "INSERT INTO cull_sessions(root_id, scope_path, state, settings_json, feature_set_version, total_count, rejected_count, created_at, updated_at) VALUES(?1, ?2, 'planned', ?3, 'culling-v1', ?4, ?5, strftime('%s','now'), strftime('%s','now'))",
-            params![root_id, scope_path, settings_json, decisions.len() as i64, decisions.iter().filter(|(_, keep, _, _)| !*keep).count() as i64],
+            "INSERT INTO cull_sessions(root_id, scope_path, state, settings_json, feature_set_version, total_count, rejected_count, created_at, updated_at) VALUES(?1, ?2, 'planned', ?3, 'culling-v2-explainable', ?4, ?5, strftime('%s','now'), strftime('%s','now'))",
+            params![root_id, scope_path, settings_json, decisions.len() as i64, decisions.iter().filter(|(_, keep, _, _, _)| !*keep).count() as i64],
         )
         .map_err(|error| error.to_string())?;
     let session_id = transaction.last_insert_rowid();
@@ -3007,16 +3071,63 @@ pub(crate) fn record_cull_session(
             .map(|(id, relative_path)| (Path::new(&root_path).join(relative_path).to_string_lossy().into_owned(), id))
             .collect::<HashMap<_, _>>()
     };
-    for (path, keep, reason, quality_score) in decisions {
+    for (path, keep, reason, quality_score, factors_json) in decisions {
         transaction
             .execute(
-                "INSERT INTO cull_decisions(session_id, image_id, representative_path, proposed_status, quality_score, reason, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, strftime('%s','now'), strftime('%s','now'))",
-                params![session_id, image_ids.get(path), path, if *keep { "keep" } else { "reject" }, quality_score, reason],
+                "INSERT INTO cull_decisions(session_id, image_id, representative_path, proposed_status, quality_score, reason, factors_json, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, strftime('%s','now'), strftime('%s','now'))",
+                params![session_id, image_ids.get(path), path, if *keep { "keep" } else { "reject" }, quality_score, reason, factors_json],
             )
             .map_err(|error| error.to_string())?;
     }
     transaction.commit().map_err(|error| error.to_string())?;
     Ok(Some(session_id))
+}
+
+/// Fits a small local logistic ranker from explicit culling overrides. It is
+/// intentionally limited to re-ranking similar groups; rules such as blur or
+/// duplicate detection remain reviewable proposals rather than learned deletes.
+pub(crate) fn load_cull_personalization_model(
+    db_path: &Path,
+) -> Result<Option<CullPersonalizationModel>, String> {
+    let connection = open_connection(db_path)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT d.quality_score, e.next_status
+             FROM cull_decision_events e
+             JOIN cull_decisions d ON d.id = e.decision_id
+             WHERE e.source = 'user'
+             ORDER BY e.id DESC
+             LIMIT 5000",
+        )
+        .map_err(|error| error.to_string())?;
+    let examples = statement
+        .query_map([], |row| Ok((row.get::<_, f64>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    if examples.len() < PERSONALIZATION_MIN_EXAMPLES as usize {
+        return Ok(None);
+    }
+
+    let mut bias = 0.0;
+    let mut quality_weight = 1.0;
+    let learning_rate = 0.08;
+    for _ in 0..80 {
+        for (quality_score, status) in &examples {
+            let x = quality_score.clamp(0.0, 1.0);
+            let target = if status == "keep" { 1.0 } else { 0.0 };
+            let prediction = 1.0 / (1.0 + (-(bias + quality_weight * x)).exp());
+            let error = target - prediction;
+            bias += learning_rate * error;
+            quality_weight += learning_rate * (error * x - 0.01 * quality_weight);
+        }
+    }
+
+    Ok(Some(CullPersonalizationModel {
+        sample_count: examples.len() as i64,
+        bias,
+        quality_weight,
+    }))
 }
 
 pub(crate) fn mark_cull_session_applied(db_path: &Path, session_id: i64) -> Result<(), String> {
@@ -3072,6 +3183,7 @@ pub fn update_cull_session_decision(
     session_id: i64,
     representative_path: String,
     keep: bool,
+    feedback_reason: Option<String>,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<(), String> {
     let mut connection = open_connection(&active_library_path(&state)?)?;
@@ -3086,6 +3198,12 @@ pub fn update_cull_session_decision(
     if previous_status != next_status {
         transaction.execute("INSERT INTO cull_decision_events(decision_id, previous_status, next_status, created_at) VALUES(?1, ?2, ?3, strftime('%s','now'))", params![decision_id, previous_status, next_status]).map_err(|error| error.to_string())?;
         transaction.execute("UPDATE cull_decisions SET proposed_status = ?1, updated_at = strftime('%s','now') WHERE id = ?2", params![next_status, decision_id]).map_err(|error| error.to_string())?;
+    }
+    if let Some(reason) = feedback_reason.as_deref().map(str::trim).filter(|reason| !reason.is_empty()) {
+        transaction.execute(
+            "INSERT INTO cull_preference_feedback(decision_id, feedback_reason, created_at) VALUES(?1, ?2, strftime('%s','now'))",
+            params![decision_id, reason],
+        ).map_err(|error| error.to_string())?;
     }
     transaction.execute(
         "UPDATE cull_sessions SET rejected_count = (SELECT COUNT(*) FROM cull_decisions WHERE session_id = ?1 AND proposed_status = 'reject'), updated_at = strftime('%s','now') WHERE id = ?1",
@@ -3926,6 +4044,3 @@ pub fn review_species(
 
     Ok(())
 }
-
-
-
