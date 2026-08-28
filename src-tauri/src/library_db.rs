@@ -1012,6 +1012,15 @@ mod tests {
         .unwrap();
         assert_eq!(root.label.as_deref(), Some("Photos"));
         assert!(root.is_available);
+
+        remove_library_root_headless(&db_path, root.id).unwrap();
+        let connection = Connection::open(&db_path).unwrap();
+        let roots: i64 = connection
+            .query_row("SELECT COUNT(*) FROM collection_roots", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(roots, 0);
     }
 
     #[test]
@@ -1634,6 +1643,19 @@ pub fn add_library_root_headless(
         )
         .map_err(|error| error.to_string())?;
     get_root(&conn, id)
+}
+
+/// Removes a collection root and its catalog-only rows. Source photo files are
+/// never touched because they are outside the SQLite catalog's ownership.
+pub fn remove_library_root_headless(db_path: &Path, root_id: i64) -> Result<(), String> {
+    let conn = open_connection(db_path)?;
+    let changed = conn
+        .execute("DELETE FROM collection_roots WHERE id = ?1", [root_id])
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("Collection root was not found".to_string());
+    }
+    Ok(())
 }
 
 fn get_root(conn: &Connection, id: i64) -> Result<CatalogRoot, String> {
