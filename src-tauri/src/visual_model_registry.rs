@@ -75,13 +75,26 @@ pub fn visual_model_packs() -> Vec<VisualModelPack> {
         VisualModelPack {
             id: "bioclip-v1".to_string(),
             display_name: "BioCLIP".to_string(),
-            description: "Taxonomy-aware organism classification, including birds. Requires a pinned ONNX encoder and matching taxonomy embeddings.".to_string(),
+            description: "Taxonomy-aware organism classification, including birds. Uses an ONNX ViT encoder with Tree-of-Life taxonomy embeddings.".to_string(),
             task: "Wildlife and species classification".to_string(),
-            availability: VisualModelAvailability::BundleRequired,
+            availability: VisualModelAvailability::DirectDownload,
             artifacts: vec![
-                VisualModelArtifact { file_name: "vision_encoder.onnx".to_string(), source_url: String::new() },
-                VisualModelArtifact { file_name: "species_embeddings.bin".to_string(), source_url: String::new() },
-                VisualModelArtifact { file_name: "species_labels.json".to_string(), source_url: String::new() },
+                VisualModelArtifact {
+                    file_name: "vision_encoder.onnx".to_string(),
+                    source_url: "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/vision_encoder.onnx".to_string(),
+                },
+                VisualModelArtifact {
+                    file_name: "vision_encoder.onnx.data".to_string(),
+                    source_url: "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/vision_encoder.onnx.data".to_string(),
+                },
+                VisualModelArtifact {
+                    file_name: "species_embeddings.bin".to_string(),
+                    source_url: "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/species_embeddings.bin".to_string(),
+                },
+                VisualModelArtifact {
+                    file_name: "species_labels.json".to_string(),
+                    source_url: "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/species_labels.json".to_string(),
+                },
             ],
             license_name: "MIT".to_string(),
             license_url: "https://huggingface.co/imageomics/bioclip".to_string(),
