@@ -164,8 +164,8 @@ export default function FaceModelsSettings({ onOpenExternal }: FaceModelsSetting
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2 mb-1">
                       <Text variant={TextVariants.heading}>{status.pack.displayName}</Text>
-                      <span className={status.installed ? 'text-green-400 text-xs' : isDirect ? 'text-accent text-xs' : 'text-text-secondary text-xs'}>
-                        {status.installed ? 'Installed' : availabilityLabel(status)}
+                      <span className={status.installed ? 'text-green-400 text-xs' : 'text-accent text-xs'}>
+                        {status.installed ? 'Installed' : 'Ready to download'}
                       </span>
                     </div>
                     <Text variant={TextVariants.small}>{status.pack.description}</Text>
@@ -203,13 +203,11 @@ export default function FaceModelsSettings({ onOpenExternal }: FaceModelsSetting
                   <div className="shrink-0 flex items-start">
                     {status.installed ? (
                       <div className="text-green-400 flex items-center gap-2 text-sm py-2"><CheckCircle2 size={18} /> Installed</div>
-                    ) : isDirect ? (
+                    ) : (
                       <Button onClick={() => void download(status)} disabled={activeDownload !== null || needsAcknowledgement} className="px-3">
                         {isDownloading ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
                         {isDownloading ? 'Downloading' : 'Download'}
                       </Button>
-                    ) : (
-                      <span className="text-text-secondary text-sm py-2">Pinned ONNX conversion required</span>
                     )}
                   </div>
                 </div>

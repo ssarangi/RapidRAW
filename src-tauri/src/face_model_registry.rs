@@ -164,38 +164,6 @@ pub fn face_model_packs() -> Vec<FaceModelPack> {
             "antelopev2.zip",
             "https://github.com/deepinsight/insightface/releases/download/v0.7/antelopev2.zip",
         ),
-        conversion_pack(
-            "retinaface-arcface",
-            "RetinaFace + ArcFace",
-            "Quality-oriented detector and recognition baseline awaiting a pinned ONNX artifact.",
-            "RetinaFace",
-            "ArcFace",
-            "https://github.com/deepinsight/insightface",
-        ),
-        conversion_pack(
-            "retinaface-adaface-ir50",
-            "RetinaFace + AdaFace IR50",
-            "Quality-adaptive recognition experiment awaiting a pinned ONNX artifact.",
-            "RetinaFace",
-            "AdaFace IR50",
-            "https://github.com/mk-minchul/AdaFace",
-        ),
-        conversion_pack(
-            "blazeface-facenet-128",
-            "BlazeFace + FaceNet 128",
-            "Mobile-oriented comparison baseline awaiting a pinned ONNX artifact.",
-            "BlazeFace",
-            "FaceNet 128",
-            "https://ai.google.dev/edge/mediapipe/solutions/vision/face_detector",
-        ),
-        conversion_pack(
-            "yunet-openface-nn4",
-            "YuNet + OpenFace nn4",
-            "Legacy comparison baseline awaiting a pinned ONNX artifact.",
-            "YuNet",
-            "OpenFace nn4.small2",
-            "https://github.com/cmusatyalab/openface",
-        ),
     ]
 }
 
@@ -222,32 +190,6 @@ fn insightface_pack(
         model_source_url: "https://github.com/deepinsight/insightface".to_string(),
     }
 }
-
-fn conversion_pack(
-    id: &str,
-    display_name: &str,
-    description: &str,
-    detector: &str,
-    recognizer: &str,
-    source_url: &str,
-) -> FaceModelPack {
-    FaceModelPack {
-        id: id.to_string(),
-        display_name: display_name.to_string(),
-        description: description.to_string(),
-        detector: detector.to_string(),
-        recognizer: recognizer.to_string(),
-        detector_landmarks: 5,
-        embedding_dimensions: None,
-        availability: ModelAvailability::ConversionRequired,
-        artifacts: vec![artifact(
-            "upstream-model",
-            ModelArtifactFormat::Checkpoint,
-            source_url,
-        )],
-        license_name: "See upstream model source".to_string(),
-        license_url: source_url.to_string(),
-        license_acknowledgement_required: true,
         model_source_url: source_url.to_string(),
     }
 }
