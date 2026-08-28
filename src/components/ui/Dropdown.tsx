@@ -102,20 +102,20 @@ const Dropdown = <T extends React.Key>({
   };
 
   return (
-    <div className={`relative ${className}`} ref={dropdownRef} onKeyDown={handleContainerKeyDown}>
+    <div className={`relative min-w-0 max-w-full ${className}`} ref={dropdownRef} onKeyDown={handleContainerKeyDown}>
       <button
         aria-expanded={isOpen}
         aria-haspopup="listbox"
         disabled={disabled}
         className={clsx(
-          'w-full border border-border-color rounded-md px-3 mr-4 py-2 flex justify-between items-center text-left disabled:opacity-50 disabled:cursor-not-allowed',
+          'w-full max-w-full border border-border-color rounded-md px-3 py-2 flex justify-between items-center gap-2 text-left disabled:opacity-50 disabled:cursor-not-allowed',
           'focus:ring-accent focus:border-accent focus:outline-hidden focus:ring-2',
           triggerClassName || 'bg-surface',
         )}
         onClick={() => setIsOpen(!isOpen)}
         type="button"
       >
-        <Text as="span" variant={TextVariants.label} color={TextColors.primary}>
+        <Text as="span" variant={TextVariants.label} color={TextColors.primary} className="min-w-0 flex-1 truncate">
           {selectedOption ? selectedOption.label : placeholder}
         </Text>
         <ChevronDown
@@ -128,7 +128,7 @@ const Dropdown = <T extends React.Key>({
         {isOpen && (
           <motion.div
             animate={{ opacity: 1, scale: 1 }}
-            className="absolute right-0 mt-2 w-full origin-top-right z-20"
+            className="absolute right-0 mt-2 w-full max-w-full origin-top-right z-20"
             exit={{ opacity: 0, scale: 0.95 }}
             initial={{ opacity: 0, scale: 0.95 }}
             transition={{ duration: 0.1, ease: 'easeOut' }}
