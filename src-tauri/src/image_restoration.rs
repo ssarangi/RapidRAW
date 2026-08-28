@@ -513,11 +513,21 @@ pub fn derivative_output_path(
 #[tauri::command]
 pub fn start_image_restoration(
     image_id: i64,
-    recipe: RestorationRecipe,
+    mut recipe: RestorationRecipe,
     app_handle: tauri::AppHandle,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<String, String> {
     validate_restoration_recipe(&recipe)?;
+    let visual_models_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("models")
+        .join("visual");
+    recipe.model_revision = crate::visual_model_registry::visual_model_pack_revision_in_dir(
+        &visual_models_dir,
+        &recipe.model_id,
+    )?;
     let db_path = crate::library_db::active_library_path(&state)?;
     let job_id = crate::library_db::create_background_job(
         &db_path,

@@ -642,6 +642,30 @@ pub fn verified_visual_model_pack_dir(
     Ok(directory)
 }
 
+/// Returns a stable model revision derived from the verified pack manifest.
+/// The revision changes whenever the set of installed artifact digests changes,
+/// but not when the application merely restarts or the manifest timestamp is
+/// refreshed.
+pub fn visual_model_pack_revision_in_dir(
+    visual_models_dir: &Path,
+    pack_id: &str,
+) -> Result<String, String> {
+    let directory = verified_visual_model_pack_dir(visual_models_dir, pack_id)?;
+    let manifest = read_installed_manifest(&directory)?
+        .ok_or_else(|| format!("Missing manifest for visual model pack: {pack_id}"))?;
+    let mut artifacts = manifest.artifacts;
+    artifacts.sort_by(|left, right| left.file_name.cmp(&right.file_name));
+    let mut hasher = Sha256::new();
+    hasher.update(pack_id.as_bytes());
+    for artifact in artifacts {
+        hasher.update([0]);
+        hasher.update(artifact.file_name.as_bytes());
+        hasher.update([0]);
+        hasher.update(artifact.sha256.as_bytes());
+    }
+    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -773,5 +797,37 @@ mod tests {
             directory.path(),
             Some(&manifest)
         ));
+    }
+
+    #[test]
+    fn revision_is_stable_for_a_verified_manifest() {
+        let pack = visual_model_packs().remove(0);
+        let models_dir = tempfile::tempdir().unwrap();
+        let directory = models_dir.path().join(&pack.id);
+        fs::create_dir(&directory).unwrap();
+        let mut artifacts = Vec::new();
+        for artifact in &pack.artifacts {
+            let path = directory.join(&artifact.file_name);
+            fs::write(&path, artifact.file_name.as_bytes()).unwrap();
+            artifacts.push(InstalledVisualModelArtifact {
+                file_name: artifact.file_name.clone(),
+                sha256: sha256_file(&path).unwrap(),
+            });
+        }
+        let manifest = InstalledVisualModelPack {
+            pack_id: pack.id.clone(),
+            installed_at: 0,
+            artifacts,
+            source_path: None,
+        };
+        fs::write(
+            manifest_path(&directory),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let first = visual_model_pack_revision_in_dir(models_dir.path(), &pack.id).unwrap();
+        let second = visual_model_pack_revision_in_dir(models_dir.path(), &pack.id).unwrap();
+        assert_eq!(first, second);
+        assert!(first.starts_with("sha256:"));
     }
 }

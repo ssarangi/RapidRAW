@@ -12,7 +12,9 @@ use rapidraw_lib::image_restoration::{
 use rapidraw_lib::resolve_auto_cull_path_candidates;
 use rapidraw_lib::scan_library_root_headless;
 use rapidraw_lib::tagging::run_catalog_ram_plus_tagging_headless;
-use rapidraw_lib::visual_model_registry::{verified_visual_model_pack_dir, visual_model_packs};
+use rapidraw_lib::visual_model_registry::{
+    verified_visual_model_pack_dir, visual_model_pack_revision_in_dir, visual_model_packs,
+};
 use rapidraw_lib::{CullingSettings, cull_images_headless};
 use rapidraw_lib::{
     add_library_root_headless, create_library_headless, open_library_headless,
@@ -1218,12 +1220,14 @@ fn run_restore_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
                 "rawnind-utnet2-bayer".to_string()
             }
         });
-    let recipe = RestorationRecipe {
+    let mut recipe = RestorationRecipe {
         operation_kind,
         model_id,
         ..RestorationRecipe::default()
     };
     validate_restoration_recipe(&recipe)?;
+    recipe.model_revision =
+        visual_model_pack_revision_in_dir(&visual_models_dir, &recipe.model_id)?;
     let job_id = rapidraw_lib::create_background_job(
         &db_path,
         &recipe.operation_kind,
