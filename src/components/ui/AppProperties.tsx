@@ -166,6 +166,8 @@ export enum Invokes {
   PauseCatalogScan = 'pause_catalog_scan',
   ResumeCatalogScan = 'resume_catalog_scan',
   CancelCatalogScan = 'cancel_catalog_scan',
+  StartCatalogThumbnailGeneration = 'start_catalog_thumbnail_generation',
+  StartCatalogMetadataExtraction = 'start_catalog_metadata_extraction',
   ListCatalogImages = 'list_catalog_images',
   SyncCatalogPaths = 'sync_catalog_paths',
   SearchCatalogImages = 'search_catalog_images',

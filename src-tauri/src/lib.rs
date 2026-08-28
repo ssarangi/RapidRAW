@@ -39,6 +39,7 @@ pub use library_db::update_job;
 pub use library_db::{
     add_library_root_headless, create_library_headless, open_library_headless,
     remove_library_root_headless, review_ai_tag_headless, review_species_headless,
+    run_catalog_metadata_extraction_headless, run_catalog_thumbnail_generation_headless,
 };
 mod inpainting;
 mod launch_request;
@@ -2451,6 +2452,8 @@ pub fn run() {
             library_db::pause_catalog_scan,
             library_db::resume_catalog_scan,
             library_db::cancel_catalog_scan,
+            library_db::start_catalog_thumbnail_generation,
+            library_db::start_catalog_metadata_extraction,
             library_db::list_catalog_images,
             library_db::sync_catalog_paths,
             library_db::search_catalog_images,

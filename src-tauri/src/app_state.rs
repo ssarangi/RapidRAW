@@ -31,13 +31,24 @@ impl BackgroundJobControl {
     pub fn new() -> Arc<Self> {
         let (cancel_tx, _) = watch::channel(false);
         let (pause_tx, _) = watch::channel(false);
-        Arc::new(Self { cancel_tx, pause_tx })
+        Arc::new(Self {
+            cancel_tx,
+            pause_tx,
+        })
     }
 
-    pub fn cancel(&self) { self.cancel_tx.send_modify(|v| *v = true); }
-    pub fn set_paused(&self, paused: bool) { self.pause_tx.send_modify(|v| *v = paused); }
-    pub fn cancellation_receiver(&self) -> watch::Receiver<bool> { self.cancel_tx.subscribe() }
-    pub fn pause_receiver(&self) -> watch::Receiver<bool> { self.pause_tx.subscribe() }
+    pub fn cancel(&self) {
+        self.cancel_tx.send_modify(|v| *v = true);
+    }
+    pub fn set_paused(&self, paused: bool) {
+        self.pause_tx.send_modify(|v| *v = paused);
+    }
+    pub fn cancellation_receiver(&self) -> watch::Receiver<bool> {
+        self.cancel_tx.subscribe()
+    }
+    pub fn pause_receiver(&self) -> watch::Receiver<bool> {
+        self.pause_tx.subscribe()
+    }
 
     /// Waits without polling until a paused job resumes or is cancelled.
     pub async fn wait_until_runnable(&self) -> bool {
@@ -320,7 +331,10 @@ mod tests {
     async fn test_terminal_job_cleanup() {
         let controls = std::sync::Mutex::new(std::collections::HashMap::new());
         let job_id = "test-job-id".to_string();
-        controls.lock().unwrap().insert(job_id.clone(), BackgroundJobControl::new());
+        controls
+            .lock()
+            .unwrap()
+            .insert(job_id.clone(), BackgroundJobControl::new());
 
         controls.lock().unwrap().remove(&job_id);
 

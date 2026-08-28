@@ -84,7 +84,7 @@ fn emit_thumbnail_cache_setup_error(app_handle: &AppHandle, path: &str, reason: 
     );
 }
 
-fn compute_thumbnail_cache_hash(
+pub(crate) fn compute_thumbnail_cache_hash(
     path_str: &str,
     adjustments_bytes: &[u8],
     source_modified: Option<u64>,
@@ -143,7 +143,7 @@ fn resolve_image_metadata(
     }
 }
 
-fn emit_image_metadata_loaded(
+pub(crate) fn emit_image_metadata_loaded(
     app_handle: &AppHandle,
     path: &str,
     rating: u8,
@@ -1660,7 +1660,10 @@ fn apply_exif_orientation(img: DynamicImage, orientation: u32) -> DynamicImage {
     }
 }
 
-pub(crate) fn try_load_embedded_raw_preview(source_path: &Path, target_res: u32) -> Option<DynamicImage> {
+pub(crate) fn try_load_embedded_raw_preview(
+    source_path: &Path,
+    target_res: u32,
+) -> Option<DynamicImage> {
     let mmap = read_file_mapped(source_path).ok()?;
     let exif = exif_processing::read_exif(&mmap)?;
 
@@ -2002,7 +2005,7 @@ pub fn generate_thumbnail_data(
     Ok(apply_coarse_rotation(Cow::Owned(final_image), fallback_orientation_steps).into_owned())
 }
 
-fn encode_thumbnail(image: &DynamicImage, target_width: u32) -> Result<Vec<u8>> {
+pub(crate) fn encode_thumbnail(image: &DynamicImage, target_width: u32) -> Result<Vec<u8>> {
     let thumbnail = crate::image_processing::downscale_f32_image(image, target_width, target_width);
     let mut buf = Cursor::new(Vec::new());
     let mut encoder = JpegEncoder::new_with_quality(&mut buf, 75);
@@ -2010,7 +2013,7 @@ fn encode_thumbnail(image: &DynamicImage, target_width: u32) -> Result<Vec<u8>> 
     Ok(buf.into_inner())
 }
 
-fn generate_single_thumbnail_and_cache(
+pub(crate) fn generate_single_thumbnail_and_cache(
     path_str: &str,
     source_modified: Option<u64>,
     thumb_cache_dir: &Path,
@@ -2238,7 +2241,7 @@ pub fn increment_thumbnail_progress(state: &AppState, app_handle: &AppHandle) {
     }
 }
 
-fn emit_thumbnail_generated(
+pub(crate) fn emit_thumbnail_generated(
     app_handle: &AppHandle,
     path: &str,
     thumbnail_path: &str,

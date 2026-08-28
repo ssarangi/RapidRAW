@@ -1486,6 +1486,156 @@ mod tests {
             .unwrap();
         assert_eq!(searchable, 0);
     }
+
+    #[test]
+    fn thumbnail_generation_headless_runs_and_completes_batch() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("catalog.db");
+        let photos_dir = directory.path().join("photos");
+        let thumb_dir = directory.path().join("thumbs");
+        fs::create_dir_all(&photos_dir).unwrap();
+
+        let img_path = photos_dir.join("photo.jpg");
+        let sample = image::RgbImage::new(100, 100);
+        sample.save(&img_path).unwrap();
+
+        let connection = open_connection(&db_path).unwrap();
+        migrate(&connection).unwrap();
+        connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
+        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
+        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
+        drop(connection);
+
+        let control = crate::app_state::BackgroundJobControl::new();
+        let mut progress_calls = 0;
+        let generated = run_catalog_thumbnail_generation_headless(
+            db_path,
+            Some(1),
+            thumb_dir.clone(),
+            false,
+            control,
+            |_cur, _tot, _path| {
+                progress_calls += 1;
+            },
+        ).unwrap();
+
+        assert_eq!(generated, 1);
+        assert!(progress_calls >= 1);
+        assert!(thumb_dir.exists());
+    }
+
+    #[test]
+    fn thumbnail_generation_headless_honors_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("catalog.db");
+        let photos_dir = directory.path().join("photos");
+        let thumb_dir = directory.path().join("thumbs");
+        fs::create_dir_all(&photos_dir).unwrap();
+
+        let connection = open_connection(&db_path).unwrap();
+        migrate(&connection).unwrap();
+        connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
+        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
+        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
+        drop(connection);
+
+        let control = crate::app_state::BackgroundJobControl::new();
+        control.cancel();
+
+        let result = run_catalog_thumbnail_generation_headless(
+            db_path,
+            Some(1),
+            thumb_dir,
+            false,
+            control,
+            |_cur, _tot, _path| {},
+        );
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Thumbnail generation cancelled");
+    }
+
+    #[test]
+    fn metadata_extraction_headless_runs_and_completes_batch() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("catalog.db");
+        let photos_dir = directory.path().join("photos");
+        fs::create_dir_all(&photos_dir).unwrap();
+
+        let img_path = photos_dir.join("photo.jpg");
+        let sample = image::RgbImage::new(100, 100);
+        sample.save(&img_path).unwrap();
+
+        let connection = open_connection(&db_path).unwrap();
+        migrate(&connection).unwrap();
+        connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
+        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
+        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
+        connection.execute("INSERT INTO image_versions(id, image_id, copy_id, display_name, sidecar_path, rating, is_edited, created_at, updated_at) VALUES(1, 1, '', 'photo.jpg', '', 0, 0, 0, 0)", []).unwrap();
+        drop(connection);
+
+        let control = crate::app_state::BackgroundJobControl::new();
+        let mut progress_calls = 0;
+        let processed = run_catalog_metadata_extraction_headless(
+            db_path,
+            Some(1),
+            crate::app_settings::AppSettings::default(),
+            control,
+            |_cur, _tot, _path| {
+                progress_calls += 1;
+            },
+        ).unwrap();
+
+        assert_eq!(processed, 1);
+        assert!(progress_calls >= 1);
+    }
+
+    #[test]
+    fn metadata_extraction_headless_honors_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("catalog.db");
+        let photos_dir = directory.path().join("photos");
+        fs::create_dir_all(&photos_dir).unwrap();
+
+        let connection = open_connection(&db_path).unwrap();
+        migrate(&connection).unwrap();
+        connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
+        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
+        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
+        drop(connection);
+
+        let control = crate::app_state::BackgroundJobControl::new();
+        control.cancel();
+
+        let result = run_catalog_metadata_extraction_headless(
+            db_path,
+            Some(1),
+            crate::app_settings::AppSettings::default(),
+            control,
+            |_cur, _tot, _path| {},
+        );
+
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Metadata extraction cancelled");
+    }
+
+    #[test]
+    fn interrupted_thumbnail_and_metadata_jobs_are_recovered_on_restart() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrate(&connection).unwrap();
+        connection.execute("INSERT INTO background_jobs(id, kind, state, payload_json, message, created_at, updated_at) VALUES('thumb-job', 'thumbnail_generation', 'running', '{\"rootId\": 1, \"forceRegenerate\": false}', 'Generating thumbnails', 0, 0)", []).unwrap();
+        connection.execute("INSERT INTO background_jobs(id, kind, state, payload_json, message, created_at, updated_at) VALUES('meta-job', 'metadata_extraction', 'paused', '{\"rootId\": 1}', 'Extracting metadata', 0, 0)", []).unwrap();
+        recover_interrupted_jobs(&connection).unwrap();
+
+        let thumb_state: String = connection.query_row("SELECT state FROM background_jobs WHERE id = 'thumb-job'", [], |row| row.get(0)).unwrap();
+        let meta_state: String = connection.query_row("SELECT state FROM background_jobs WHERE id = 'meta-job'", [], |row| row.get(0)).unwrap();
+        assert_eq!(thumb_state, "failed");
+        assert_eq!(meta_state, "failed");
+    }
 }
 
 fn library_info(conn: &Connection, db_path: &Path) -> Result<LibraryInfo, String> {
@@ -2875,6 +3025,558 @@ pub fn cancel_catalog_scan(state: tauri::State<'_, crate::AppState>) -> Result<(
     Ok(())
 }
 
+pub fn list_catalog_thumbnail_candidates(
+    db_path: &Path,
+    root_id: Option<i64>,
+) -> Result<Vec<(i64, String, Option<u64>)>, String> {
+    let conn = open_connection(db_path)?;
+    let mut statement = if root_id.is_some() {
+        conn.prepare(
+            "SELECT i.id, r.absolute_path || '/' || i.relative_path, i.modified_at
+             FROM images i
+             JOIN collection_roots r ON r.id = i.root_id
+             WHERE i.status = 'present' AND i.root_id = ?1
+             ORDER BY i.id",
+        )
+    } else {
+        conn.prepare(
+            "SELECT i.id, r.absolute_path || '/' || i.relative_path, i.modified_at
+             FROM images i
+             JOIN collection_roots r ON r.id = i.root_id
+             WHERE i.status = 'present'
+             ORDER BY i.id",
+        )
+    }
+    .map_err(|error| error.to_string())?;
+
+    let map_row = |row: &rusqlite::Row<'_>| {
+        let id: i64 = row.get(0)?;
+        let path: String = row.get(1)?;
+        let mod_at: Option<i64> = row.get(2)?;
+        Ok((id, path, mod_at.map(|v| v as u64)))
+    };
+
+    if let Some(root_id) = root_id {
+        statement
+            .query_map([root_id], map_row)
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    } else {
+        statement
+            .query_map([], map_row)
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    }
+}
+
+pub fn run_catalog_thumbnail_generation_headless<F>(
+    db_path: PathBuf,
+    root_id: Option<i64>,
+    thumb_cache_dir: PathBuf,
+    force_regenerate: bool,
+    job_control: Arc<crate::app_state::BackgroundJobControl>,
+    mut on_progress: F,
+) -> Result<usize, String>
+where
+    F: FnMut(usize, usize, Option<&str>),
+{
+    fs::create_dir_all(&thumb_cache_dir).map_err(|e| e.to_string())?;
+    let candidates = list_catalog_thumbnail_candidates(&db_path, root_id)?;
+    let total = candidates.len();
+    let mut generated = 0usize;
+
+    for (index, (_image_id, path_str, modified)) in candidates.into_iter().enumerate() {
+        if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
+            return Err("Thumbnail generation cancelled".to_string());
+        }
+        let current = index + 1;
+        on_progress(current, total, Some(&path_str));
+
+        let source_path = PathBuf::from(&path_str);
+        if source_path.exists() {
+            let cache_hash = crate::file_management::compute_thumbnail_cache_hash(
+                &path_str,
+                &[],
+                modified,
+            );
+            if let Some(cache_hash) = cache_hash {
+                let cache_path = thumb_cache_dir.join(format!("{cache_hash}.jpg"));
+                if force_regenerate || !cache_path.exists() {
+                    if let Ok(img) = image::open(&source_path) {
+                        let target_width = 720;
+                        if let Ok(thumb_data) = crate::file_management::encode_thumbnail(&img, target_width) {
+                            let _ = fs::write(&cache_path, &thumb_data);
+                            generated += 1;
+                        }
+                    }
+                } else {
+                    generated += 1;
+                }
+            }
+        }
+    }
+    Ok(generated)
+}
+
+fn run_catalog_thumbnail_generation_impl(
+    app: &AppHandle,
+    db_path: &Path,
+    root_id: Option<i64>,
+    force_regenerate: bool,
+    job_id: &str,
+    job_control: &Arc<crate::app_state::BackgroundJobControl>,
+) -> Result<usize, String> {
+    let settings = load_settings(app.clone()).unwrap_or_default();
+    let thumb_cache_dir = crate::file_management::get_thumb_cache_dir(app)?;
+    let candidates = list_catalog_thumbnail_candidates(db_path, root_id)?;
+    let total = candidates.len();
+
+    if total == 0 {
+        update_job(
+            db_path,
+            job_id,
+            "completed",
+            "No images to generate thumbnails for",
+            0,
+            0,
+            None,
+            None,
+        )?;
+        return Ok(0);
+    }
+
+    update_job(
+        db_path,
+        job_id,
+        "running",
+        "Generating thumbnails",
+        0,
+        total as i64,
+        None,
+        None,
+    )?;
+
+    let mut generated = 0usize;
+    let mut last_progress_update = std::time::Instant::now();
+
+    for (index, (_image_id, path_str, modified)) in candidates.into_iter().enumerate() {
+        if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
+            return Err("Thumbnail generation cancelled".to_string());
+        }
+
+        let current = (index + 1) as i64;
+        let should_update_db = last_progress_update.elapsed() > std::time::Duration::from_millis(500)
+            || index == 0
+            || current == total as i64;
+
+        if should_update_db {
+            let _ = update_job(
+                db_path,
+                job_id,
+                "running",
+                "Generating thumbnail",
+                current,
+                total as i64,
+                Some(&path_str),
+                None,
+            );
+            last_progress_update = std::time::Instant::now();
+        }
+
+        let state = app.state::<crate::AppState>();
+        let gpu_context = crate::gpu_processing::get_or_init_gpu_context(&state, app).ok();
+
+        let result = crate::file_management::generate_single_thumbnail_and_cache(
+            &path_str,
+            modified,
+            &thumb_cache_dir,
+            gpu_context.as_ref(),
+            None,
+            force_regenerate,
+            app,
+            &settings,
+        );
+
+        if let Some((thumbnail_path, rating, is_edited)) = result {
+            crate::file_management::emit_thumbnail_generated(
+                app,
+                &path_str,
+                &thumbnail_path,
+                rating,
+                is_edited,
+            );
+            generated += 1;
+        }
+    }
+
+    update_job(
+        db_path,
+        job_id,
+        "completed",
+        "Thumbnail generation complete",
+        total as i64,
+        total as i64,
+        None,
+        None,
+    )?;
+
+    Ok(generated)
+}
+
+#[tauri::command]
+pub fn start_catalog_thumbnail_generation(
+    root_id: Option<i64>,
+    force_regenerate: Option<bool>,
+    app_handle: AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<String, String> {
+    let db_path = active_library_path(&state)?;
+    let force = force_regenerate.unwrap_or(false);
+    let job_id = create_background_job(
+        &db_path,
+        "thumbnail_generation",
+        serde_json::json!({ "rootId": root_id, "forceRegenerate": force }),
+    )?;
+    let job_control = crate::app_state::BackgroundJobControl::new();
+    state
+        .background_job_controls
+        .lock()
+        .unwrap()
+        .insert(job_id.clone(), job_control.clone());
+    let app = app_handle.clone();
+    let worker_job_id = job_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = run_catalog_thumbnail_generation_impl(
+            &app,
+            &db_path,
+            root_id,
+            force,
+            &worker_job_id,
+            &job_control,
+        );
+        if let Err(error) = result {
+            let job_state = if error == "Thumbnail generation cancelled" {
+                "cancelled"
+            } else {
+                "failed"
+            };
+            let _ = update_job(
+                &db_path,
+                &worker_job_id,
+                job_state,
+                &error,
+                0,
+                0,
+                None,
+                Some(&error),
+            );
+        }
+        app.state::<crate::AppState>()
+            .background_job_controls
+            .lock()
+            .unwrap()
+            .remove(&worker_job_id);
+    });
+    Ok(job_id)
+}
+
+pub fn list_catalog_metadata_candidates(
+    db_path: &Path,
+    root_id: Option<i64>,
+) -> Result<Vec<(i64, i64, PathBuf, Option<i64>)>, String> {
+    let conn = open_connection(db_path)?;
+    let mut statement = if root_id.is_some() {
+        conn.prepare(
+            "SELECT i.id, i.root_id, r.absolute_path || '/' || i.relative_path, i.modified_at
+             FROM images i
+             JOIN collection_roots r ON r.id = i.root_id
+             WHERE i.status = 'present' AND i.root_id = ?1
+             ORDER BY i.id",
+        )
+    } else {
+        conn.prepare(
+            "SELECT i.id, i.root_id, r.absolute_path || '/' || i.relative_path, i.modified_at
+             FROM images i
+             JOIN collection_roots r ON r.id = i.root_id
+             WHERE i.status = 'present'
+             ORDER BY i.id",
+        )
+    }
+    .map_err(|error| error.to_string())?;
+
+    let map_row = |row: &rusqlite::Row<'_>| {
+        let id: i64 = row.get(0)?;
+        let root_id: i64 = row.get(1)?;
+        let path: String = row.get(2)?;
+        let mod_at: Option<i64> = row.get(3)?;
+        Ok((id, root_id, PathBuf::from(path), mod_at))
+    };
+
+    if let Some(root_id) = root_id {
+        statement
+            .query_map([root_id], map_row)
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    } else {
+        statement
+            .query_map([], map_row)
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())
+    }
+}
+
+pub fn run_catalog_metadata_extraction_headless<F>(
+    db_path: PathBuf,
+    root_id: Option<i64>,
+    settings: crate::app_settings::AppSettings,
+    job_control: Arc<crate::app_state::BackgroundJobControl>,
+    mut on_progress: F,
+) -> Result<usize, String>
+where
+    F: FnMut(usize, usize, Option<&str>),
+{
+    let mut conn = open_connection(&db_path)?;
+    let candidates = list_catalog_metadata_candidates(&db_path, root_id)?;
+    let total = candidates.len();
+    let mut processed = 0usize;
+
+    for (index, (image_id, _root_id, path_buf, _modified)) in candidates.into_iter().enumerate() {
+        if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
+            return Err("Metadata extraction cancelled".to_string());
+        }
+        let current = index + 1;
+        let path_str = path_buf.to_string_lossy().to_string();
+        on_progress(current, total, Some(&path_str));
+
+        if path_buf.exists() {
+            let sidecar_path = parse_virtual_path(&path_str).1;
+            let (is_edited, rating, tags) = sidecar_metadata_with_settings(&path_buf, &sidecar_path, &settings);
+            let tags_json = tags.as_ref().and_then(|t| serde_json::to_string(t).ok());
+            let sidecar_modified = if sidecar_path.exists() {
+                Some(unix_modified(&sidecar_path) as i64)
+            } else {
+                None
+            };
+            let now = now_secs();
+
+            if let Ok(tx) = conn.transaction() {
+                let _ = tx.execute(
+                    "UPDATE image_versions
+                     SET rating = ?2, color_label = ?3, is_edited = ?4, tags_json = ?5, sidecar_modified_at = ?6, updated_at = ?7
+                     WHERE image_id = ?1 AND copy_id = ''",
+                    params![
+                        image_id,
+                        rating,
+                        color_label_from_tags(tags.as_ref()),
+                        if is_edited { 1 } else { 0 },
+                        tags_json,
+                        sidecar_modified,
+                        now
+                    ],
+                );
+                if let Ok(version_id) = tx.query_row(
+                    "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
+                    params![image_id],
+                    |row| row.get::<_, i64>(0),
+                ) {
+                    let exif = read_catalog_exif(&path_buf);
+                    let _ = upsert_image_metadata(&tx, image_id, &path_buf, &exif, now);
+                    let _ = sync_image_tags(&tx, version_id, tags.as_ref());
+                }
+                let _ = tx.commit();
+            }
+            processed += 1;
+        }
+    }
+    Ok(processed)
+}
+
+fn run_catalog_metadata_extraction_impl(
+    app: &AppHandle,
+    db_path: &Path,
+    root_id: Option<i64>,
+    job_id: &str,
+    job_control: &Arc<crate::app_state::BackgroundJobControl>,
+) -> Result<usize, String> {
+    let settings = load_settings(app.clone()).unwrap_or_default();
+    let candidates = list_catalog_metadata_candidates(db_path, root_id)?;
+    let total = candidates.len();
+
+    if total == 0 {
+        update_job(
+            db_path,
+            job_id,
+            "completed",
+            "No images to extract metadata for",
+            0,
+            0,
+            None,
+            None,
+        )?;
+        return Ok(0);
+    }
+
+    update_job(
+        db_path,
+        job_id,
+        "running",
+        "Extracting metadata",
+        0,
+        total as i64,
+        None,
+        None,
+    )?;
+
+    let mut processed = 0usize;
+    let mut last_progress_update = std::time::Instant::now();
+    let mut conn = open_connection(db_path)?;
+
+    for (index, (image_id, _root_id, path_buf, _modified)) in candidates.into_iter().enumerate() {
+        if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
+            return Err("Metadata extraction cancelled".to_string());
+        }
+
+        let current = (index + 1) as i64;
+        let path_str = path_buf.to_string_lossy().to_string();
+        let should_update_db = last_progress_update.elapsed() > std::time::Duration::from_millis(500)
+            || index == 0
+            || current == total as i64;
+
+        if should_update_db {
+            let _ = update_job(
+                db_path,
+                job_id,
+                "running",
+                "Extracting metadata",
+                current,
+                total as i64,
+                Some(&path_str),
+                None,
+            );
+            last_progress_update = std::time::Instant::now();
+        }
+
+        if path_buf.exists() {
+            let sidecar_path = parse_virtual_path(&path_str).1;
+            let (is_edited, rating, tags) = sidecar_metadata_with_settings(&path_buf, &sidecar_path, &settings);
+            let tags_json = tags.as_ref().and_then(|t| serde_json::to_string(t).ok());
+            let sidecar_modified = if sidecar_path.exists() {
+                Some(unix_modified(&sidecar_path) as i64)
+            } else {
+                None
+            };
+            let now = now_secs();
+
+            if let Ok(tx) = conn.transaction() {
+                let _ = tx.execute(
+                    "UPDATE image_versions
+                     SET rating = ?2, color_label = ?3, is_edited = ?4, tags_json = ?5, sidecar_modified_at = ?6, updated_at = ?7
+                     WHERE image_id = ?1 AND copy_id = ''",
+                    params![
+                        image_id,
+                        rating,
+                        color_label_from_tags(tags.as_ref()),
+                        if is_edited { 1 } else { 0 },
+                        tags_json,
+                        sidecar_modified,
+                        now
+                    ],
+                );
+                if let Ok(version_id) = tx.query_row(
+                    "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
+                    params![image_id],
+                    |row| row.get::<_, i64>(0),
+                ) {
+                    let exif = read_catalog_exif(&path_buf);
+                    let _ = upsert_image_metadata(&tx, image_id, &path_buf, &exif, now);
+                    let _ = sync_image_tags(&tx, version_id, tags.as_ref());
+                }
+                let _ = tx.commit();
+            }
+
+            crate::file_management::emit_image_metadata_loaded(
+                app,
+                &path_str,
+                rating,
+                is_edited,
+                &tags,
+            );
+            processed += 1;
+        }
+    }
+
+    update_job(
+        db_path,
+        job_id,
+        "completed",
+        "Metadata extraction complete",
+        total as i64,
+        total as i64,
+        None,
+        None,
+    )?;
+
+    Ok(processed)
+}
+
+#[tauri::command]
+pub fn start_catalog_metadata_extraction(
+    root_id: Option<i64>,
+    app_handle: AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<String, String> {
+    let db_path = active_library_path(&state)?;
+    let job_id = create_background_job(
+        &db_path,
+        "metadata_extraction",
+        serde_json::json!({ "rootId": root_id }),
+    )?;
+    let job_control = crate::app_state::BackgroundJobControl::new();
+    state
+        .background_job_controls
+        .lock()
+        .unwrap()
+        .insert(job_id.clone(), job_control.clone());
+    let app = app_handle.clone();
+    let worker_job_id = job_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = run_catalog_metadata_extraction_impl(
+            &app,
+            &db_path,
+            root_id,
+            &worker_job_id,
+            &job_control,
+        );
+        if let Err(error) = result {
+            let job_state = if error == "Metadata extraction cancelled" {
+                "cancelled"
+            } else {
+                "failed"
+            };
+            let _ = update_job(
+                &db_path,
+                &worker_job_id,
+                job_state,
+                &error,
+                0,
+                0,
+                None,
+                Some(&error),
+            );
+        }
+        app.state::<crate::AppState>()
+            .background_job_controls
+            .lock()
+            .unwrap()
+            .remove(&worker_job_id);
+    });
+    Ok(job_id)
+}
+
 fn read_background_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<BackgroundJob> {
     Ok(BackgroundJob {
         id: row.get(0)?,
@@ -3232,6 +3934,18 @@ pub fn retry_background_job(
             )
             .map(|_| ()),
         },
+        "thumbnail_generation" => {
+            let root_id = payload.get("rootId").and_then(|value| value.as_i64());
+            let force = payload
+                .get("forceRegenerate")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            start_catalog_thumbnail_generation(root_id, Some(force), app_handle, state).map(|_| ())
+        }
+        "metadata_extraction" | "sidecar_metadata" => {
+            let root_id = payload.get("rootId").and_then(|value| value.as_i64());
+            start_catalog_metadata_extraction(root_id, app_handle, state).map(|_| ())
+        }
         _ => Err(format!("Retry is not available for {kind}")),
     }
 }

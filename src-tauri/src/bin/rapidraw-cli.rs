@@ -88,6 +88,8 @@ fn main() {
         Some("library") if arguments.get(1).map(String::as_str) == Some("roots") => list_roots(&arguments),
         Some("library") if arguments.get(1).map(String::as_str) == Some("metrics") => metrics(&arguments),
         Some("library") if arguments.get(1).map(String::as_str) == Some("scan") => run_catalog_scan_cli(&arguments),
+        Some("library") if arguments.get(1).map(String::as_str) == Some("thumbnails") => run_catalog_thumbnails_cli(&arguments),
+        Some("library") if arguments.get(1).map(String::as_str) == Some("metadata") => run_catalog_metadata_cli(&arguments),
         Some("jobs") if arguments.get(1).map(String::as_str) == Some("list") => list_jobs(&arguments),
         Some("jobs") if arguments.get(1).map(String::as_str) == Some("show") => show_job(&arguments),
         Some("faces") if arguments.get(1).map(String::as_str) == Some("status") => face_status(&arguments),
@@ -113,7 +115,7 @@ fn main() {
         Some("models") if arguments.get(1).map(String::as_str) == Some("verify") => verify_installed_model(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("list") => list_derivatives(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("run") => run_restore_cli(&arguments),
-        _ => Err("Usage: rapidraw-cli library create --name <name> --database <catalog.db> | rapidraw-cli library open --database <catalog.db> | rapidraw-cli library add-root --database <catalog.db> --path <folder> [--label <name>] | rapidraw-cli library remove-root --database <catalog.db> --root <id> | rapidraw-cli library inspect|roots|metrics|scan --database <catalog.db> | rapidraw-cli library scan --database <catalog.db> --root <id> [--non-recursive] | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli faces detect|recognize --database <catalog.db> --face-models-dir <models/face> [--root <id>] | rapidraw-cli people list|images --database <catalog.db> | rapidraw-cli people images --database <catalog.db> --person <id> | rapidraw-cli tags status|top|export-suggestions|review|run --database <catalog.db> | rapidraw-cli tags review --database <catalog.db> --id <rowid> --state accepted|rejected | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli species list|review --database <catalog.db> | rapidraw-cli species review --database <catalog.db> --id <id> --state accepted|rejected | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions|decisions|analyze --database <catalog.db> | rapidraw-cli cull analyze --database <catalog.db> --root <id> [--similarity-threshold <n>] [--blur-threshold <n>] | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
+        _ => Err("Usage: rapidraw-cli library create --name <name> --database <catalog.db> | rapidraw-cli library open --database <catalog.db> | rapidraw-cli library add-root --database <catalog.db> --path <folder> [--label <name>] | rapidraw-cli library remove-root --database <catalog.db> --root <id> | rapidraw-cli library inspect|roots|metrics|scan|thumbnails|metadata --database <catalog.db> | rapidraw-cli library scan --database <catalog.db> --root <id> [--non-recursive] | rapidraw-cli library thumbnails --database <catalog.db> [--root <id>] [--force] | rapidraw-cli library metadata --database <catalog.db> [--root <id>] | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli faces detect|recognize --database <catalog.db> --face-models-dir <models/face> [--root <id>] | rapidraw-cli people list|images --database <catalog.db> | rapidraw-cli people images --database <catalog.db> --person <id> | rapidraw-cli tags status|top|export-suggestions|review|run --database <catalog.db> | rapidraw-cli tags review --database <catalog.db> --id <rowid> --state accepted|rejected | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli species list|review --database <catalog.db> | rapidraw-cli species review --database <catalog.db> --id <id> --state accepted|rejected | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions|decisions|analyze --database <catalog.db> | rapidraw-cli cull analyze --database <catalog.db> --root <id> [--similarity-threshold <n>] [--blur-threshold <n>] | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -258,6 +260,156 @@ fn run_catalog_scan_cli(arguments: &[String]) -> Result<serde_json::Value, Strin
         }
         Err(error) => {
             let state = if error == "Catalog scan cancelled" {
+                "cancelled"
+            } else {
+                "failed"
+            };
+            let _ = rapidraw_lib::update_job(
+                &db_path,
+                &job_id,
+                state,
+                &error,
+                0,
+                0,
+                None,
+                Some(&error),
+            );
+            Err(error)
+        }
+    }
+}
+
+fn run_catalog_thumbnails_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let db_path = database_argument(arguments)?;
+    let root_id = optional_numeric_argument(arguments, "--root")?;
+    let force = arguments.iter().any(|arg| arg == "--force");
+    let thumb_cache_dir = arguments
+        .windows(2)
+        .find(|pair| pair[0] == "--thumb-dir")
+        .map(|pair| PathBuf::from(&pair[1]))
+        .unwrap_or_else(|| {
+            db_path
+                .parent()
+                .map(|p| p.join("thumbnails"))
+                .unwrap_or_else(|| PathBuf::from("thumbnails"))
+        });
+    let job_id = rapidraw_lib::create_background_job(
+        &db_path,
+        "thumbnail_generation",
+        json!({ "rootId": root_id, "forceRegenerate": force, "headless": true }),
+    )?;
+    let control = BackgroundJobControl::new();
+    let progress_db_path = db_path.clone();
+    let progress_job_id = job_id.clone();
+    let result = rapidraw_lib::run_catalog_thumbnail_generation_headless(
+        db_path.clone(),
+        root_id,
+        thumb_cache_dir,
+        force,
+        control,
+        move |current, total, current_item| {
+            let _ = rapidraw_lib::update_job(
+                &progress_db_path,
+                &progress_job_id,
+                "running",
+                "Generating thumbnail",
+                current as i64,
+                total as i64,
+                current_item,
+                None,
+            );
+        },
+    );
+    match result {
+        Ok(generated) => {
+            rapidraw_lib::update_job(
+                &db_path,
+                &job_id,
+                "completed",
+                "Thumbnail generation complete",
+                generated as i64,
+                generated as i64,
+                None,
+                None,
+            )?;
+            Ok(json!({
+                "jobId": job_id,
+                "state": "completed",
+                "rootId": root_id,
+                "generated": generated,
+            }))
+        }
+        Err(error) => {
+            let state = if error == "Thumbnail generation cancelled" {
+                "cancelled"
+            } else {
+                "failed"
+            };
+            let _ = rapidraw_lib::update_job(
+                &db_path,
+                &job_id,
+                state,
+                &error,
+                0,
+                0,
+                None,
+                Some(&error),
+            );
+            Err(error)
+        }
+    }
+}
+
+fn run_catalog_metadata_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let db_path = database_argument(arguments)?;
+    let root_id = optional_numeric_argument(arguments, "--root")?;
+    let job_id = rapidraw_lib::create_background_job(
+        &db_path,
+        "metadata_extraction",
+        json!({ "rootId": root_id, "headless": true }),
+    )?;
+    let control = BackgroundJobControl::new();
+    let progress_db_path = db_path.clone();
+    let progress_job_id = job_id.clone();
+    let result = rapidraw_lib::run_catalog_metadata_extraction_headless(
+        db_path.clone(),
+        root_id,
+        rapidraw_lib::AppSettings::default(),
+        control,
+        move |current, total, current_item| {
+            let _ = rapidraw_lib::update_job(
+                &progress_db_path,
+                &progress_job_id,
+                "running",
+                "Extracting metadata",
+                current as i64,
+                total as i64,
+                current_item,
+                None,
+            );
+        },
+    );
+    match result {
+        Ok(processed) => {
+            rapidraw_lib::update_job(
+                &db_path,
+                &job_id,
+                "completed",
+                "Metadata extraction complete",
+                processed as i64,
+                processed as i64,
+                None,
+                None,
+            )?;
+            Ok(json!({
+                "jobId": job_id,
+                "state": "completed",
+                "rootId": root_id,
+                "processed": processed,
+            }))
+        }
+        Err(error) => {
+            let state = if error == "Metadata extraction cancelled" {
                 "cancelled"
             } else {
                 "failed"

@@ -18,6 +18,8 @@ rapidraw-cli library create --name "Archive" --database /data/archive/rapidraw.d
 rapidraw-cli library open --database /data/archive/rapidraw.db
 rapidraw-cli library add-root --database /data/archive/rapidraw.db --path /photos/2026 --label "2026"
 rapidraw-cli library scan --database /data/archive/rapidraw.db --root 1
+rapidraw-cli library thumbnails --database /data/archive/rapidraw.db [--root 1] [--force]
+rapidraw-cli library metadata --database /data/archive/rapidraw.db [--root 1]
 rapidraw-cli library roots --database /data/archive/rapidraw.db
 rapidraw-cli library metrics --database /data/archive/rapidraw.db
 rapidraw-cli library remove-root --database /data/archive/rapidraw.db --root 1
