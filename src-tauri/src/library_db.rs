@@ -4756,21 +4756,21 @@ pub fn get_catalog_metrics(
         .map_err(|e| e.to_string())?;
     let ram_plus_analyzed = conn
         .query_row(
-            "SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.model_revision = 'onnx-v1' AND s.image_modified_at = i.modified_at AND s.state = 'completed')",
+            "SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.image_modified_at = i.modified_at AND s.state = 'completed')",
             [],
             |row| row.get(0),
         )
         .map_err(|e| e.to_string())?;
     let ram_plus_pending = conn
         .query_row(
-            "SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND NOT EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.model_revision = 'onnx-v1' AND s.image_modified_at = i.modified_at AND s.state = 'completed')",
+            "SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND NOT EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.image_modified_at = i.modified_at AND s.state = 'completed')",
             [],
             |row| row.get(0),
         )
         .map_err(|e| e.to_string())?;
     let ram_plus_failed = conn
         .query_row(
-            "SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.model_revision = 'onnx-v1' AND s.image_modified_at = i.modified_at AND s.state = 'failed')",
+            "SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.image_modified_at = i.modified_at AND s.state = 'failed') AND NOT EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.image_modified_at = i.modified_at AND s.state = 'completed')",
             [],
             |row| row.get(0),
         )

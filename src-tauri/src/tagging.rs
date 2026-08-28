@@ -28,7 +28,6 @@ pub struct ScoredTag {
 }
 
 const RAM_PLUS_MODEL_ID: &str = "ram-plus";
-const RAM_PLUS_MODEL_REVISION: &str = "onnx-v1";
 const RAM_PLUS_INPUT_SIZE: u32 = 384;
 
 pub(crate) struct RamPlusModels {
@@ -380,10 +379,14 @@ pub fn run_catalog_ram_plus_tagging_headless(
         None,
         None,
     )?;
+    let model_revision = crate::visual_model_registry::visual_model_pack_revision_in_dir(
+        visual_models_dir,
+        "ram-plus-onnx",
+    )?;
     let candidates = crate::library_db::list_ai_tag_candidates_for_model(
         db_path,
         RAM_PLUS_MODEL_ID,
-        RAM_PLUS_MODEL_REVISION,
+        &model_revision,
     )?;
     let total = candidates.len() as i64;
     if candidates.is_empty() {
@@ -433,7 +436,7 @@ pub fn run_catalog_ram_plus_tagging_headless(
             image_id,
             modified,
             RAM_PLUS_MODEL_ID,
-            RAM_PLUS_MODEL_REVISION,
+            &model_revision,
             "processing",
             None,
         )?;
@@ -449,7 +452,7 @@ pub fn run_catalog_ram_plus_tagging_headless(
                             db_path,
                             image_id,
                             RAM_PLUS_MODEL_ID,
-                            RAM_PLUS_MODEL_REVISION,
+                            &model_revision,
                             &tags,
                         )?;
                         crate::library_db::mark_ai_tag_analysis_state_for_model(
@@ -457,7 +460,7 @@ pub fn run_catalog_ram_plus_tagging_headless(
                             image_id,
                             modified,
                             RAM_PLUS_MODEL_ID,
-                            RAM_PLUS_MODEL_REVISION,
+                            &model_revision,
                             "completed",
                             None,
                         )?;
@@ -482,7 +485,7 @@ pub fn run_catalog_ram_plus_tagging_headless(
                             image_id,
                             modified,
                             RAM_PLUS_MODEL_ID,
-                            RAM_PLUS_MODEL_REVISION,
+                            &model_revision,
                             "failed",
                             Some(&error),
                         )?;
@@ -494,7 +497,7 @@ pub fn run_catalog_ram_plus_tagging_headless(
                 image_id,
                 modified,
                 RAM_PLUS_MODEL_ID,
-                RAM_PLUS_MODEL_REVISION,
+                &model_revision,
                 "failed",
                 Some(&error),
             )?,
@@ -521,7 +524,7 @@ pub fn start_catalog_ram_plus_tagging(
     let job_id = crate::library_db::create_background_job(
         &db_path,
         "ram_plus_tagging",
-        serde_json::json!({ "modelId": RAM_PLUS_MODEL_ID, "modelRevision": RAM_PLUS_MODEL_REVISION }),
+        serde_json::json!({ "modelId": RAM_PLUS_MODEL_ID }),
     )?;
     crate::library_db::update_job(
         &db_path,
@@ -557,10 +560,48 @@ pub fn start_catalog_ram_plus_tagging(
             None,
             None,
         );
+        let visual_models_dir = match worker_state.path().app_data_dir() {
+            Ok(path) => path.join("models").join("visual"),
+            Err(error) => {
+                let error = error.to_string();
+                let _ = crate::library_db::update_job(
+                    &worker_db_path,
+                    &worker_job_id,
+                    "failed",
+                    "Unable to locate RAM++ model directory",
+                    0,
+                    0,
+                    None,
+                    Some(&error),
+                );
+                cleanup_tag_job(&worker_state, &worker_job_id);
+                return;
+            }
+        };
+        let model_revision = match crate::visual_model_registry::visual_model_pack_revision_in_dir(
+            &visual_models_dir,
+            "ram-plus-onnx",
+        ) {
+            Ok(revision) => revision,
+            Err(error) => {
+                let _ = crate::library_db::update_job(
+                    &worker_db_path,
+                    &worker_job_id,
+                    "failed",
+                    "Unable to verify RAM++ model",
+                    0,
+                    0,
+                    None,
+                    Some(&error),
+                );
+                cleanup_tag_job(&worker_state, &worker_job_id);
+                return;
+            }
+        };
         let candidates = match crate::library_db::list_ai_tag_candidates_for_model(
             &worker_db_path,
             RAM_PLUS_MODEL_ID,
-            RAM_PLUS_MODEL_REVISION,
+            &model_revision,
         ) {
             Ok(candidates) => candidates,
             Err(error) => {
@@ -672,7 +713,7 @@ pub fn start_catalog_ram_plus_tagging(
                 image_id,
                 modified,
                 RAM_PLUS_MODEL_ID,
-                RAM_PLUS_MODEL_REVISION,
+                &model_revision,
                 "processing",
                 None,
             );
@@ -695,7 +736,7 @@ pub fn start_catalog_ram_plus_tagging(
                                 &worker_db_path,
                                 image_id,
                                 RAM_PLUS_MODEL_ID,
-                                RAM_PLUS_MODEL_REVISION,
+                                &model_revision,
                                 &tags,
                             );
                             let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(
@@ -703,7 +744,7 @@ pub fn start_catalog_ram_plus_tagging(
                                 image_id,
                                 modified,
                                 RAM_PLUS_MODEL_ID,
-                                RAM_PLUS_MODEL_REVISION,
+                                &model_revision,
                                 "completed",
                                 None,
                             );
@@ -762,7 +803,7 @@ pub fn start_catalog_ram_plus_tagging(
                                 image_id,
                                 modified,
                                 RAM_PLUS_MODEL_ID,
-                                RAM_PLUS_MODEL_REVISION,
+                                &model_revision,
                                 "failed",
                                 Some(&error),
                             );
@@ -775,7 +816,7 @@ pub fn start_catalog_ram_plus_tagging(
                         image_id,
                         modified,
                         RAM_PLUS_MODEL_ID,
-                        RAM_PLUS_MODEL_REVISION,
+                        &model_revision,
                         "failed",
                         Some(&error),
                     );
