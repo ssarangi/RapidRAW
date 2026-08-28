@@ -916,6 +916,21 @@ fn verify_visual_runtime(directory: &std::path::Path, model_id: &str) -> Result<
     Ok(())
 }
 
+fn verify_face_runtime(directory: &std::path::Path, model_id: &str) -> Result<(), String> {
+    if model_id != "opencv-yunet-sface" {
+        return Err("No runtime adapter is available in this build".to_string());
+    }
+    for model_name in [
+        "face_detection_yunet_2023mar.onnx",
+        "face_recognition_sface_2021dec.onnx",
+    ] {
+        ort::session::Session::builder()
+            .and_then(|builder| builder.commit_from_file(directory.join(model_name)))
+            .map_err(|error| format!("{model_name} could not create an ONNX session: {error}"))?;
+    }
+    Ok(())
+}
+
 fn verify_installed_model(arguments: &[String]) -> Result<serde_json::Value, String> {
     let model_id = named_argument(arguments, "--id")?;
     if let Some(pack) = visual_model_packs()
@@ -1010,12 +1025,18 @@ fn verify_installed_model(arguments: &[String]) -> Result<serde_json::Value, Str
             && artifacts
                 .iter()
                 .all(|artifact| artifact["matches"].as_bool() == Some(true));
+        let runtime_check = if installed {
+            verify_face_runtime(&directory, &pack.id)
+        } else {
+            Err("Pack is not installed".to_string())
+        };
         return Ok(json!({
             "id": pack.id,
             "type": "face",
             "installed": installed,
-            "runnable": installed && pack.id == "opencv-yunet-sface",
-            "integrity": "manifest-and-sha256",
+            "runnable": runtime_check.is_ok(),
+            "integrity": "manifest-sha256-and-runtime-session",
+            "runtimeValidationError": runtime_check.err(),
             "manifestPresent": manifest.is_some(),
             "artifacts": artifacts,
         }));
@@ -1107,7 +1128,7 @@ fn run_restore_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{exit_code_for_error, verify_visual_runtime};
+    use super::{exit_code_for_error, verify_face_runtime, verify_visual_runtime};
     use std::path::Path;
 
     #[test]
@@ -1120,5 +1141,10 @@ mod tests {
     #[test]
     fn visual_runtime_verification_never_claims_unknown_models_are_runnable() {
         assert!(verify_visual_runtime(Path::new("/tmp"), "unknown-model").is_err());
+    }
+
+    #[test]
+    fn face_runtime_verification_never_claims_conversion_packs_are_runnable() {
+        assert!(verify_face_runtime(Path::new("/tmp"), "insightface-buffalo-sc").is_err());
     }
 }
