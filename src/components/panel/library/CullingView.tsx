@@ -1860,17 +1860,17 @@ export default function CullingView(props: any) {
                   <div className="space-y-2">
                     <div className="flex flex-wrap gap-2">
                       {([
-                        { label: 'Lenient', value: 70 },
-                        { label: 'Moderate', value: 100 },
-                        { label: 'Strict', value: 140 },
+                        { label: 'Lenient', value: 70, isActive: cullSettings.blurThreshold <= 85 },
+                        { label: 'Moderate', value: 100, isActive: cullSettings.blurThreshold > 85 && cullSettings.blurThreshold <= 120 },
+                        { label: 'Strict', value: 140, isActive: cullSettings.blurThreshold > 120 },
                       ] as const).map((opt) => (
                         <button
                           key={opt.label}
                           onClick={() => setCullSettings((s) => ({ ...s, blurThreshold: opt.value, filterBlurry: true }))}
                           className={clsx(
                             'rounded-full px-5 py-1.5 text-xs font-semibold transition-all shadow-xs',
-                            cullSettings.blurThreshold === opt.value
-                              ? 'bg-cyan-500 text-black ring-2 ring-cyan-400'
+                            opt.isActive
+                              ? 'bg-cyan-500 text-black ring-2 ring-cyan-400 font-bold'
                               : 'border border-border-color bg-bg-primary text-text-secondary hover:text-text-primary hover:bg-surface'
                           )}
                         >
@@ -1879,9 +1879,9 @@ export default function CullingView(props: any) {
                       ))}
                     </div>
                     <p className="text-xs text-text-secondary italic">
-                      {cullSettings.blurThreshold <= 75
+                      {cullSettings.blurThreshold <= 85
                         ? 'Lenient: Only marks heavily blurred photos for review - recommended for fast motion or action.'
-                        : cullSettings.blurThreshold >= 130
+                        : cullSettings.blurThreshold > 120
                         ? 'Strict: Rejects any frames that are not tack-sharp - recommended for studio, formal portraits, and macro.'
                         : 'Moderate: Will include images that are slightly out of focus for your review - recommended for most shooting conditions.'}
                     </p>
@@ -1896,18 +1896,18 @@ export default function CullingView(props: any) {
                   <div className="space-y-2">
                     <div className="flex flex-wrap gap-2">
                       {([
-                        { label: 'Identical', value: 12 },
-                        { label: 'Similar', value: 28 },
-                        { label: 'Similarish', value: 38 },
-                        { label: 'Loose', value: 48 },
+                        { label: 'Identical', value: 12, isActive: cullSettings.similarityThreshold <= 18 },
+                        { label: 'Similar', value: 28, isActive: cullSettings.similarityThreshold > 18 && cullSettings.similarityThreshold <= 33 },
+                        { label: 'Similarish', value: 38, isActive: cullSettings.similarityThreshold > 33 && cullSettings.similarityThreshold <= 43 },
+                        { label: 'Loose', value: 48, isActive: cullSettings.similarityThreshold > 43 },
                       ] as const).map((opt) => (
                         <button
                           key={opt.label}
                           onClick={() => setCullSettings((s) => ({ ...s, similarityThreshold: opt.value, groupSimilar: true }))}
                           className={clsx(
                             'rounded-full px-5 py-1.5 text-xs font-semibold transition-all shadow-xs',
-                            cullSettings.similarityThreshold === opt.value
-                              ? 'bg-cyan-500 text-black ring-2 ring-cyan-400'
+                            opt.isActive
+                              ? 'bg-cyan-500 text-black ring-2 ring-cyan-400 font-bold'
                               : 'border border-border-color bg-bg-primary text-text-secondary hover:text-text-primary hover:bg-surface'
                           )}
                         >
@@ -1916,11 +1916,11 @@ export default function CullingView(props: any) {
                       ))}
                     </div>
                     <p className="text-xs text-text-secondary italic">
-                      {cullSettings.similarityThreshold <= 15
+                      {cullSettings.similarityThreshold <= 18
                         ? 'Identical: Groups only burst sequences with near-identical camera framing and subject pose.'
-                        : cullSettings.similarityThreshold <= 30
+                        : cullSettings.similarityThreshold <= 33
                         ? 'Similar: More Selected images - Changes in subject will create a new Duplicate set.'
-                        : cullSettings.similarityThreshold <= 40
+                        : cullSettings.similarityThreshold <= 43
                         ? 'Similarish: Groups moderate variations in expressions and pose together.'
                         : 'Loose: Broadly groups all photos taken in the same scene/angle into duplicate sets.'}
                     </p>
