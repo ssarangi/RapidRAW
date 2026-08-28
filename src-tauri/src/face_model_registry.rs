@@ -89,12 +89,17 @@ struct FaceModelDownloadProgress {
     stage: String,
 }
 
-fn artifact(file_name: &str, format: ModelArtifactFormat, source_url: &str) -> FaceModelArtifact {
+fn artifact(
+    file_name: &str,
+    format: ModelArtifactFormat,
+    source_url: &str,
+    sha256: Option<&str>,
+) -> FaceModelArtifact {
     FaceModelArtifact {
         file_name: file_name.to_string(),
         format,
         source_url: source_url.to_string(),
-        sha256: None,
+        sha256: sha256.map(ToString::to_string),
     }
 }
 
@@ -117,11 +122,13 @@ pub fn face_model_packs() -> Vec<FaceModelPack> {
                     "face_detection_yunet_2023mar.onnx",
                     ModelArtifactFormat::Onnx,
                     "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+                    Some("8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"),
                 ),
                 artifact(
                     "face_recognition_sface_2021dec.onnx",
                     ModelArtifactFormat::Onnx,
                     "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+                    Some("0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79"),
                 ),
             ],
             license_name: "MIT (YuNet), Apache-2.0 (SFace)".to_string(),
@@ -183,7 +190,7 @@ fn insightface_pack(
         detector_landmarks: 5,
         embedding_dimensions: Some(512),
         availability: ModelAvailability::ConversionRequired,
-        artifacts: vec![artifact(file_name, ModelArtifactFormat::Zip, source_url)],
+        artifacts: vec![artifact(file_name, ModelArtifactFormat::Zip, source_url, None)],
         license_name: "InsightFace public pretrained model license".to_string(),
         license_url: "https://github.com/deepinsight/insightface/tree/master/model_zoo".to_string(),
         license_acknowledgement_required: true,
@@ -652,6 +659,31 @@ mod tests {
                 "{} includes a non-HTTPS artifact",
                 pack.id
             );
+        }
+    }
+
+    #[test]
+    fn direct_download_face_packs_require_pinned_sha256_digests() {
+        for pack in face_model_packs()
+            .iter()
+            .filter(|pack| pack.availability == ModelAvailability::DirectDownload)
+        {
+            for artifact in &pack.artifacts {
+                let digest = artifact.sha256.as_deref().unwrap_or("");
+                assert_eq!(
+                    digest.len(),
+                    64,
+                    "Direct-download face artifact {} in pack {} must have a 64-char hex SHA-256",
+                    artifact.file_name,
+                    pack.id
+                );
+                assert!(
+                    digest.chars().all(|c| c.is_ascii_hexdigit()),
+                    "SHA-256 for {} in pack {} must be valid hex",
+                    artifact.file_name,
+                    pack.id
+                );
+            }
         }
     }
 

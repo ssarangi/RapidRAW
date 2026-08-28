@@ -88,11 +88,11 @@ fn visual_artifact(
     }
 }
 
-fn artifact(file_name: &str) -> VisualModelArtifact {
+fn ram_plus_artifact(file_name: &str, sha256: &str) -> VisualModelArtifact {
     visual_artifact(
         file_name,
         &format!("https://huggingface.co/benjaminjonard/ram-plus-onnx/resolve/main/{file_name}"),
-        None,
+        Some(sha256),
     )
 }
 
@@ -104,7 +104,20 @@ pub fn visual_model_packs() -> Vec<VisualModelPack> {
             description: "Broad multi-label tagging for scenes, objects, activities, and wildlife gates.".to_string(),
             task: "Broad visual tagging".to_string(),
             availability: VisualModelAvailability::DirectDownload,
-            artifacts: vec![artifact("model.onnx"), artifact("tags.txt"), artifact("thresholds.txt")],
+            artifacts: vec![
+                ram_plus_artifact(
+                    "model.onnx",
+                    "40ac94a3eb0c5fddfe26b1d6a047fb7afe529b3b7afe569facac8590a3d88773",
+                ),
+                ram_plus_artifact(
+                    "tags.txt",
+                    "1a6c943dd251993770e7cf6fed23a38b7ac068f4c8fbc7a0db85cbe0fe5221b3",
+                ),
+                ram_plus_artifact(
+                    "thresholds.txt",
+                    "81250c4b6a6eb5dc553a084b34d8354b4f2951de5c799a64d3f638d88fe8cf7b",
+                ),
+            ],
             license_name: "Apache-2.0".to_string(),
             license_url: "https://huggingface.co/benjaminjonard/ram-plus-onnx".to_string(),
             model_source_url: "https://github.com/xinyu1205/recognize-anything".to_string(),
@@ -119,22 +132,22 @@ pub fn visual_model_packs() -> Vec<VisualModelPack> {
                 visual_artifact(
                     "vision_encoder.onnx",
                     "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/vision_encoder.onnx",
-                    None,
+                    Some("3ed2c2ad149851297481727463c3085c030bafcf278c070bd9617d810beed5a4"),
                 ),
                 visual_artifact(
                     "vision_encoder.onnx.data",
                     "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/vision_encoder.onnx.data",
-                    None,
+                    Some("c0cdb287d84c0e66dcf58f5f4c1e8ba75b5f42bf2b701addfff60b0879ed5bf1"),
                 ),
                 visual_artifact(
                     "species_embeddings.bin",
                     "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/species_embeddings.bin",
-                    None,
+                    Some("5c4383ca3cd4cfb33ba3166d935a521a2034ae20f0c2045bdab5561331bf81cd"),
                 ),
                 visual_artifact(
                     "species_labels.json",
                     "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/species_labels.json",
-                    None,
+                    Some("57fa63a8bf67c0fbcb9329400939d7352da576283684361fece1fde04c8b9eda"),
                 ),
             ],
             license_name: "MIT".to_string(),
@@ -718,6 +731,31 @@ mod tests {
                     .iter()
                     .all(|artifact| artifact.source_url.starts_with("https://"))
             );
+        }
+    }
+
+    #[test]
+    fn direct_download_visual_packs_require_pinned_sha256_digests() {
+        for pack in visual_model_packs()
+            .iter()
+            .filter(|pack| pack.availability == VisualModelAvailability::DirectDownload)
+        {
+            for artifact in &pack.artifacts {
+                let digest = artifact.expected_sha256.as_deref().unwrap_or("");
+                assert_eq!(
+                    digest.len(),
+                    64,
+                    "Direct-download visual artifact {} in pack {} must have a 64-char hex SHA-256",
+                    artifact.file_name,
+                    pack.id
+                );
+                assert!(
+                    digest.chars().all(|c| c.is_ascii_hexdigit()),
+                    "SHA-256 for {} in pack {} must be valid hex",
+                    artifact.file_name,
+                    pack.id
+                );
+            }
         }
     }
 
