@@ -7,6 +7,7 @@ use rapidraw_lib::face_model_registry::{InstalledFaceModelPack, face_model_packs
 use rapidraw_lib::image_restoration::{
     RestorationRecipe, run_restoration_worker, validate_restoration_recipe,
 };
+use rapidraw_lib::tagging::run_catalog_ram_plus_tagging_headless;
 use rapidraw_lib::visual_model_registry::visual_model_packs;
 use rusqlite::Connection;
 use serde_json::json;
@@ -48,6 +49,7 @@ fn main() {
         Some("tags") if arguments.get(1).map(String::as_str) == Some("status") => tag_status(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("top") => top_tags(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("export-suggestions") => export_tag_suggestions(&arguments),
+        Some("tags") if arguments.get(1).map(String::as_str) == Some("run") => run_ram_plus_tagging_cli(&arguments),
         Some("collections") if arguments.get(1).map(String::as_str) == Some("list") => list_collections(&arguments),
         Some("collections") if arguments.get(1).map(String::as_str) == Some("show") => show_collection(&arguments),
         Some("cull") if arguments.get(1).map(String::as_str) == Some("sessions") => cull_sessions(&arguments),
@@ -57,7 +59,7 @@ fn main() {
         Some("models") if arguments.get(1).map(String::as_str) == Some("verify") => verify_installed_model(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("list") => list_derivatives(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("run") => run_restore_cli(&arguments),
-        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top|export-suggestions --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
+        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top|export-suggestions|run --database <catalog.db> | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -385,6 +387,57 @@ fn export_tag_suggestions(arguments: &[String]) -> Result<serde_json::Value, Str
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     Ok(json!(suggestions))
+}
+
+fn run_ram_plus_tagging_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let db_path = database_argument(arguments)?;
+    let models_dir = PathBuf::from(named_argument(arguments, "--models-dir")?);
+    let max_tags = arguments
+        .windows(2)
+        .find(|pair| pair[0] == "--max-tags")
+        .map(|pair| {
+            pair[1]
+                .parse::<usize>()
+                .map_err(|_| "--max-tags must be an integer between 1 and 100".to_string())
+        })
+        .transpose()?
+        .unwrap_or(20);
+    if !(1..=100).contains(&max_tags) {
+        return Err("--max-tags must be between 1 and 100".to_string());
+    }
+    let include_bioclip = arguments
+        .iter()
+        .any(|argument| argument == "--with-bioclip");
+    let job_id = rapidraw_lib::create_background_job(
+        &db_path,
+        "ram_plus_tagging",
+        json!({
+            "modelId": "ram-plus",
+            "modelRevision": "onnx-v1",
+            "headless": true,
+            "includeBioClip": include_bioclip,
+        }),
+    )?;
+    let control = BackgroundJobControl::new();
+    if let Err(error) = run_catalog_ram_plus_tagging_headless(
+        &db_path,
+        &models_dir,
+        max_tags,
+        include_bioclip,
+        &job_id,
+        &control,
+        Arc::new(tokio::sync::Semaphore::new(1)),
+    ) {
+        let state = if error == "RAM++ tagging cancelled" {
+            "cancelled"
+        } else {
+            "failed"
+        };
+        let _ =
+            rapidraw_lib::update_job(&db_path, &job_id, state, &error, 0, 0, None, Some(&error));
+        return Err(error);
+    }
+    Ok(json!({ "jobId": job_id, "state": "completed" }))
 }
 
 fn verify_model(arguments: &[String]) -> Result<serde_json::Value, String> {

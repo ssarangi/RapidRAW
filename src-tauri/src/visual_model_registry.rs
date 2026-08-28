@@ -454,14 +454,6 @@ pub fn remove_visual_model_pack(pack_id: String, app_handle: AppHandle) -> Resul
     Ok(())
 }
 
-pub(crate) fn installed_visual_model_path(
-    app_handle: &AppHandle,
-    pack_id: &str,
-    file_name: &str,
-) -> Result<PathBuf, String> {
-    installed_visual_model_path_in_dir(&models_dir(app_handle)?, pack_id, file_name)
-}
-
 /// Resolves an installed artifact from an explicit visual-model root. This is
 /// used by headless callers such as `rapidraw-cli`, which do not have a Tauri
 /// application handle but must execute the same verified model packs.

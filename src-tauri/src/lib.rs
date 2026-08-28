@@ -45,7 +45,7 @@ mod panorama_stitching;
 mod panorama_utils;
 mod preset_converter;
 mod raw_processing;
-mod tagging;
+pub mod tagging;
 mod tagging_utils;
 pub mod visual_model_registry;
 mod window_customizer;

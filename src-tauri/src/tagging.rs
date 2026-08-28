@@ -37,43 +37,126 @@ pub(crate) struct RamPlusModels {
     thresholds: Vec<f32>,
 }
 
-pub(crate) fn load_ram_plus_models(app_handle: &AppHandle) -> std::result::Result<Arc<RamPlusModels>, String> {
-    let model_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "ram-plus-onnx", "model.onnx")?;
-    let tags_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "ram-plus-onnx", "tags.txt")?;
-    let thresholds_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "ram-plus-onnx", "thresholds.txt")?;
-    let tags = fs::read_to_string(tags_path).map_err(|error| error.to_string())?.lines().map(str::trim).filter(|tag| !tag.is_empty()).map(str::to_string).collect::<Vec<_>>();
-    let thresholds = fs::read_to_string(thresholds_path).map_err(|error| error.to_string())?.lines().map(str::trim).filter_map(|value| value.parse::<f32>().ok()).collect::<Vec<_>>();
-    if tags.is_empty() || tags.len() != thresholds.len() { return Err("RAM++ tag metadata is invalid or incomplete".to_string()); }
-    let model = Session::builder().map_err(|error| error.to_string())?.commit_from_file(model_path).map_err(|error| error.to_string())?;
-    Ok(Arc::new(RamPlusModels { model: Mutex::new(model), tags, thresholds }))
+pub(crate) fn load_ram_plus_models(
+    app_handle: &AppHandle,
+) -> std::result::Result<Arc<RamPlusModels>, String> {
+    let models_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("models")
+        .join("visual");
+    load_ram_plus_models_in_dir(&models_dir)
+}
+
+fn load_ram_plus_models_in_dir(
+    visual_models_dir: &Path,
+) -> std::result::Result<Arc<RamPlusModels>, String> {
+    let model_path = crate::visual_model_registry::installed_visual_model_path_in_dir(
+        visual_models_dir,
+        "ram-plus-onnx",
+        "model.onnx",
+    )?;
+    let tags_path = crate::visual_model_registry::installed_visual_model_path_in_dir(
+        visual_models_dir,
+        "ram-plus-onnx",
+        "tags.txt",
+    )?;
+    let thresholds_path = crate::visual_model_registry::installed_visual_model_path_in_dir(
+        visual_models_dir,
+        "ram-plus-onnx",
+        "thresholds.txt",
+    )?;
+    let tags = fs::read_to_string(tags_path)
+        .map_err(|error| error.to_string())?
+        .lines()
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let thresholds = fs::read_to_string(thresholds_path)
+        .map_err(|error| error.to_string())?
+        .lines()
+        .map(str::trim)
+        .filter_map(|value| value.parse::<f32>().ok())
+        .collect::<Vec<_>>();
+    if tags.is_empty() || tags.len() != thresholds.len() {
+        return Err("RAM++ tag metadata is invalid or incomplete".to_string());
+    }
+    let model = Session::builder()
+        .map_err(|error| error.to_string())?
+        .commit_from_file(model_path)
+        .map_err(|error| error.to_string())?;
+    Ok(Arc::new(RamPlusModels {
+        model: Mutex::new(model),
+        tags,
+        thresholds,
+    }))
 }
 
 fn ram_plus_input(image: &DynamicImage) -> Array<f32, ndarray::Dim<[usize; 4]>> {
-    let image = image.resize_exact(RAM_PLUS_INPUT_SIZE, RAM_PLUS_INPUT_SIZE, FilterType::Triangle).to_rgb8();
+    let image = image
+        .resize_exact(
+            RAM_PLUS_INPUT_SIZE,
+            RAM_PLUS_INPUT_SIZE,
+            FilterType::Triangle,
+        )
+        .to_rgb8();
     let mean = [0.485, 0.456, 0.406];
     let std = [0.229, 0.224, 0.225];
-    let mut input = Array::zeros((1, 3, RAM_PLUS_INPUT_SIZE as usize, RAM_PLUS_INPUT_SIZE as usize));
+    let mut input = Array::zeros((
+        1,
+        3,
+        RAM_PLUS_INPUT_SIZE as usize,
+        RAM_PLUS_INPUT_SIZE as usize,
+    ));
     for (x, y, pixel) in image.enumerate_pixels() {
-        for channel in 0..3 { input[[0, channel, y as usize, x as usize]] = (pixel[channel] as f32 / 255.0 - mean[channel]) / std[channel]; }
+        for channel in 0..3 {
+            input[[0, channel, y as usize, x as usize]] =
+                (pixel[channel] as f32 / 255.0 - mean[channel]) / std[channel];
+        }
     }
     input
 }
 
-pub(crate) fn generate_tags_with_ram_plus(image: &DynamicImage, models: &RamPlusModels, max_tags: usize) -> std::result::Result<Vec<ScoredTag>, String> {
+pub(crate) fn generate_tags_with_ram_plus(
+    image: &DynamicImage,
+    models: &RamPlusModels,
+    max_tags: usize,
+) -> std::result::Result<Vec<ScoredTag>, String> {
     let input = Tensor::from_array(ram_plus_input(image)).map_err(|error| error.to_string())?;
     let mut session = models.model.lock().unwrap();
-    let output = session.run(ort::inputs![input]).map_err(|error| error.to_string())?;
-    let logits = output[0].try_extract_array::<f32>().map_err(|error| error.to_string())?.iter().copied().collect::<Vec<_>>();
-    if logits.len() != models.tags.len() { return Err(format!("RAM++ output has {} logits but {} tags", logits.len(), models.tags.len())); }
-    let mut results = logits.into_iter().zip(models.tags.iter().zip(models.thresholds.iter())).filter_map(|(logit, (tag, threshold))| {
-        let confidence = 1.0 / (1.0 + (-logit.clamp(-30.0, 30.0)).exp());
-        (confidence > *threshold).then(|| ScoredTag { name: tag.clone(), confidence })
-    }).collect::<Vec<_>>();
+    let output = session
+        .run(ort::inputs![input])
+        .map_err(|error| error.to_string())?;
+    let logits = output[0]
+        .try_extract_array::<f32>()
+        .map_err(|error| error.to_string())?
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    if logits.len() != models.tags.len() {
+        return Err(format!(
+            "RAM++ output has {} logits but {} tags",
+            logits.len(),
+            models.tags.len()
+        ));
+    }
+    let mut results = logits
+        .into_iter()
+        .zip(models.tags.iter().zip(models.thresholds.iter()))
+        .filter_map(|(logit, (tag, threshold))| {
+            let confidence = 1.0 / (1.0 + (-logit.clamp(-30.0, 30.0)).exp());
+            (confidence > *threshold).then(|| ScoredTag {
+                name: tag.clone(),
+                confidence,
+            })
+        })
+        .collect::<Vec<_>>();
     results.sort_by(|left, right| right.confidence.total_cmp(&left.confidence));
     results.truncate(max_tags);
     Ok(results)
 }
-
 
 pub(crate) struct BioClipModels {
     session: std::sync::Mutex<ort::session::Session>,
@@ -96,9 +179,31 @@ fn default_species_rank() -> String {
 }
 
 pub(crate) fn load_bioclip_models(app_handle: &tauri::AppHandle) -> Result<BioClipModels, String> {
-    let model_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "bioclip-v1", "vision_encoder.onnx")?;
-    let embeddings_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "bioclip-v1", "species_embeddings.bin")?;
-    let labels_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "bioclip-v1", "species_labels.json")?;
+    let models_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|error| error.to_string())?
+        .join("models")
+        .join("visual");
+    load_bioclip_models_in_dir(&models_dir)
+}
+
+fn load_bioclip_models_in_dir(visual_models_dir: &Path) -> Result<BioClipModels, String> {
+    let model_path = crate::visual_model_registry::installed_visual_model_path_in_dir(
+        visual_models_dir,
+        "bioclip-v1",
+        "vision_encoder.onnx",
+    )?;
+    let embeddings_path = crate::visual_model_registry::installed_visual_model_path_in_dir(
+        visual_models_dir,
+        "bioclip-v1",
+        "species_embeddings.bin",
+    )?;
+    let labels_path = crate::visual_model_registry::installed_visual_model_path_in_dir(
+        visual_models_dir,
+        "bioclip-v1",
+        "species_labels.json",
+    )?;
 
     if !model_path.exists() || !embeddings_path.exists() || !labels_path.exists() {
         return Err("BioCLIP artifacts missing".into());
@@ -109,8 +214,9 @@ pub(crate) fn load_bioclip_models(app_handle: &tauri::AppHandle) -> Result<BioCl
         .map_err(|e| e.to_string())?;
 
     let labels_json = std::fs::read_to_string(&labels_path).map_err(|e| e.to_string())?;
-    let labels: Vec<BioClipTaxon> = serde_json::from_str(&labels_json)
-        .map_err(|_| "BioCLIP species_labels.json must contain taxonomy records with scientificName".to_string())?;
+    let labels: Vec<BioClipTaxon> = serde_json::from_str(&labels_json).map_err(|_| {
+        "BioCLIP species_labels.json must contain taxonomy records with scientificName".to_string()
+    })?;
 
     let embeddings_bytes = std::fs::read(&embeddings_path).map_err(|e| e.to_string())?;
     if embeddings_bytes.len() % 4 != 0 {
@@ -129,7 +235,7 @@ pub(crate) fn load_bioclip_models(app_handle: &tauri::AppHandle) -> Result<BioCl
         let mut vec = Vec::with_capacity(dim);
         for i in 0..dim {
             let start = i * 4;
-            let val = f32::from_le_bytes(chunk[start..start+4].try_into().unwrap());
+            let val = f32::from_le_bytes(chunk[start..start + 4].try_into().unwrap());
             if !val.is_finite() {
                 return Err("BioCLIP embeddings contain a non-finite value".to_string());
             }
@@ -146,24 +252,47 @@ pub(crate) fn load_bioclip_models(app_handle: &tauri::AppHandle) -> Result<BioCl
 }
 
 fn bioclip_input(image: &image::DynamicImage) -> ndarray::Array<f32, ndarray::Dim<[usize; 4]>> {
-    let image = image.resize_exact(224, 224, image::imageops::FilterType::Triangle).to_rgb8();
+    let image = image
+        .resize_exact(224, 224, image::imageops::FilterType::Triangle)
+        .to_rgb8();
     let mean = [0.48145466, 0.4578275, 0.40821073];
     let std = [0.26862954, 0.26130258, 0.27577711];
     let mut input = ndarray::Array::zeros((1, 3, 224, 224));
     for (x, y, pixel) in image.enumerate_pixels() {
-        for channel in 0..3 { input[[0, channel, y as usize, x as usize]] = (pixel[channel] as f32 / 255.0 - mean[channel]) / std[channel]; }
+        for channel in 0..3 {
+            input[[0, channel, y as usize, x as usize]] =
+                (pixel[channel] as f32 / 255.0 - mean[channel]) / std[channel];
+        }
     }
     input
 }
 
-pub(crate) fn run_bioclip_inference(image: &image::DynamicImage, models: &BioClipModels) -> Result<(BioClipTaxon, f32), String> {
-    let input = ort::value::Tensor::from_array(bioclip_input(image)).map_err(|error| error.to_string())?;
+pub(crate) fn run_bioclip_inference(
+    image: &image::DynamicImage,
+    models: &BioClipModels,
+) -> Result<(BioClipTaxon, f32), String> {
+    let input =
+        ort::value::Tensor::from_array(bioclip_input(image)).map_err(|error| error.to_string())?;
     let mut session = models.session.lock().unwrap();
-    let output = session.run(ort::inputs![input]).map_err(|error| error.to_string())?;
-    let img_emb = output[0].try_extract_array::<f32>().map_err(|error| error.to_string())?.iter().copied().collect::<Vec<_>>();
-    let expected_dimension = models.embeddings.first().map(Vec::len).ok_or("BioCLIP taxonomy is empty")?;
+    let output = session
+        .run(ort::inputs![input])
+        .map_err(|error| error.to_string())?;
+    let img_emb = output[0]
+        .try_extract_array::<f32>()
+        .map_err(|error| error.to_string())?
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    let expected_dimension = models
+        .embeddings
+        .first()
+        .map(Vec::len)
+        .ok_or("BioCLIP taxonomy is empty")?;
     if img_emb.len() != expected_dimension || img_emb.iter().any(|value| !value.is_finite()) {
-        return Err(format!("BioCLIP encoder emitted {} values; taxonomy expects {expected_dimension}", img_emb.len()));
+        return Err(format!(
+            "BioCLIP encoder emitted {} values; taxonomy expects {expected_dimension}",
+            img_emb.len()
+        ));
     }
 
     let norm_img: f32 = img_emb.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
@@ -184,13 +313,232 @@ pub(crate) fn run_bioclip_inference(image: &image::DynamicImage, models: &BioCli
     Ok((models.labels[best_idx].clone(), best_score))
 }
 
+fn store_bioclip_suggestion(
+    db_path: &Path,
+    image_id: i64,
+    image: &DynamicImage,
+    bioclip_models: &Result<BioClipModels, String>,
+    ai_semaphore: &Arc<tokio::sync::Semaphore>,
+) {
+    let Ok(bioclip) = bioclip_models else {
+        return;
+    };
+    let permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
+    let inference_result = run_bioclip_inference(image, bioclip);
+    drop(permit);
+    let Ok((taxon, confidence)) = inference_result else {
+        return;
+    };
+    // Cosine similarity is not calibrated. Species candidates remain suggestions
+    // until a reviewer accepts them.
+    if confidence < 0.25 {
+        return;
+    }
+    let Ok(conn) = rusqlite::Connection::open(db_path) else {
+        return;
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let _ = conn.execute(
+        "DELETE FROM species_classifications WHERE image_id = ?1 AND model_id = 'bioclip-v1' AND review_state = 'suggested'",
+        [image_id],
+    );
+    let _ = conn.execute(
+        "INSERT INTO species_classifications(image_id, model_id, model_revision, scientific_name, common_name, taxon_rank, confidence, review_state, created_at, updated_at)
+         VALUES(?1, 'bioclip-v1', 'v1', ?2, ?3, ?4, ?5, 'suggested', ?6, ?6)",
+        rusqlite::params![
+            image_id,
+            taxon.scientific_name,
+            taxon.common_name,
+            taxon.taxon_rank,
+            confidence as f64,
+            now,
+        ],
+    );
+}
+
+/// Executes the RAM++ catalog batch without a Tauri window. It is shared by
+/// headless callers and follows the same durable job/state contract as the UI.
+pub fn run_catalog_ram_plus_tagging_headless(
+    db_path: &Path,
+    visual_models_dir: &Path,
+    tag_count: usize,
+    include_bioclip: bool,
+    job_id: &str,
+    job_control: &Arc<crate::app_state::BackgroundJobControl>,
+    ai_semaphore: Arc<tokio::sync::Semaphore>,
+) -> Result<(), String> {
+    crate::library_db::update_job(
+        db_path,
+        job_id,
+        "running",
+        "Preparing RAM++ tagging",
+        0,
+        0,
+        None,
+        None,
+    )?;
+    let candidates = crate::library_db::list_ai_tag_candidates_for_model(
+        db_path,
+        RAM_PLUS_MODEL_ID,
+        RAM_PLUS_MODEL_REVISION,
+    )?;
+    let total = candidates.len() as i64;
+    if candidates.is_empty() {
+        return crate::library_db::update_job(
+            db_path,
+            job_id,
+            "completed",
+            "All catalog images already have RAM++ tags",
+            0,
+            0,
+            None,
+            None,
+        );
+    }
+    crate::library_db::update_job(
+        db_path,
+        job_id,
+        "running",
+        "Loading RAM++ model",
+        0,
+        total,
+        None,
+        None,
+    )?;
+    let models = load_ram_plus_models_in_dir(visual_models_dir)?;
+    let bioclip_models = include_bioclip
+        .then(|| load_bioclip_models_in_dir(visual_models_dir))
+        .unwrap_or_else(|| Err("BioCLIP disabled for this job".to_string()));
+
+    for (index, (image_id, path, modified)) in candidates.into_iter().enumerate() {
+        if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
+            return Err("RAM++ tagging cancelled".to_string());
+        }
+        let current = index as i64 + 1;
+        crate::library_db::update_job(
+            db_path,
+            job_id,
+            "running",
+            "RAM++ tagging image",
+            current,
+            total,
+            Some(&path),
+            None,
+        )?;
+        crate::library_db::mark_ai_tag_analysis_state_for_model(
+            db_path,
+            image_id,
+            modified,
+            RAM_PLUS_MODEL_ID,
+            RAM_PLUS_MODEL_REVISION,
+            "processing",
+            None,
+        )?;
+        match crate::face_detection::load_image_for_local_ai(Path::new(&path)) {
+            Ok(image) => {
+                let permit =
+                    tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
+                let result = generate_tags_with_ram_plus(&image, &models, tag_count.clamp(1, 100));
+                drop(permit);
+                match result {
+                    Ok(tags) => {
+                        crate::library_db::replace_ai_tags_for_model(
+                            db_path,
+                            image_id,
+                            RAM_PLUS_MODEL_ID,
+                            RAM_PLUS_MODEL_REVISION,
+                            &tags,
+                        )?;
+                        crate::library_db::mark_ai_tag_analysis_state_for_model(
+                            db_path,
+                            image_id,
+                            modified,
+                            RAM_PLUS_MODEL_ID,
+                            RAM_PLUS_MODEL_REVISION,
+                            "completed",
+                            None,
+                        )?;
+                        if tags.iter().any(|tag| {
+                            let name = tag.name.to_ascii_lowercase();
+                            name.contains("bird")
+                                || name.contains("wildlife")
+                                || name.contains("animal")
+                        }) {
+                            store_bioclip_suggestion(
+                                db_path,
+                                image_id,
+                                &image,
+                                &bioclip_models,
+                                &ai_semaphore,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        crate::library_db::mark_ai_tag_analysis_state_for_model(
+                            db_path,
+                            image_id,
+                            modified,
+                            RAM_PLUS_MODEL_ID,
+                            RAM_PLUS_MODEL_REVISION,
+                            "failed",
+                            Some(&error),
+                        )?;
+                    }
+                }
+            }
+            Err(error) => crate::library_db::mark_ai_tag_analysis_state_for_model(
+                db_path,
+                image_id,
+                modified,
+                RAM_PLUS_MODEL_ID,
+                RAM_PLUS_MODEL_REVISION,
+                "failed",
+                Some(&error),
+            )?,
+        }
+    }
+    crate::library_db::update_job(
+        db_path,
+        job_id,
+        "completed",
+        "RAM++ catalog tagging complete",
+        total,
+        total,
+        None,
+        None,
+    )
+}
+
 #[tauri::command]
-pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
+pub fn start_catalog_ram_plus_tagging(
+    app_handle: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
     let db_path = crate::library_db::active_library_path(&state)?;
-    let job_id = crate::library_db::create_background_job(&db_path, "ram_plus_tagging", serde_json::json!({ "modelId": RAM_PLUS_MODEL_ID, "modelRevision": RAM_PLUS_MODEL_REVISION }))?;
-    crate::library_db::update_job(&db_path, &job_id, "queued", "RAM++ tagging queued", 0, 0, None, None)?;
+    let job_id = crate::library_db::create_background_job(
+        &db_path,
+        "ram_plus_tagging",
+        serde_json::json!({ "modelId": RAM_PLUS_MODEL_ID, "modelRevision": RAM_PLUS_MODEL_REVISION }),
+    )?;
+    crate::library_db::update_job(
+        &db_path,
+        &job_id,
+        "queued",
+        "RAM++ tagging queued",
+        0,
+        0,
+        None,
+        None,
+    )?;
     let job_control = crate::app_state::BackgroundJobControl::new();
-    state.background_job_controls.lock().unwrap().insert(job_id.clone(), job_control.clone());
+    state
+        .background_job_controls
+        .lock()
+        .unwrap()
+        .insert(job_id.clone(), job_control.clone());
     let worker_state = app_handle.clone();
     let species_app_handle = app_handle.clone();
     let worker_db_path = db_path.clone();
@@ -281,41 +629,111 @@ pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, Ap
         let bioclip_models = load_bioclip_models(&species_app_handle);
         for (index, (image_id, path, modified)) in candidates.into_iter().enumerate() {
             if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
-                let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "cancelled", "RAM++ tagging cancelled", index as i64, total, Some(&path), None);
+                let _ = crate::library_db::update_job(
+                    &worker_db_path,
+                    &worker_job_id,
+                    "cancelled",
+                    "RAM++ tagging cancelled",
+                    index as i64,
+                    total,
+                    Some(&path),
+                    None,
+                );
                 cleanup_tag_job(&worker_state, &worker_job_id);
                 return;
             }
-            if *job_control.cancellation_receiver().borrow() { let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "cancelled", "RAM++ tagging cancelled", index as i64, total, Some(&path), None); cleanup_tag_job(&worker_state, &worker_job_id); return; }
+            if *job_control.cancellation_receiver().borrow() {
+                let _ = crate::library_db::update_job(
+                    &worker_db_path,
+                    &worker_job_id,
+                    "cancelled",
+                    "RAM++ tagging cancelled",
+                    index as i64,
+                    total,
+                    Some(&path),
+                    None,
+                );
+                cleanup_tag_job(&worker_state, &worker_job_id);
+                return;
+            }
             let current = index as i64 + 1;
-            let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "running", "RAM++ tagging image", current, total, Some(&path), None);
-            let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(&worker_db_path, image_id, modified, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, "processing", None);
+            let _ = crate::library_db::update_job(
+                &worker_db_path,
+                &worker_job_id,
+                "running",
+                "RAM++ tagging image",
+                current,
+                total,
+                Some(&path),
+                None,
+            );
+            let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(
+                &worker_db_path,
+                image_id,
+                modified,
+                RAM_PLUS_MODEL_ID,
+                RAM_PLUS_MODEL_REVISION,
+                "processing",
+                None,
+            );
 
-            let image_res = crate::file_management::get_cached_or_generate_thumbnail_image(&path, &worker_state, None).map_err(|error| error.to_string());
+            let image_res = crate::file_management::get_cached_or_generate_thumbnail_image(
+                &path,
+                &worker_state,
+                None,
+            )
+            .map_err(|error| error.to_string());
             match image_res {
                 Ok(image) => {
-                    let _permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
+                    let _permit =
+                        tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
                     let result = generate_tags_with_ram_plus(&image, &models, tag_count);
                     drop(_permit);
                     match result {
                         Ok(tags) => {
-                            let _ = crate::library_db::replace_ai_tags_for_model(&worker_db_path, image_id, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, &tags);
-                            let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(&worker_db_path, image_id, modified, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, "completed", None);
+                            let _ = crate::library_db::replace_ai_tags_for_model(
+                                &worker_db_path,
+                                image_id,
+                                RAM_PLUS_MODEL_ID,
+                                RAM_PLUS_MODEL_REVISION,
+                                &tags,
+                            );
+                            let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(
+                                &worker_db_path,
+                                image_id,
+                                modified,
+                                RAM_PLUS_MODEL_ID,
+                                RAM_PLUS_MODEL_REVISION,
+                                "completed",
+                                None,
+                            );
 
                             let has_bird_or_wildlife = tags.iter().any(|t| {
                                 let lower = t.name.to_ascii_lowercase();
-                                lower.contains("bird") || lower.contains("wildlife") || lower.contains("animal")
+                                lower.contains("bird")
+                                    || lower.contains("wildlife")
+                                    || lower.contains("animal")
                             });
                             if has_bird_or_wildlife {
                                 if let Ok(bioclip) = &bioclip_models {
-                                    let _permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
+                                    let _permit = tauri::async_runtime::block_on(
+                                        ai_semaphore.clone().acquire_owned(),
+                                    )
+                                    .ok();
                                     let inference_result = run_bioclip_inference(&image, bioclip);
                                     drop(_permit);
                                     if let Ok((taxon, confidence)) = inference_result {
                                         // Cosine similarity is not a calibrated probability. Keep a conservative
                                         // review threshold and preserve the raw similarity in the catalog.
                                         if confidence >= 0.25 {
-                                            if let Ok(conn) = rusqlite::Connection::open(&worker_db_path) {
-                                                let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+                                            if let Ok(conn) =
+                                                rusqlite::Connection::open(&worker_db_path)
+                                            {
+                                                let now = std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .unwrap_or_default()
+                                                    .as_secs()
+                                                    as i64;
                                                 let _ = conn.execute(
                                                     "DELETE FROM species_classifications WHERE image_id = ?1 AND model_id = 'bioclip-v1' AND review_state = 'suggested'",
                                                     [image_id],
@@ -338,20 +756,54 @@ pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, Ap
                                 }
                             }
                         }
-                        Err(error) => { let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(&worker_db_path, image_id, modified, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, "failed", Some(&error)); }
+                        Err(error) => {
+                            let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(
+                                &worker_db_path,
+                                image_id,
+                                modified,
+                                RAM_PLUS_MODEL_ID,
+                                RAM_PLUS_MODEL_REVISION,
+                                "failed",
+                                Some(&error),
+                            );
+                        }
                     }
                 }
-                Err(error) => { let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(&worker_db_path, image_id, modified, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION, "failed", Some(&error)); }
+                Err(error) => {
+                    let _ = crate::library_db::mark_ai_tag_analysis_state_for_model(
+                        &worker_db_path,
+                        image_id,
+                        modified,
+                        RAM_PLUS_MODEL_ID,
+                        RAM_PLUS_MODEL_REVISION,
+                        "failed",
+                        Some(&error),
+                    );
+                }
             }
         }
-        let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "completed", "RAM++ catalog tagging complete", total, total, None, None);
+        let _ = crate::library_db::update_job(
+            &worker_db_path,
+            &worker_job_id,
+            "completed",
+            "RAM++ catalog tagging complete",
+            total,
+            total,
+            None,
+            None,
+        );
         cleanup_tag_job(&worker_state, &worker_job_id);
     });
     Ok(job_id)
 }
 
 fn cleanup_tag_job(app_handle: &AppHandle, job_id: &str) {
-    app_handle.state::<AppState>().background_job_controls.lock().unwrap().remove(job_id);
+    app_handle
+        .state::<AppState>()
+        .background_job_controls
+        .lock()
+        .unwrap()
+        .remove(job_id);
 }
 
 #[tauri::command]
@@ -419,13 +871,29 @@ pub async fn start_catalog_ai_tagging(
     let worker_job_id = job_id.clone();
     let worker_app_handle = app_handle.clone();
     let job_control = crate::app_state::BackgroundJobControl::new();
-    state.background_job_controls.lock().unwrap().insert(job_id.clone(), job_control.clone());
+    state
+        .background_job_controls
+        .lock()
+        .unwrap()
+        .insert(job_id.clone(), job_control.clone());
     tauri::async_runtime::spawn_blocking(move || {
-        let ai_semaphore = worker_app_handle.state::<AppState>().ai_job_semaphore.clone();
+        let ai_semaphore = worker_app_handle
+            .state::<AppState>()
+            .ai_job_semaphore
+            .clone();
         let total = candidates.len() as i64;
         for (index, (image_id, path, modified)) in candidates.into_iter().enumerate() {
             if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
-                let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "cancelled", "Catalog AI tagging cancelled", index as i64, total, None, None);
+                let _ = crate::library_db::update_job(
+                    &worker_db_path,
+                    &worker_job_id,
+                    "cancelled",
+                    "Catalog AI tagging cancelled",
+                    index as i64,
+                    total,
+                    None,
+                    None,
+                );
                 return;
             }
             if *job_control.cancellation_receiver().borrow() {
@@ -468,7 +936,8 @@ pub async fn start_catalog_ai_tagging(
             )
             .map_err(|error| error.to_string())
             .and_then(|image| {
-                let _permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
+                let _permit =
+                    tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
                 let res = generate_tags_with_clip(
                     &image,
                     &clip_models.model,

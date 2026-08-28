@@ -541,7 +541,11 @@ pub fn save_face_crop_image(
     Ok(crop_path)
 }
 
-pub fn load_image_for_face_ai(path: &Path, app_handle: &AppHandle) -> Result<DynamicImage, String> {
+/// Loads an image suitable for local AI inference without requiring a Tauri
+/// window. RAW files use embedded previews, a JPEG companion, or rawler.
+/// Callers with an application handle may use `load_image_for_face_ai` for an
+/// additional thumbnail-cache fallback.
+pub fn load_image_for_local_ai(path: &Path) -> Result<DynamicImage, String> {
     let path_str = path.to_string_lossy();
     if crate::formats::is_raw_file(path) {
         // 1. Comprehensive multi-IFD TIFF/RAF/ARW embedded JPEG extraction
@@ -578,8 +582,22 @@ pub fn load_image_for_face_ai(path: &Path, app_handle: &AppHandle) -> Result<Dyn
     if let Ok(img) = image::open(path) {
         return Ok(img);
     }
-    crate::file_management::get_cached_or_generate_thumbnail_image(&path_str, app_handle, None)
-        .map_err(|e| e.to_string())
+    Err(format!(
+        "Could not load an AI preview for {}",
+        path.display()
+    ))
+}
+
+pub fn load_image_for_face_ai(path: &Path, app_handle: &AppHandle) -> Result<DynamicImage, String> {
+    match load_image_for_local_ai(path) {
+        Ok(image) => Ok(image),
+        Err(_) => crate::file_management::get_cached_or_generate_thumbnail_image(
+            &path.to_string_lossy(),
+            app_handle,
+            None,
+        )
+        .map_err(|error| error.to_string()),
+    }
 }
 
 #[tauri::command]
@@ -1140,6 +1158,18 @@ fn run_face_detection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_ai_loader_reads_regular_images_without_an_app_handle() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("fixture.png");
+        image::RgbImage::from_pixel(12, 8, image::Rgb([12, 34, 56]))
+            .save(&path)
+            .unwrap();
+
+        let image = load_image_for_local_ai(&path).unwrap();
+        assert_eq!((image.width(), image.height()), (12, 8));
+    }
 
     #[test]
     fn overlap_measure_is_high_for_same_face() {
