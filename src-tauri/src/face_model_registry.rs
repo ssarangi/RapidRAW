@@ -418,7 +418,11 @@ pub async fn download_face_model_pack(
             crate::library_db::create_background_job(
                 &db_path,
                 "model_download",
-                serde_json::json!({ "packId": pack.id, "displayName": pack.display_name }),
+                serde_json::json!({
+                    "packId": pack.id,
+                    "displayName": pack.display_name,
+                    "registry": "face",
+                }),
             )
             .map(|job_id| (db_path, job_id))
             .ok()

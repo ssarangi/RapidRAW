@@ -1085,6 +1085,36 @@ mod tests {
     }
 
     #[test]
+    fn model_download_retry_payload_supports_new_and_legacy_jobs() {
+        assert_eq!(
+            parse_model_download_retry_payload(&serde_json::json!({
+                "packId": "ram-plus-onnx",
+                "registry": "visual"
+            }))
+            .unwrap(),
+            ModelDownloadRetryTarget::Visual {
+                pack_id: "ram-plus-onnx".to_string()
+            }
+        );
+        assert_eq!(
+            parse_model_download_retry_payload(&serde_json::json!({
+                "packId": "opencv-yunet-sface"
+            }))
+            .unwrap(),
+            ModelDownloadRetryTarget::Face {
+                pack_id: "opencv-yunet-sface".to_string()
+            }
+        );
+        assert_eq!(
+            parse_model_download_retry_payload(&serde_json::json!({
+                "packId": "unknown-pack"
+            }))
+            .unwrap_err(),
+            "Unknown model pack in job history: unknown-pack"
+        );
+    }
+
+    #[test]
     fn headless_library_creation_and_root_addition_do_not_need_a_tauri_handle() {
         let directory = tempfile::tempdir().unwrap();
         let db_path = directory.path().join("catalog.db");
@@ -3188,6 +3218,20 @@ pub fn retry_background_job(
             ))
             .map(|_| ())
         }
+        "model_download" => match parse_model_download_retry_payload(&payload)? {
+            ModelDownloadRetryTarget::Visual { pack_id } => tauri::async_runtime::block_on(
+                crate::visual_model_registry::download_visual_model_pack(
+                    pack_id, app_handle, state,
+                ),
+            )
+            .map(|_| ()),
+            ModelDownloadRetryTarget::Face { pack_id } => tauri::async_runtime::block_on(
+                crate::face_model_registry::download_face_model_pack(
+                    pack_id, false, app_handle, state,
+                ),
+            )
+            .map(|_| ()),
+        },
         _ => Err(format!("Retry is not available for {kind}")),
     }
 }
@@ -3230,6 +3274,45 @@ fn parse_cull_analysis_retry_payload(
             .and_then(|value| value.as_bool())
             .unwrap_or(false),
     })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ModelDownloadRetryTarget {
+    Visual { pack_id: String },
+    Face { pack_id: String },
+}
+
+fn parse_model_download_retry_payload(
+    payload: &serde_json::Value,
+) -> Result<ModelDownloadRetryTarget, String> {
+    let pack_id = payload
+        .get("packId")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "Model download job has no pack ID".to_string())?
+        .to_string();
+    let registry = payload.get("registry").and_then(|value| value.as_str());
+    match registry {
+        Some("visual") => Ok(ModelDownloadRetryTarget::Visual { pack_id }),
+        Some("face") => Ok(ModelDownloadRetryTarget::Face { pack_id }),
+        Some(other) => Err(format!("Unknown model download registry: {other}")),
+        None => {
+            let is_visual = crate::visual_model_registry::visual_model_packs()
+                .iter()
+                .any(|pack| pack.id == pack_id);
+            let is_face = crate::face_model_registry::face_model_packs()
+                .iter()
+                .any(|pack| pack.id == pack_id);
+            match (is_visual, is_face) {
+                (true, false) => Ok(ModelDownloadRetryTarget::Visual { pack_id }),
+                (false, true) => Ok(ModelDownloadRetryTarget::Face { pack_id }),
+                (false, false) => Err(format!("Unknown model pack in job history: {pack_id}")),
+                (true, true) => Err(format!(
+                    "Ambiguous model pack in job history: {pack_id}; reinstall it from Settings"
+                )),
+            }
+        }
+    }
 }
 
 fn color_label_from_tags(tags: Option<&Vec<String>>) -> Option<String> {
