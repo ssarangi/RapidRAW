@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef, useMemo, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { invoke } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
+import { open } from '@tauri-apps/plugin-dialog';
 import { List, useListCallbackRef } from 'react-window';
 import {
   Loader2,
@@ -17,15 +18,19 @@ import {
   SlidersHorizontal,
   Info,
   History,
+  Filter,
+  FolderOpen,
+  Play,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
-import { CullSessionDecision, CullSessionSummary, Invokes, ImageFile } from '../../ui/AppProperties';
+import { AutoCullPlan, AutoCullResult, CullingSettings, CullSessionDecision, CullSessionSummary, Invokes, ImageFile } from '../../ui/AppProperties';
 import { Thumbnail } from './LibraryItems';
 import Text from '../../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { useProcessStore } from '../../../store/useProcessStore';
 import { useLibraryStore } from '../../../store/useLibraryStore';
+import { useUIStore } from '../../../store/useUIStore';
 import { useSettingsStore } from '../../../store/useSettingsStore';
 import { useLibraryActions } from '../../../hooks/useLibraryActions';
 import { COLOR_LABELS, Color } from '../../../utils/adjustments';
@@ -38,6 +43,36 @@ interface SyncViewport {
   pan: { x: number; y: number };
   isDragging: boolean;
 }
+
+interface CullFaceReviewItem {
+  face: { id: number; confidence: number };
+  cropPath?: string | null;
+  thumbnailDataUrl?: string | null;
+}
+
+interface CullSubjectEvidence {
+  aiTags: Array<{ name: string; confidence: number; reviewState: string }>;
+  species: Array<{ commonName?: string | null; scientificName: string; confidence: number; reviewState: string }>;
+}
+
+const DEFAULT_CULL_SETTINGS: CullingSettings = {
+  similarityThreshold: 28,
+  blurThreshold: 100,
+  groupSimilar: true,
+  filterBlurry: true,
+  useSubjectDetection: true,
+  subjectMode: 'general',
+};
+
+const CULL_FEEDBACK_REASONS = [
+  'Stronger moment or expression',
+  'Better focus or detail',
+  'Better composition',
+  'Better subject visibility',
+  'Prefer a different duplicate',
+  'Keep despite technical issue',
+  'Reject despite AI selection',
+] as const;
 
 function CullHistoryPanel({ onClose }: { onClose(): void }) {
   const [sessions, setSessions] = useState<CullSessionSummary[]>([]);
@@ -1054,6 +1089,134 @@ export default function CullingView(props: any) {
   const [showInfoBar, setShowInfoBar] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const isCatalog = useLibraryStore((state) => state.librarySource.type === 'catalog');
+  const catalogRoots = useLibraryStore((state) => state.catalogRoots);
+  const cullWorkspaceFolderPath = useUIStore((state) => state.cullWorkspaceFolderPath);
+  const cullProgress = useUIStore((state) => state.cullWorkspaceProgress);
+  const thumbnails = useProcessStore((state) => state.thumbnails);
+  const [reviewFilter, setReviewFilter] = useState<'all' | 'selected' | 'highlights' | 'duplicates' | 'blurry'>('all');
+  const [cullDecisions, setCullDecisions] = useState<Record<string, CullSessionDecision>>({});
+  const [activeFaces, setActiveFaces] = useState<CullFaceReviewItem[]>([]);
+  const [subjectEvidence, setSubjectEvidence] = useState<CullSubjectEvidence | null>(null);
+  const activeImage = useMemo(() => imageList.find((image: ImageFile) => image.path === activePath), [imageList, activePath]);
+  const [cullFolderPath, setCullFolderPath] = useState<string | null>(null);
+  const [cullSettings, setCullSettings] = useState<CullingSettings>(DEFAULT_CULL_SETTINGS);
+  const [includeSubfolders, setIncludeSubfolders] = useState(false);
+  const [isPlanningCull, setIsPlanningCull] = useState(false);
+  const [localCullPlan, setLocalCullPlan] = useState<AutoCullPlan | null>(null);
+  const [cullError, setCullError] = useState<string | null>(null);
+  const [isApplyingCull, setIsApplyingCull] = useState(false);
+  const [decisionFeedbackReason, setDecisionFeedbackReason] = useState('');
+  const cullGridRef = useRef<HTMLDivElement>(null);
+  const marqueeStart = useRef<{ x: number; y: number; additive: boolean; initialSelection: string[] } | null>(null);
+  const marqueeMoved = useRef(false);
+  const [marqueeBounds, setMarqueeBounds] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  const activePlanItem = useMemo(
+    () => localCullPlan?.items.find((item) => item.representativePath === activePath) || null,
+    [localCullPlan, activePath],
+  );
+  const duplicateRepresentativePath = useMemo(() => {
+    if (!activePath) return null;
+    const duplicatePrefix = 'duplicate_of:';
+    return activePlanItem?.reason.startsWith(duplicatePrefix)
+      ? activePlanItem.reason.slice(duplicatePrefix.length)
+      : activePath;
+  }, [activePath, activePlanItem]);
+  const relatedDuplicatePaths = useMemo(() => {
+    if (!localCullPlan || !activePath) return [];
+    const duplicatePrefix = 'duplicate_of:';
+    const representativePath = duplicateRepresentativePath || activePath;
+    const related = localCullPlan.items
+      .filter((item) => item.representativePath === representativePath || item.reason === `${duplicatePrefix}${representativePath}`)
+      .map((item) => item.representativePath);
+    return related.length > 1 ? related : [];
+  }, [activePath, duplicateRepresentativePath, localCullPlan]);
+  const cullCatalogScope = useMemo(() => {
+    if (!cullFolderPath || !isCatalog) return null;
+    const match = /^LibraryFolder:(\d+):(.*)$/.exec(cullFolderPath);
+    if (!match) return null;
+    const rootId = Number(match[1]);
+    const relativePath = match[2] || '.';
+    const root = catalogRoots.find((candidate) => candidate.id === rootId);
+    if (!root) return null;
+    const absoluteFolderPath = relativePath === '.'
+      ? root.absolutePath
+      : `${root.absolutePath.replace(/[\\/]$/, '')}/${relativePath}`;
+    return { rootId, relativePath, absoluteFolderPath, rootPath: root.absolutePath };
+  }, [catalogRoots, cullFolderPath, isCatalog]);
+
+  useEffect(() => {
+    if (!cullWorkspaceFolderPath || cullWorkspaceFolderPath === cullFolderPath) return;
+    setCullFolderPath(cullWorkspaceFolderPath);
+    setLocalCullPlan(null);
+    setCullDecisions({});
+    setCullError(null);
+  }, [cullWorkspaceFolderPath, cullFolderPath]);
+
+  useEffect(() => {
+    if (!isCatalog) { setCullDecisions({}); return; }
+    let active = true;
+    void invoke<CullSessionSummary[]>(Invokes.ListCullSessions)
+      .then(async (sessions) => {
+        const session = sessions.find((candidate) => candidate.state === 'planned') || sessions[0];
+        if (!session) return [];
+        return invoke<CullSessionDecision[]>(Invokes.ListCullSessionDecisions, { sessionId: session.id });
+      })
+      .then((decisions) => {
+        if (!active) return;
+        setCullDecisions(Object.fromEntries(decisions.map((decision) => [decision.representativePath, decision])));
+      })
+      .catch(() => { if (active) setCullDecisions({}); });
+    return () => { active = false; };
+  }, [isCatalog, imageList]);
+
+  useEffect(() => {
+    if (!localCullPlan) return;
+    setCullDecisions(Object.fromEntries(localCullPlan.items.map((item, index) => [item.representativePath, {
+      id: -(index + 1),
+      representativePath: item.representativePath,
+      proposedStatus: item.keep ? 'keep' : 'reject',
+      finalStatus: 'pending',
+      qualityScore: item.qualityScore,
+      reason: item.reason,
+    }] as const)));
+  }, [localCullPlan]);
+
+  useEffect(() => {
+    if (!isCatalog || !activePath) {
+      setActiveFaces([]);
+      return;
+    }
+    let active = true;
+    void invoke<CullFaceReviewItem[]>(Invokes.ListCatalogFaceReviewItemsForPath, { path: activePath })
+      .then((faces) => {
+        if (!active) return;
+        setActiveFaces(faces);
+        for (const item of faces) {
+          if (!item.thumbnailDataUrl && !item.cropPath) {
+            void invoke<string>('get_or_generate_face_crop', { faceId: item.face.id })
+              .then((thumbnailDataUrl) => {
+                if (!active || !thumbnailDataUrl) return;
+                setActiveFaces((current) => current.map((face) => face.face.id === item.face.id ? { ...face, thumbnailDataUrl } : face));
+              })
+              .catch(() => {});
+          }
+        }
+      })
+      .catch(() => { if (active) setActiveFaces([]); });
+    return () => { active = false; };
+  }, [isCatalog, activePath]);
+
+  useEffect(() => {
+    if (!isCatalog || !activeImage?.catalog_image_id) {
+      setSubjectEvidence(null);
+      return;
+    }
+    let active = true;
+    void invoke<CullSubjectEvidence>(Invokes.GetImageProvenance, { imageId: activeImage.catalog_image_id })
+      .then((evidence) => { if (active) setSubjectEvidence(evidence); })
+      .catch(() => { if (active) setSubjectEvidence(null); });
+    return () => { active = false; };
+  }, [isCatalog, activeImage?.catalog_image_id]);
 
   const [listHandle, setListHandle] = useListCallbackRef();
   const prevActivePath = useRef<string | null>(null);
@@ -1162,9 +1325,51 @@ export default function CullingView(props: any) {
     };
   }, [resize, stopResizing]);
 
+  const rankedFinalists = useMemo(() => {
+    const kept = Object.values(cullDecisions)
+      .filter((decision) => decision.finalStatus === 'keep' || (decision.finalStatus === 'pending' && decision.proposedStatus === 'keep'))
+      .sort((left, right) => right.qualityScore - left.qualityScore);
+    return kept.slice(0, Math.ceil(kept.length * 0.15));
+  }, [cullDecisions]);
+  const highlightPaths = useMemo(
+    () => new Set(rankedFinalists.map((decision) => decision.representativePath)),
+    [rankedFinalists],
+  );
+  const finalistRanks = useMemo(
+    () => new Map(rankedFinalists.map((decision, index) => [decision.representativePath, index + 1])),
+    [rankedFinalists],
+  );
+
+  const cullImageList = useMemo(() => imageList.filter((image: ImageFile) => {
+    const decision = cullDecisions[image.path];
+    if (reviewFilter === 'all') return true;
+    if (reviewFilter === 'selected') return decision?.finalStatus === 'keep' || (!decision?.finalStatus && decision?.proposedStatus === 'keep');
+    if (reviewFilter === 'highlights') return highlightPaths.has(image.path);
+    if (reviewFilter === 'duplicates') return decision?.reason.startsWith('duplicate_of:');
+    return !!decision && !decision.reason.startsWith('duplicate_of:') && (decision.proposedStatus === 'reject' || decision.finalStatus === 'reject');
+  }), [imageList, cullDecisions, highlightPaths, reviewFilter]);
+
+  const cullFilterCounts = useMemo(() => ({
+    all: imageList.length,
+    selected: imageList.filter((image: ImageFile) => {
+      const decision = cullDecisions[image.path];
+      return decision?.finalStatus === 'keep' || (!decision?.finalStatus && decision?.proposedStatus === 'keep');
+    }).length,
+    highlights: imageList.filter((image: ImageFile) => highlightPaths.has(image.path)).length,
+    duplicates: imageList.filter((image: ImageFile) => cullDecisions[image.path]?.reason.startsWith('duplicate_of:')).length,
+    blurry: imageList.filter((image: ImageFile) => {
+      const decision = cullDecisions[image.path];
+      return !!decision && !decision.reason.startsWith('duplicate_of:') && (decision.proposedStatus === 'reject' || decision.finalStatus === 'reject');
+    }).length,
+  }), [imageList, cullDecisions, highlightPaths]);
+
+  useEffect(() => {
+    cullImageList.slice(0, 500).forEach((image: ImageFile) => queueThumbnailRequest(image));
+  }, [cullImageList, queueThumbnailRequest]);
+
   const rowProps = useMemo(
     () => ({
-      imageList,
+      imageList: cullImageList,
       multiSelectedPaths,
       activePath,
       thumbnailAspectRatio,
@@ -1177,7 +1382,7 @@ export default function CullingView(props: any) {
       hoveredCullingPath,
     }),
     [
-      imageList,
+      cullImageList,
       multiSelectedPaths,
       activePath,
       thumbnailAspectRatio,
@@ -1211,17 +1416,231 @@ export default function CullingView(props: any) {
     }
   };
 
+  const chooseCullFolder = async () => {
+    const path = await open({ directory: true, multiple: false, title: 'Choose a folder to cull' });
+    if (typeof path !== 'string') return;
+    setCullFolderPath(path);
+    useUIStore.getState().setUI({ cullWorkspaceFolderPath: path });
+    setLocalCullPlan(null);
+    setCullDecisions({});
+    setCullError(null);
+  };
+
+  const startCullFromRail = async () => {
+    if (!cullFolderPath || isPlanningCull) return;
+    setIsPlanningCull(true);
+    setCullError(null);
+    useUIStore.getState().setUI({ cullWorkspaceProgress: null });
+    try {
+      const files = cullCatalogScope
+        ? await invoke<ImageFile[]>(Invokes.ListCatalogImages, {
+          rootId: cullCatalogScope.rootId,
+          recursive: includeSubfolders,
+          folderPath: cullCatalogScope.relativePath,
+        })
+        : await invoke<ImageFile[]>(
+          includeSubfolders ? Invokes.ListImagesRecursive : Invokes.ListImagesInDir,
+          { path: cullFolderPath },
+        );
+      const imageRatings = Object.fromEntries(files.map((file) => [file.path, file.rating || 0]));
+      useLibraryStore.getState().setLibrary({
+        currentFolderPath: cullFolderPath,
+        rootPaths: [cullCatalogScope?.rootPath || cullFolderPath],
+        imageList: files,
+        imageRatings,
+        multiSelectedPaths: [],
+        libraryActivePath: null,
+        libraryScrollTop: 0,
+      });
+      const catalogImageIds: Record<string, number> = {};
+      if (cullCatalogScope) {
+        for (const file of files) {
+          if (file.catalog_image_id != null) catalogImageIds[file.path] = file.catalog_image_id;
+        }
+      }
+      const plan = await invoke<AutoCullPlan>(Invokes.PlanAutoCull, {
+        folderPath: cullCatalogScope?.absoluteFolderPath || cullFolderPath,
+        includeSubfolders,
+        settings: cullSettings,
+        rejectedFolderName: '_rejected',
+        deleteInsteadOfMove: false,
+        catalogImageIds: Object.keys(catalogImageIds).length > 0 ? catalogImageIds : null,
+      });
+      setLocalCullPlan(plan);
+    } catch (error) {
+      setCullError(String(error));
+    } finally {
+      setIsPlanningCull(false);
+      useUIStore.getState().setUI({ cullWorkspaceProgress: null });
+    }
+  };
+
+  const updateLocalCullDecision = async (path: string, keep: boolean, feedbackReason?: string) => {
+    if (!localCullPlan) return;
+    const nextPlan = {
+      ...localCullPlan,
+      items: localCullPlan.items.map((item) => item.representativePath === path ? { ...item, keep } : item),
+    };
+    nextPlan.rejectCount = nextPlan.items.filter((item) => !item.keep).length;
+    setLocalCullPlan(nextPlan);
+    if (nextPlan.sessionId) {
+      try {
+        await invoke(Invokes.UpdateCullSessionDecision, {
+          sessionId: nextPlan.sessionId,
+          representativePath: path,
+          keep,
+          feedbackReason: feedbackReason?.trim() || null,
+        });
+        if (feedbackReason) setDecisionFeedbackReason('');
+      } catch (error) {
+        setCullError(`Could not save this review decision: ${String(error)}`);
+      }
+    }
+  };
+
+  const updateSelectedCullDecisions = async (keep: boolean) => {
+    if (!localCullPlan) return;
+    const selectedPaths = multiSelectedPaths.filter((path: string) =>
+      localCullPlan.items.some((item) => item.representativePath === path),
+    );
+    if (selectedPaths.length === 0) return;
+
+    const selected = new Set(selectedPaths);
+    const nextPlan = {
+      ...localCullPlan,
+      items: localCullPlan.items.map((item) =>
+        selected.has(item.representativePath) ? { ...item, keep } : item,
+      ),
+    };
+    nextPlan.rejectCount = nextPlan.items.filter((item) => !item.keep).length;
+    setLocalCullPlan(nextPlan);
+
+    if (nextPlan.sessionId) {
+      try {
+        await Promise.all(selectedPaths.map((representativePath: string) => invoke(
+          Invokes.UpdateCullSessionDecision,
+          { sessionId: nextPlan.sessionId, representativePath, keep },
+        )));
+      } catch (error) {
+        setCullError(`Could not save these review decisions: ${String(error)}`);
+      }
+    }
+  };
+
+  const selectAllCullCandidates = () => {
+    if (!localCullPlan) return;
+    const paths = localCullPlan.items.map((item) => item.representativePath);
+    useLibraryStore.getState().setLibrary({
+      multiSelectedPaths: paths,
+      libraryActivePath: paths[0] || null,
+      selectionAnchorPath: paths[0] || null,
+    });
+  };
+
+  const beginGridSelection = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!localCullPlan || event.button !== 0) return;
+    marqueeStart.current = {
+      x: event.clientX,
+      y: event.clientY,
+      additive: event.ctrlKey || event.metaKey,
+      initialSelection: multiSelectedPaths,
+    };
+    marqueeMoved.current = false;
+    setMarqueeBounds(null);
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const extendGridSelection = (event: React.PointerEvent<HTMLDivElement>) => {
+    const start = marqueeStart.current;
+    const grid = cullGridRef.current;
+    if (!start || !grid) return;
+    if (Math.abs(event.clientX - start.x) < 6 && Math.abs(event.clientY - start.y) < 6) return;
+    marqueeMoved.current = true;
+    const gridBounds = grid.getBoundingClientRect();
+    setMarqueeBounds({
+      left: Math.min(start.x, event.clientX) - gridBounds.left,
+      top: Math.min(start.y, event.clientY) - gridBounds.top,
+      width: Math.abs(event.clientX - start.x),
+      height: Math.abs(event.clientY - start.y),
+    });
+    const left = Math.min(start.x, event.clientX);
+    const right = Math.max(start.x, event.clientX);
+    const top = Math.min(start.y, event.clientY);
+    const bottom = Math.max(start.y, event.clientY);
+    const draggedPaths = Array.from(grid.querySelectorAll<HTMLElement>('[data-cull-path]'))
+      .filter((element) => {
+        const bounds = element.getBoundingClientRect();
+        return bounds.right >= left && bounds.left <= right && bounds.bottom >= top && bounds.top <= bottom;
+      })
+      .map((element) => element.dataset.cullPath)
+      .filter((path): path is string => Boolean(path));
+    const selectedPaths = start.additive
+      ? Array.from(new Set([...start.initialSelection, ...draggedPaths]))
+      : draggedPaths;
+    useLibraryStore.getState().setLibrary({
+      multiSelectedPaths: selectedPaths,
+      libraryActivePath: selectedPaths.at(-1) || null,
+      selectionAnchorPath: selectedPaths.at(-1) || null,
+    });
+  };
+
+  const endGridSelection = (event: React.PointerEvent<HTMLDivElement>) => {
+    marqueeStart.current = null;
+    setMarqueeBounds(null);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  const applyCullFromRail = async () => {
+    if (!localCullPlan || isApplyingCull) return;
+    if (localCullPlan.items.some((item) => !item.keep && item.hasConflict)) {
+      setCullError('Some rejected files already exist in _rejected. Resolve the duplicate filenames before applying this plan.');
+      return;
+    }
+    setIsApplyingCull(true);
+    setCullError(null);
+    try {
+      const result = await invoke<AutoCullResult>(Invokes.ApplyAutoCullPlan, { plan: localCullPlan, conflictAction: null });
+      const moved = new Set(result.moved.map((item) => item.oldPath));
+      useLibraryStore.getState().setLibrary((state) => ({
+        imageList: state.imageList.filter((image) => !moved.has(image.path)),
+        multiSelectedPaths: state.multiSelectedPaths.filter((path) => !moved.has(path)),
+        libraryActivePath: moved.has(state.libraryActivePath || '') ? null : state.libraryActivePath,
+      }));
+      setLocalCullPlan(null);
+    } catch (error) {
+      setCullError(String(error));
+    } finally {
+      setIsApplyingCull(false);
+    }
+  };
+
   return (
     <div className="flex w-full h-full min-h-0 bg-transparent">
       <div className="flex-1 flex overflow-hidden relative bg-transparent">
         {isCatalog && <button className="absolute z-40 top-3 right-3 h-9 w-9 flex items-center justify-center rounded-md bg-bg-secondary/90 border border-border-color text-text-primary hover:bg-surface" onClick={() => setShowHistory((current) => !current)} data-tooltip="Culling history"><History size={16} /></button>}
         {isCatalog && showHistory && <CullHistoryPanel onClose={() => setShowHistory(false)} />}
-        {displayCount === 0 ? (
-          <div className="m-auto text-center">
-            <Text variant={TextVariants.heading} color={TextColors.secondary}>
-              {t('library.culling.selectImagesToCompare')}
-            </Text>
-            <Text className="mt-2 text-text-secondary">{t('library.culling.clickThumbnailsHint')}</Text>
+        {imageList.length === 0 ? (
+          <div className="m-auto flex max-w-sm flex-col items-center px-8 text-center">
+            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-md border border-border-color bg-bg-secondary text-text-secondary"><FolderOpen size={22} /></div>
+            <Text variant={TextVariants.heading}>Choose a folder to cull</Text>
+            <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-2">Analyze a shoot, review the decisions, then keep full control of what changes.</Text>
+            <button className="mt-5 inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm text-white hover:brightness-110" onClick={() => void chooseCullFolder()}><FolderOpen size={16} /> Select folder</button>
+          </div>
+        ) : displayCount === 0 || localCullPlan ? (
+          <div className="w-full h-full overflow-y-auto p-3">
+            <div className="mb-3 flex items-center justify-between"><Text variant={TextVariants.small} color={TextColors.secondary}>{cullImageList.length} images</Text><Text variant={TextVariants.small} color={TextColors.secondary}>Select frames to inspect or compare</Text></div>
+            <div ref={cullGridRef} className="relative grid select-none grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-3" onPointerDown={beginGridSelection} onPointerMove={extendGridSelection} onPointerUp={endGridSelection} onPointerCancel={endGridSelection} onClickCapture={(event) => { if (marqueeMoved.current) { event.preventDefault(); event.stopPropagation(); marqueeMoved.current = false; } }}>
+              {marqueeBounds && <div className="pointer-events-none absolute z-20 border border-accent bg-accent/15" style={marqueeBounds} />}
+              {cullImageList.map((image: ImageFile) => {
+                const decision = cullDecisions[image.path];
+                const finalistRank = finalistRanks.get(image.path);
+                const selected = multiSelectedPaths.includes(image.path);
+                const border = decision?.proposedStatus === 'keep' ? 'border-green-400/70' : decision ? 'border-red-400/60' : 'border-border-color';
+                return <div key={image.path} data-cull-path={image.path} className={`relative overflow-hidden rounded-md border-2 ${selected ? 'ring-2 ring-accent' : ''} ${border}`}>{finalistRank && <span className="absolute left-2 top-2 z-20 rounded bg-cyan-500/90 px-1.5 py-0.5 text-[10px] font-medium text-white">{finalistRank === 1 ? 'Top finalist' : `Finalist #${finalistRank}`}</span>}<Thumbnail path={image.path} rating={imageRatings?.[image.path] || 0} tags={image.tags} aspectRatio={thumbnailAspectRatio} isEdited={image.is_edited} exif={image.exif} isCloudPlaceholder={image.is_cloud_placeholder} isActive={activePath === image.path} isSelected={selected} isForcedHover={false} onContextMenu={onContextMenu} onImageClick={onImageClick} onImageDoubleClick={onImageDoubleClick} onLoad={() => {}} /><div className="flex items-center justify-between gap-2 px-2 py-1.5 bg-bg-secondary text-xs"><span className="truncate">{image.path.split(/[\\/]/).pop()}</span><span className={decision?.proposedStatus === 'keep' ? 'text-green-300' : decision ? 'text-red-300' : 'text-text-secondary'}>{decision?.proposedStatus === 'keep' ? 'Selected' : decision ? 'Rejected' : ''}</span></div></div>;
+              })}
+            </div>
           </div>
         ) : (
           <div
@@ -1266,16 +1685,96 @@ export default function CullingView(props: any) {
         onClick={handleSidebarEmptyClick}
         onContextMenu={handleSidebarEmptyContextMenu}
       >
+        <div className="shrink-0 border-b border-border-color p-3">
+          <div className="mb-2 flex items-center justify-between gap-2"><Text variant={TextVariants.small} weight={TextWeights.semibold}>Culling session</Text>{isPlanningCull && <Loader2 size={14} className="animate-spin text-accent" />}</div>
+          {cullFolderPath ? <>
+            <button className="w-full truncate rounded-md border border-border-color bg-bg-primary px-2 py-1.5 text-left text-xs text-text-primary hover:bg-surface" title={cullCatalogScope?.absoluteFolderPath || cullFolderPath} onClick={() => void chooseCullFolder()}>{cullCatalogScope?.absoluteFolderPath || cullFolderPath}</button>
+            <label className="mt-2 block text-xs text-text-secondary">Shooting type<select value={cullSettings.subjectMode} onChange={(event) => { const subjectMode = event.target.value as CullingSettings['subjectMode']; setCullSettings((settings) => ({ ...settings, subjectMode, useSubjectDetection: subjectMode !== 'landscape' })); }} className="mt-1 h-8 w-full rounded border border-border-color bg-bg-primary px-2 text-xs text-text-primary outline-none focus:border-accent"><option value="general">General subjects</option><option value="people">People and events</option><option value="wildlife">Wildlife and animals</option><option value="birds">Birds</option><option value="landscape">Landscape and architecture</option></select></label>
+            <label className="mt-2 flex items-center gap-2 text-xs text-text-secondary"><input type="checkbox" checked={includeSubfolders} onChange={(event) => setIncludeSubfolders(event.target.checked)} className="accent-accent" /> Include subfolders</label>
+            <div className="mt-3 border-t border-border-color pt-3">
+              <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>Blur threshold</Text>
+              <div className="mt-1 grid grid-cols-3 gap-1">
+                {([{ label: 'Lenient', value: 70 }, { label: 'Moderate', value: 100 }, { label: 'Strict', value: 140 }] as const).map((option) => <button key={option.label} className={clsx('rounded border px-1 py-1 text-xs', cullSettings.blurThreshold === option.value ? 'border-accent bg-accent/15 text-text-primary' : 'border-border-color text-text-secondary hover:bg-surface')} onClick={() => setCullSettings((settings) => ({ ...settings, blurThreshold: option.value, filterBlurry: true }))}>{option.label}</button>)}
+              </div>
+              <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-3">Duplicate grouping</Text>
+              <div className="mt-1 grid grid-cols-3 gap-1">
+                {([{ label: 'Identical', value: 12 }, { label: 'Similar', value: 28 }, { label: 'Loose', value: 42 }] as const).map((option) => <button key={option.label} className={clsx('rounded border px-1 py-1 text-xs', cullSettings.similarityThreshold === option.value ? 'border-accent bg-accent/15 text-text-primary' : 'border-border-color text-text-secondary hover:bg-surface')} onClick={() => setCullSettings((settings) => ({ ...settings, similarityThreshold: option.value, groupSimilar: true }))}>{option.label}</button>)}
+              </div>
+              <div className={clsx('mt-3 grid gap-2', cullSettings.subjectMode === 'landscape' ? 'grid-cols-2' : 'grid-cols-3')}>
+                <label className="flex items-center gap-1.5 text-xs text-text-secondary"><input type="checkbox" checked={cullSettings.filterBlurry} onChange={(event) => setCullSettings((settings) => ({ ...settings, filterBlurry: event.target.checked }))} className="accent-accent" /> Blur</label>
+                <label className="flex items-center gap-1.5 text-xs text-text-secondary"><input type="checkbox" checked={cullSettings.groupSimilar} onChange={(event) => setCullSettings((settings) => ({ ...settings, groupSimilar: event.target.checked }))} className="accent-accent" /> Duplicates</label>
+                {cullSettings.subjectMode !== 'landscape' && <label className="flex items-center gap-1.5 text-xs text-text-secondary"><input type="checkbox" checked={cullSettings.useSubjectDetection} onChange={(event) => setCullSettings((settings) => ({ ...settings, useSubjectDetection: event.target.checked }))} className="accent-accent" /> Subject AI</label>}
+              </div>
+            </div>
+            {isPlanningCull && cullProgress && <div className="mt-3"><div className="flex items-center justify-between gap-2 text-xs text-text-secondary"><span className="truncate">{cullProgress.stage}</span><span className="tabular-nums">{cullProgress.current}/{cullProgress.total}</span></div><div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface"><div className="h-full bg-accent transition-[width] duration-200" style={{ width: `${cullProgress.total > 0 ? Math.min(100, (cullProgress.current / cullProgress.total) * 100) : 0}%` }} /></div></div>}
+            {cullError && <Text as="div" variant={TextVariants.small} className="mt-2 text-red-300">{cullError}</Text>}
+            <button disabled={isPlanningCull} className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm text-white hover:brightness-110 disabled:opacity-60" onClick={() => void startCullFromRail()}>{isPlanningCull ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} fill="currentColor" />}{isPlanningCull ? 'Analyzing...' : localCullPlan ? 'Run again' : 'Start culling'}</button>
+            {localCullPlan && <><Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-2">{localCullPlan.rejectCount} frames marked for review out of {localCullPlan.totalCount}.</Text><div className="mt-2 grid grid-cols-2 gap-2"><button className="rounded border border-border-color px-2 py-1.5 text-xs text-text-primary hover:bg-surface" onClick={selectAllCullCandidates}>Select all</button><button className="rounded border border-border-color px-2 py-1.5 text-xs text-text-secondary hover:bg-surface" onClick={onClearSelection}>Clear selection</button></div>{multiSelectedPaths.filter((path: string) => localCullPlan.items.some((item) => item.representativePath === path)).length > 0 && <div className="mt-2 grid grid-cols-2 gap-2"><button className="rounded border border-green-400/40 px-2 py-1.5 text-xs text-green-300 hover:bg-green-400/10" onClick={() => void updateSelectedCullDecisions(true)}>Keep selected</button><button className="rounded border border-red-400/40 px-2 py-1.5 text-xs text-red-300 hover:bg-red-400/10" onClick={() => void updateSelectedCullDecisions(false)}>Reject selected</button></div>}<button disabled={isApplyingCull || localCullPlan.rejectCount === 0} className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-md border border-red-500/50 px-3 py-2 text-sm text-red-200 hover:bg-red-500/10 disabled:opacity-50" onClick={() => void applyCullFromRail()}>{isApplyingCull ? <Loader2 size={15} className="animate-spin" /> : null}{isApplyingCull ? 'Moving rejected frames...' : `Move ${localCullPlan.rejectCount} rejected frames`}</button></>}
+          </> : <button className="flex w-full items-center justify-center gap-2 rounded-md border border-border-color bg-bg-primary px-3 py-2 text-sm text-text-primary hover:bg-surface" onClick={() => void chooseCullFolder()}><FolderOpen size={16} /> Choose folder</button>}
+        </div>
+        {imageList.length === 0 ? (
+          <div className="flex min-h-0 flex-1 flex-col p-4">
+            <div className="border-b border-border-color pb-4">
+              <Text variant={TextVariants.small} weight={TextWeights.semibold}>Culling setup</Text>
+              <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-1">Start from a folder. The next step lets you set the shooting type and review rules.</Text>
+            </div>
+            <div className="space-y-4 py-4">
+              <div>
+                <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>Photo selection</Text>
+                <button className="mt-1.5 flex w-full items-center gap-2 rounded-md border border-border-color bg-bg-primary px-3 py-2 text-left text-sm text-text-primary hover:bg-surface" onClick={() => void chooseCullFolder()}><FolderOpen size={16} className="text-text-secondary" /><span className="truncate">Choose a folder</span></button>
+              </div>
+              <div className="border-t border-border-color pt-4">
+                <Text as="div" variant={TextVariants.small} weight={TextWeights.semibold}>Analysis</Text>
+                <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-1">Duplicate groups, focus quality, and subject-aware focus are always reviewable before any files move.</Text>
+              </div>
+            </div>
+            <button className="mt-auto inline-flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm text-white hover:brightness-110" onClick={() => void chooseCullFolder()}><Play size={15} fill="currentColor" /> Select a folder</button>
+          </div>
+        ) : (isCatalog || localCullPlan) && <div className="shrink-0 border-b border-border-color p-3"><div className="flex items-center gap-2 mb-2"><Filter size={14} className="text-text-secondary" /><Text variant={TextVariants.small} weight={TextWeights.semibold}>Quick filters</Text></div><div className="space-y-1">{(['selected', 'highlights', 'duplicates', 'blurry', 'all'] as const).map((filter) => <button key={filter} className={clsx('w-full flex items-center justify-between rounded px-2 py-1.5 text-left text-sm', reviewFilter === filter ? 'bg-surface text-text-primary' : 'text-text-secondary hover:bg-surface')} onClick={() => setReviewFilter(filter)}><span className="flex items-center gap-2"><span className={filter === 'selected' ? 'h-2 w-2 rounded-full bg-green-400' : filter === 'highlights' ? 'h-2 w-2 rounded-full bg-cyan-400' : filter === 'duplicates' ? 'h-2 w-2 rounded-full bg-amber-400' : filter === 'blurry' ? 'h-2 w-2 rounded-full bg-red-400' : 'h-2 w-2 rounded-full bg-text-secondary'} />{filter === 'selected' ? 'Selected' : filter === 'highlights' ? 'Highlights' : filter === 'duplicates' ? 'Duplicates' : filter === 'blurry' ? 'Blurry' : 'All'}</span><span className="tabular-nums text-xs">{cullFilterCounts[filter]}</span></button>)}</div></div>}
+        {activePath && cullDecisions[activePath] && (
+          <div className="shrink-0 border-b border-border-color px-3 py-2">
+            <div className="flex items-center justify-between gap-2">
+              <Text variant={TextVariants.small} weight={TextWeights.semibold}>Cull decision</Text>
+              <span className={cullDecisions[activePath].proposedStatus === 'keep' ? 'text-xs text-green-300' : 'text-xs text-red-300'}>{cullDecisions[activePath].proposedStatus === 'keep' ? 'Selected' : 'Rejected'}</span>
+            </div>
+            {finalistRanks.has(activePath) && <div className="mt-1 text-xs text-cyan-200">{finalistRanks.get(activePath) === 1 ? 'Top technical finalist' : `Technical finalist #${finalistRanks.get(activePath)}`}</div>}
+            {localCullPlan && thumbnails[activePath] && <img className="mt-2 aspect-[4/3] w-full rounded-sm border border-border-color bg-surface object-contain" src={thumbnails[activePath]} alt="Selected culling frame" />}
+            <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-1">{cullDecisions[activePath].reason.startsWith('duplicate_of:') ? 'Near duplicate of a stronger frame' : cullDecisions[activePath].reason}</Text>
+            {localCullPlan && <><div className="mt-2 flex gap-2"><button className="rounded bg-green-400/10 px-2 py-1 text-xs text-green-300 hover:bg-green-400/20" onClick={() => void updateLocalCullDecision(activePath, true, decisionFeedbackReason)}>Keep</button><button className="rounded bg-red-400/10 px-2 py-1 text-xs text-red-300 hover:bg-red-400/20" onClick={() => void updateLocalCullDecision(activePath, false, decisionFeedbackReason)}>Reject</button></div>{localCullPlan.sessionId && <label className="mt-2 block text-xs text-text-secondary">Why this choice?<select value={decisionFeedbackReason} onChange={(event) => setDecisionFeedbackReason(event.target.value)} className="mt-1 h-8 w-full rounded border border-border-color bg-bg-primary px-2 text-xs text-text-primary outline-none focus:border-accent"><option value="">No reason recorded</option>{CULL_FEEDBACK_REASONS.map((reason) => <option key={reason} value={reason}>{reason}</option>)}</select></label>}</>}
+            {activePlanItem && activePlanItem.decisionFactors.length > 0 && <div className="mt-3 space-y-2 border-t border-border-color pt-2">{activePlanItem.decisionFactors.map((factor) => <div key={factor.id} className="text-xs"><div className={factor.impact === 'reject' ? 'text-red-300' : 'text-text-primary'}>{factor.label}</div><div className="mt-0.5 text-text-secondary">{factor.detail}</div></div>)}</div>}
+          </div>
+        )}
+        {localCullPlan && relatedDuplicatePaths.length > 0 && <div className="shrink-0 border-b border-border-color px-3 py-3"><div className="mb-2 flex items-center justify-between"><Text variant={TextVariants.small} weight={TextWeights.semibold}>Related duplicates</Text><span className="text-xs text-text-secondary">{relatedDuplicatePaths.length}</span></div><div className="grid grid-cols-3 gap-1.5">{relatedDuplicatePaths.slice(0, 6).map((path) => { const isRepresentative = path === duplicateRepresentativePath; return <button key={path} className={clsx('relative aspect-square overflow-hidden rounded-sm border bg-surface', isRepresentative ? 'border-green-400 ring-1 ring-green-400' : path === activePath ? 'border-accent ring-1 ring-accent' : 'border-border-color hover:border-text-secondary')} onClick={() => useLibraryStore.getState().setLibrary({ multiSelectedPaths: [path], libraryActivePath: path, selectionAnchorPath: path })} title={path}>{thumbnails[path] ? <img className="h-full w-full object-cover" src={thumbnails[path]} alt={isRepresentative ? 'Selected frame from duplicate group' : 'Related duplicate'} /> : <div className="h-full w-full animate-pulse bg-surface/70" />}{isRepresentative && <span className="absolute bottom-1 left-1 rounded bg-green-500/90 px-1 py-0.5 text-[10px] font-medium text-white">Selected</span>}</button>; })}</div></div>}
+        {isCatalog && (activeFaces.length > 0 || (subjectEvidence?.aiTags.length ?? 0) > 0 || (subjectEvidence?.species.length ?? 0) > 0) && (
+          <div className="shrink-0 border-b border-border-color px-3 py-3">
+            <div className="mb-2 flex items-center justify-between">
+              <Text variant={TextVariants.small} weight={TextWeights.semibold}>Key subjects</Text>
+              <span className="text-xs text-text-secondary">Catalog evidence</span>
+            </div>
+            {(subjectEvidence?.aiTags.length || subjectEvidence?.species.length) ? <div className="mb-3 flex flex-wrap gap-1.5">
+              {subjectEvidence?.species.filter((item) => item.reviewState !== 'rejected').slice(0, 3).map((item) => <span key={`${item.scientificName}-${item.confidence}`} className="rounded bg-cyan-400/15 px-1.5 py-0.5 text-xs text-cyan-200">{item.commonName || item.scientificName}</span>)}
+              {subjectEvidence?.aiTags.filter((item) => item.reviewState !== 'rejected').slice(0, 6).map((item) => <span key={item.name} className="rounded bg-surface px-1.5 py-0.5 text-xs text-text-secondary">{item.name}</span>)}
+            </div> : null}
+            {activeFaces.length > 0 && <><Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mb-1.5">People detected</Text><div className="grid grid-cols-3 gap-1.5">
+              {activeFaces.slice(0, 6).map((item) => {
+                const source = item.thumbnailDataUrl || (item.cropPath ? convertFileSrc(item.cropPath) : null);
+                return <div key={item.face.id} className="aspect-square overflow-hidden rounded-sm border border-border-color bg-surface">
+                  {source ? <img className="h-full w-full object-cover" src={source} alt="Detected person" /> : <div className="h-full w-full animate-pulse bg-surface/70" />}
+                </div>;
+              })}
+            </div></>}
+          </div>
+        )}
         <div
           onMouseDown={startResizing}
           className="absolute top-0 bottom-0 left-0 w-1 cursor-col-resize hover:bg-surface/50 active:bg-surface transition-colors z-40"
         />
-        <div key={`${sidebarWidth}-${thumbnailAspectRatio}`} style={{ height: listHeight, width: '100%' }}>
+        <div key={`${sidebarWidth}-${thumbnailAspectRatio}`} style={{ height: listHeight, width: '100%' }} className="min-h-0 flex-1">
           <List
             listRef={setListHandle}
-            rowCount={imageList.length}
+            rowCount={cullImageList.length}
             rowHeight={sidebarWidth - 16}
-            rowComponent={Row}
+            rowComponent={Row as unknown as (props: any) => React.ReactElement | null}
             rowProps={rowProps}
             className="custom-scrollbar"
           />

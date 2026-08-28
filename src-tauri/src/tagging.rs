@@ -31,13 +31,13 @@ const RAM_PLUS_MODEL_ID: &str = "ram-plus";
 const RAM_PLUS_MODEL_REVISION: &str = "onnx-v1";
 const RAM_PLUS_INPUT_SIZE: u32 = 384;
 
-struct RamPlusModels {
+pub(crate) struct RamPlusModels {
     model: Mutex<Session>,
     tags: Vec<String>,
     thresholds: Vec<f32>,
 }
 
-fn load_ram_plus_models(app_handle: &AppHandle) -> std::result::Result<Arc<RamPlusModels>, String> {
+pub(crate) fn load_ram_plus_models(app_handle: &AppHandle) -> std::result::Result<Arc<RamPlusModels>, String> {
     let model_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "ram-plus-onnx", "model.onnx")?;
     let tags_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "ram-plus-onnx", "tags.txt")?;
     let thresholds_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "ram-plus-onnx", "thresholds.txt")?;
@@ -59,7 +59,7 @@ fn ram_plus_input(image: &DynamicImage) -> Array<f32, ndarray::Dim<[usize; 4]>> 
     input
 }
 
-fn generate_tags_with_ram_plus(image: &DynamicImage, models: &RamPlusModels, max_tags: usize) -> std::result::Result<Vec<ScoredTag>, String> {
+pub(crate) fn generate_tags_with_ram_plus(image: &DynamicImage, models: &RamPlusModels, max_tags: usize) -> std::result::Result<Vec<ScoredTag>, String> {
     let input = Tensor::from_array(ram_plus_input(image)).map_err(|error| error.to_string())?;
     let mut session = models.model.lock().unwrap();
     let output = session.run(ort::inputs![input]).map_err(|error| error.to_string())?;
@@ -75,7 +75,7 @@ fn generate_tags_with_ram_plus(image: &DynamicImage, models: &RamPlusModels, max
 }
 
 
-struct BioClipModels {
+pub(crate) struct BioClipModels {
     session: std::sync::Mutex<ort::session::Session>,
     embeddings: Vec<Vec<f32>>,
     labels: Vec<BioClipTaxon>,
@@ -83,10 +83,10 @@ struct BioClipModels {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct BioClipTaxon {
-    scientific_name: String,
+pub(crate) struct BioClipTaxon {
+    pub scientific_name: String,
     #[serde(default)]
-    common_name: Option<String>,
+    pub common_name: Option<String>,
     #[serde(default = "default_species_rank")]
     taxon_rank: String,
 }
@@ -95,7 +95,7 @@ fn default_species_rank() -> String {
     "species".to_string()
 }
 
-fn load_bioclip_models(app_handle: &tauri::AppHandle) -> Result<BioClipModels, String> {
+pub(crate) fn load_bioclip_models(app_handle: &tauri::AppHandle) -> Result<BioClipModels, String> {
     let model_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "bioclip-v1", "vision_encoder.onnx")?;
     let embeddings_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "bioclip-v1", "species_embeddings.bin")?;
     let labels_path = crate::visual_model_registry::installed_visual_model_path(app_handle, "bioclip-v1", "species_labels.json")?;
@@ -156,7 +156,7 @@ fn bioclip_input(image: &image::DynamicImage) -> ndarray::Array<f32, ndarray::Di
     input
 }
 
-fn run_bioclip_inference(image: &image::DynamicImage, models: &BioClipModels) -> Result<(BioClipTaxon, f32), String> {
+pub(crate) fn run_bioclip_inference(image: &image::DynamicImage, models: &BioClipModels) -> Result<(BioClipTaxon, f32), String> {
     let input = ort::value::Tensor::from_array(bioclip_input(image)).map_err(|error| error.to_string())?;
     let mut session = models.session.lock().unwrap();
     let output = session.run(ort::inputs![input]).map_err(|error| error.to_string())?;
@@ -187,12 +187,8 @@ fn run_bioclip_inference(image: &image::DynamicImage, models: &BioClipModels) ->
 #[tauri::command]
 pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, AppState>) -> Result<String, String> {
     let db_path = crate::library_db::active_library_path(&state)?;
-    let candidates = crate::library_db::list_ai_tag_candidates_for_model(&db_path, RAM_PLUS_MODEL_ID, RAM_PLUS_MODEL_REVISION)?;
     let job_id = crate::library_db::create_background_job(&db_path, "ram_plus_tagging", serde_json::json!({ "modelId": RAM_PLUS_MODEL_ID, "modelRevision": RAM_PLUS_MODEL_REVISION }))?;
-    crate::library_db::update_job(&db_path, &job_id, "queued", "RAM++ tagging queued", 0, candidates.len() as i64, None, None)?;
-    if candidates.is_empty() { crate::library_db::update_job(&db_path, &job_id, "completed", "All catalog images already have RAM++ tags", 0, 0, None, None)?; return Ok(job_id); }
-    let models = load_ram_plus_models(&app_handle).map_err(|error| { let _ = crate::library_db::update_job(&db_path, &job_id, "failed", "Unable to load RAM++", 0, candidates.len() as i64, None, Some(&error)); error })?;
-    let tag_count = crate::load_settings(app_handle.clone())?.ai_tag_count.unwrap_or(20) as usize;
+    crate::library_db::update_job(&db_path, &job_id, "queued", "RAM++ tagging queued", 0, 0, None, None)?;
     let job_control = crate::app_state::BackgroundJobControl::new();
     state.background_job_controls.lock().unwrap().insert(job_id.clone(), job_control.clone());
     let worker_state = app_handle.clone();
@@ -201,10 +197,88 @@ pub fn start_catalog_ram_plus_tagging(app_handle: AppHandle, state: State<'_, Ap
     let worker_job_id = job_id.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
+        // Candidate enumeration and ONNX session construction can both take long enough to
+        // visibly stall the UI when done in the command handler. Keep all startup work here.
+        let _ = crate::library_db::update_job(
+            &worker_db_path,
+            &worker_job_id,
+            "running",
+            "Preparing RAM++ tagging",
+            0,
+            0,
+            None,
+            None,
+        );
+        let candidates = match crate::library_db::list_ai_tag_candidates_for_model(
+            &worker_db_path,
+            RAM_PLUS_MODEL_ID,
+            RAM_PLUS_MODEL_REVISION,
+        ) {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                let _ = crate::library_db::update_job(
+                    &worker_db_path,
+                    &worker_job_id,
+                    "failed",
+                    "Unable to prepare RAM++ tagging",
+                    0,
+                    0,
+                    None,
+                    Some(&error),
+                );
+                cleanup_tag_job(&worker_state, &worker_job_id);
+                return;
+            }
+        };
+        let total = candidates.len() as i64;
+        if candidates.is_empty() {
+            let _ = crate::library_db::update_job(
+                &worker_db_path,
+                &worker_job_id,
+                "completed",
+                "All catalog images already have RAM++ tags",
+                0,
+                0,
+                None,
+                None,
+            );
+            cleanup_tag_job(&worker_state, &worker_job_id);
+            return;
+        }
+        let _ = crate::library_db::update_job(
+            &worker_db_path,
+            &worker_job_id,
+            "running",
+            "Loading RAM++ model",
+            0,
+            total,
+            None,
+            None,
+        );
+        let models = match load_ram_plus_models(&worker_state) {
+            Ok(models) => models,
+            Err(error) => {
+                let _ = crate::library_db::update_job(
+                    &worker_db_path,
+                    &worker_job_id,
+                    "failed",
+                    "Unable to load RAM++",
+                    0,
+                    total,
+                    None,
+                    Some(&error),
+                );
+                cleanup_tag_job(&worker_state, &worker_job_id);
+                return;
+            }
+        };
+        let tag_count = crate::load_settings(worker_state.clone())
+            .ok()
+            .and_then(|settings| settings.ai_tag_count)
+            .unwrap_or(20) as usize;
         let ai_semaphore = worker_state.state::<AppState>().ai_job_semaphore.clone();
         // BioCLIP is optional, but loading it must not block the Tauri command/UI thread.
         let bioclip_models = load_bioclip_models(&species_app_handle);
-        let total = candidates.len() as i64;
         for (index, (image_id, path, modified)) in candidates.into_iter().enumerate() {
             if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
                 let _ = crate::library_db::update_job(&worker_db_path, &worker_job_id, "cancelled", "RAM++ tagging cancelled", index as i64, total, Some(&path), None);

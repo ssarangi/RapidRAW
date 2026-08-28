@@ -21,6 +21,12 @@ pub struct CullingSettings {
     pub group_similar: bool,
     pub filter_blurry: bool,
     pub use_subject_detection: bool,
+    #[serde(default = "default_subject_mode")]
+    pub subject_mode: String,
+}
+
+fn default_subject_mode() -> String {
+    "general".to_string()
 }
 
 impl Default for CullingSettings {
@@ -31,6 +37,7 @@ impl Default for CullingSettings {
             group_similar: true,
             filter_blurry: true,
             use_subject_detection: false,
+            subject_mode: default_subject_mode(),
         }
     }
 }
@@ -372,7 +379,7 @@ pub async fn cull_images(
     let completed_count = Arc::new(AtomicUsize::new(0));
     let _ = app_handle.emit("culling-start", total_count);
 
-    let ai_models = if settings.use_subject_detection {
+    let ai_models = if settings.use_subject_detection && settings.subject_mode != "landscape" {
         let _ = app_handle.emit(
             "culling-progress",
             CullingProgress {
@@ -438,4 +445,19 @@ pub async fn cull_images(
 
     let _ = app_handle.emit("culling-complete", &suggestions);
     Ok(suggestions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CullingSettings;
+
+    #[test]
+    fn subject_mode_defaults_for_older_culling_requests() {
+        let settings: CullingSettings = serde_json::from_str(
+            r#"{"similarityThreshold":28,"blurThreshold":100.0,"groupSimilar":true,"filterBlurry":true,"useSubjectDetection":false}"#,
+        )
+        .expect("older settings remain compatible");
+
+        assert_eq!(settings.subject_mode, "general");
+    }
 }

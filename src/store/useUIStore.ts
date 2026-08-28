@@ -81,7 +81,14 @@ export interface NegativeConversionModalState {
 export interface CullingModalState {
   isOpen: boolean;
   suggestions: CullingSuggestions | null;
-  progress: { current: number; total: number; stage: string } | null;
+  progress: {
+    current: number;
+    total: number;
+    stage: string;
+    currentPath?: string | null;
+    previewPath?: string | null;
+    thumbnailDataUrl?: string | null;
+  } | null;
   error: string | null;
   pathsToCull: Array<string>;
 }
@@ -273,6 +280,8 @@ interface UIState {
   denoiseModalState: DenoiseModalState;
   cullingModalState: CullingModalState;
   autoCullModalState: AutoCullModalState;
+  cullWorkspaceFolderPath: string | null;
+  cullWorkspaceProgress: { current: number; total: number; stage: string } | null;
   collageModalState: CollageModalState;
 
   setUI: (updater: Partial<UIState> | ((state: UIState) => Partial<UIState>)) => void;
@@ -391,6 +400,8 @@ export const useUIStore = create<UIState>((set, get) => ({
     result: null,
     error: null,
   },
+  cullWorkspaceFolderPath: null,
+  cullWorkspaceProgress: null,
   collageModalState: { isOpen: false, sourceImages: [] },
 
   setUI: (updater) => set((state) => (typeof updater === 'function' ? updater(state) : updater)),

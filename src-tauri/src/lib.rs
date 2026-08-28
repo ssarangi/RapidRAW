@@ -2455,6 +2455,7 @@ pub fn run() {
             library_db::list_cull_session_decisions,
             library_db::update_cull_session_decision,
             library_db::list_catalog_faces,
+            library_db::list_catalog_face_review_items_for_path,
             library_db::list_unreviewed_catalog_faces,
             library_db::list_unreviewed_face_clusters,
             library_db::get_or_generate_face_crop,

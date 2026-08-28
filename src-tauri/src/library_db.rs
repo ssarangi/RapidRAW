@@ -1218,6 +1218,75 @@ pub fn close_library(state: tauri::State<'_, crate::AppState>) -> Result<(), Str
     Ok(())
 }
 
+/// Reconciles catalog paths after RapidRAW moves files within a collection root.
+/// The image row is retained, preserving ratings, tags, faces, AI results, and
+/// culling history instead of requiring a subsequent full catalog scan.
+pub fn reconcile_catalog_moved_paths(
+    state: &crate::AppState,
+    moves: &[(String, String)],
+) -> Result<(), String> {
+    let Some(db_path) = state.active_library_path.lock().unwrap().clone() else {
+        return Ok(());
+    };
+    let mut conn = open_connection(&db_path)?;
+    let roots: Vec<(i64, PathBuf)> = {
+        let mut statement = conn
+            .prepare("SELECT id, absolute_path FROM collection_roots")
+            .map_err(|error| error.to_string())?;
+        statement
+            .query_map([], |row| Ok((row.get(0)?, PathBuf::from(row.get::<_, String>(1)?))))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+    };
+
+    for (old_path, new_path) in moves {
+        let old_path = Path::new(old_path);
+        let new_path = Path::new(new_path);
+        let Some((root_id, root_path)) = roots.iter().find(|(_, root)| {
+            old_path.starts_with(root) && new_path.starts_with(root)
+        }) else {
+            continue;
+        };
+        let old_relative = old_path
+            .strip_prefix(root_path)
+            .map_err(|error| error.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let new_relative = new_path
+            .strip_prefix(root_path)
+            .map_err(|error| error.to_string())?
+            .to_string_lossy()
+            .replace('\\', "/");
+        let transaction = conn.transaction().map_err(|error| error.to_string())?;
+        let Some(image_id) = transaction
+            .query_row(
+                "SELECT id FROM images WHERE root_id = ?1 AND relative_path = ?2",
+                params![root_id, old_relative],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+        else {
+            continue;
+        };
+        let parent = new_path.parent().unwrap_or(root_path);
+        let folder_id = upsert_folder(&transaction, *root_id, root_path, parent, now_secs())?;
+        let file_name = new_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        transaction
+            .execute(
+                "UPDATE images SET folder_id = ?1, file_name = ?2, relative_path = ?3, status = 'present', updated_at = ?4 WHERE id = ?5",
+                params![folder_id, file_name, new_relative, now_secs(), image_id],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn delete_library(state: tauri::State<'_, crate::AppState>) -> Result<(), String> {
     let db_path = active_library_path(&state)?;
@@ -2642,7 +2711,7 @@ pub fn list_catalog_images(
     let db_path = active_library_path(&state)?;
     let conn = open_connection(&db_path)?;
     let mut sql = "
-        SELECT r.absolute_path, i.relative_path, i.modified_at, v.is_edited, v.rating, v.tags_json, i.is_raw, m.exif_json
+        SELECT r.absolute_path, i.relative_path, i.modified_at, v.is_edited, v.rating, v.tags_json, i.is_raw, m.exif_json, i.id
         FROM images i
         JOIN collection_roots r ON r.id = i.root_id
         JOIN image_versions v ON v.image_id = i.id AND v.copy_id = ''
@@ -2701,6 +2770,7 @@ pub fn list_catalog_images(
             is_cloud_placeholder: false,
             is_raw: row.get::<_, i64>(6).map_err(|e| e.to_string())? != 0,
             group_id: None,
+            catalog_image_id: Some(row.get::<_, i64>(8).map_err(|e| e.to_string())?),
         });
     }
 
@@ -2740,6 +2810,7 @@ fn query_catalog_images(
             is_cloud_placeholder: false,
             is_raw: row.get::<_, i64>(6).map_err(|e| e.to_string())? != 0,
             group_id: None,
+            catalog_image_id: Some(row.get::<_, i64>(8).map_err(|e| e.to_string())?),
         });
     }
     let settings = load_settings(app_handle).unwrap_or_default();
@@ -2756,7 +2827,7 @@ pub fn search_catalog_images(
     let db_path = active_library_path(&state)?;
     let conn = open_connection(&db_path)?;
     let mut sql = "
-        SELECT r.absolute_path, i.relative_path, i.modified_at, v.is_edited, v.rating, v.tags_json, i.is_raw, m.exif_json
+        SELECT r.absolute_path, i.relative_path, i.modified_at, v.is_edited, v.rating, v.tags_json, i.is_raw, m.exif_json, i.id
         FROM images i
         JOIN collection_roots r ON r.id = i.root_id
         JOIN image_versions v ON v.image_id = i.id AND v.copy_id = ''
@@ -3352,6 +3423,101 @@ pub fn list_catalog_faces(
     let db_path = active_library_path(&state)?;
     let conn = open_connection(&db_path)?;
     list_faces_for_image_internal(&conn, image_id)
+}
+
+/// Returns the face observations for a catalog image addressed by its displayed
+/// path. The library UI intentionally works with paths, while face records are
+/// keyed by the catalog's private image IDs.
+#[tauri::command]
+pub fn list_catalog_face_review_items_for_path(
+    path: String,
+    app_handle: AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<CatalogFaceReviewItem>, String> {
+    use base64::Engine;
+
+    let conn = open_connection(&active_library_path(&state)?)?;
+    let (source_path, _) = parse_virtual_path(&path);
+    let requested_path = source_path.to_string_lossy().replace('\\', "/");
+    let mut roots = conn
+        .prepare("SELECT id, absolute_path FROM collection_roots")
+        .map_err(|error| error.to_string())?;
+    let root_rows = roots
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|error| error.to_string())?;
+
+    let mut matched_root: Option<(i64, String)> = None;
+    for root in root_rows {
+        let (root_id, root_path) = root.map_err(|error| error.to_string())?;
+        let normalized_root = root_path.replace('\\', "/").trim_end_matches('/').to_string();
+        if let Some(relative_path) = requested_path
+            .strip_prefix(&(normalized_root.clone() + "/"))
+            .or_else(|| (requested_path == normalized_root).then_some(""))
+        {
+            if matched_root
+                .as_ref()
+                .is_none_or(|(_, current_relative)| relative_path.len() < current_relative.len())
+            {
+                matched_root = Some((root_id, relative_path.to_string()));
+            }
+        }
+    }
+
+    let Some((root_id, relative_path)) = matched_root else {
+        return Ok(Vec::new());
+    };
+    let image_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM images WHERE root_id = ?1 AND relative_path = ?2 AND status = 'present'",
+            params![root_id, relative_path],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some(image_id) = image_id else {
+        return Ok(Vec::new());
+    };
+
+    let face_crops_dir = crate::face_detection::get_face_crops_dir(&app_handle).ok();
+    let mut statement = conn
+        .prepare(
+            "SELECT id, image_id, person_id, model_pack_id, detector_confidence,
+                    bbox_x, bbox_y, bbox_width, bbox_height, review_state, thumbnail_jpeg
+             FROM faces WHERE image_id = ?1
+             ORDER BY detector_confidence DESC, id",
+        )
+        .map_err(|error| error.to_string())?;
+    statement
+        .query_map([image_id], |row| {
+            let face_id: i64 = row.get(0)?;
+            let thumbnail_data_url = row.get::<_, Option<Vec<u8>>>(10)?.map(|bytes| {
+                format!("data:image/jpeg;base64,{}", base64::prelude::BASE64_STANDARD.encode(bytes))
+            });
+            let crop_path = face_crops_dir.as_ref().and_then(|directory| {
+                let crop = directory.join(format!("{face_id}.jpg"));
+                crop.exists().then(|| crop.to_string_lossy().to_string())
+            });
+            Ok(CatalogFaceReviewItem {
+                face: CatalogFace {
+                    id: face_id,
+                    image_id: row.get(1)?,
+                    person_id: row.get(2)?,
+                    model_pack_id: row.get(3)?,
+                    confidence: row.get(4)?,
+                    x: row.get(5)?,
+                    y: row.get(6)?,
+                    width: row.get(7)?,
+                    height: row.get(8)?,
+                    review_state: row.get(9)?,
+                },
+                image_path: requested_path.clone(),
+                crop_path,
+                thumbnail_data_url,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
 }
 
 fn list_faces_for_image_internal(

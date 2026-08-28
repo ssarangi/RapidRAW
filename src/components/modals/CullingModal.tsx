@@ -81,6 +81,7 @@ export default function CullingModal({
     filterBlurry: true,
     blurThreshold: 100.0,
     useSubjectDetection: false,
+    subjectMode: 'general',
   });
 
   const [selectedRejects, setSelectedRejects] = useState<Set<string>>(new Set());

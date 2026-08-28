@@ -344,6 +344,10 @@ export default function MainLibrary(props: MainLibraryProps) {
     checkVersion();
   }, []);
 
+  if ((!props.rootPaths || props.rootPaths.length === 0) && libraryDisplayMode === LibraryDisplayMode.Cull) {
+    return <CullingView {...props} />;
+  }
+
   if (!props.rootPaths || props.rootPaths.length === 0) {
     if (!props.appSettings) {
       return (
@@ -460,6 +464,13 @@ export default function MainLibrary(props: MainLibraryProps) {
                           <Settings size={20} />
                         </Button>
                       </div>
+                      <Button
+                        className="rounded-md h-10 w-full bg-surface text-text-primary shadow-md transition-transform duration-200 hover:scale-[1.01] active:scale-[.98]"
+                        onClick={() => setLibraryDisplayMode(LibraryDisplayMode.Cull)}
+                        size="lg"
+                      >
+                        <Columns size={18} className="mr-2" /> {t('library.splash.cullFolder')}
+                      </Button>
                     </div>
                   </div>
 
@@ -653,16 +664,14 @@ export default function MainLibrary(props: MainLibraryProps) {
         </div>
       </header>
 
-      {props.imageList.length > 0 ? (
-        libraryDisplayMode === LibraryDisplayMode.Cull ? (
-          <CullingView {...props} />
-        ) : (
-          <LibraryGrid
-            {...props}
-            libraryDisplayMode={libraryDisplayMode}
-            thumbnailSizeOptions={translatedThumbnailSizeOptions}
-          />
-        )
+      {libraryDisplayMode === LibraryDisplayMode.Cull ? (
+        <CullingView {...props} />
+      ) : props.imageList.length > 0 ? (
+        <LibraryGrid
+          {...props}
+          libraryDisplayMode={libraryDisplayMode}
+          thumbnailSizeOptions={translatedThumbnailSizeOptions}
+        />
       ) : props.isIndexing || props.aiModelDownloadStatus || props.importState.status === Status.Importing ? (
         <div className="flex-1 flex flex-col items-center justify-center" onContextMenu={props.onEmptyAreaContextMenu}>
           <Loader2 className="h-12 w-12 text-secondary animate-spin mb-4" />

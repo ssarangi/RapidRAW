@@ -298,6 +298,8 @@ pub struct ImageFile {
     pub is_cloud_placeholder: bool,
     pub is_raw: bool,
     pub group_id: Option<String>,
+    #[serde(default)]
+    pub catalog_image_id: Option<i64>,
 }
 
 fn make_group_key(source_path: &Path) -> String {
@@ -741,6 +743,7 @@ pub fn list_images_in_dir(path: String, app_handle: AppHandle) -> Result<Vec<Ima
                     is_virtual_copy,
                     is_raw: metadata.is_raw,
                     group_id: None,
+                    catalog_image_id: None,
                     rating: metadata.rating,
                     is_cloud_placeholder,
                 });
@@ -874,6 +877,7 @@ pub fn list_images_recursive(
                     is_virtual_copy,
                     is_raw: metadata.is_raw,
                     group_id: None,
+                    catalog_image_id: None,
                     rating: metadata.rating,
                     is_cloud_placeholder,
                 });
@@ -1145,6 +1149,7 @@ pub fn get_album_images(
                 is_virtual_copy,
                 is_raw: metadata.is_raw,
                 group_id: None,
+                catalog_image_id: None,
                 rating: metadata.rating,
                 is_cloud_placeholder,
             })
@@ -2446,6 +2451,12 @@ fn find_all_associated_files(source_image_path: &Path) -> Result<Vec<PathBuf>, S
 
     if rrexif_path.exists() {
         associated_files.push(rrexif_path);
+    }
+
+    // Keep interoperable XMP metadata beside the image when moving or copying it.
+    // `resolve_xmp_path` handles both `.xmp` and `.XMP` sidecars.
+    if let Some(xmp_path) = resolve_xmp_path(source_image_path) {
+        associated_files.push(xmp_path);
     }
 
     let parent_dir = source_image_path

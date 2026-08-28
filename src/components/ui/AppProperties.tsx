@@ -124,6 +124,7 @@ export enum Invokes {
   ListCullSessionDecisions = 'list_cull_session_decisions',
   UpdateCullSessionDecision = 'update_cull_session_decision',
   ListCatalogFaces = 'list_catalog_faces',
+  ListCatalogFaceReviewItemsForPath = 'list_catalog_face_review_items_for_path',
   CreateCatalogPerson = 'create_catalog_person',
   RenameCatalogPerson = 'rename_catalog_person',
   RemoveCatalogPerson = 'remove_catalog_person',
@@ -167,6 +168,7 @@ export enum Invokes {
   SyncCatalogPaths = 'sync_catalog_paths',
   SearchCatalogImages = 'search_catalog_images',
   GetCatalogMetrics = 'get_catalog_metrics',
+  GetImageProvenance = 'get_image_provenance',
   TetherListCameras = 'tether_list_cameras',
   TetherConnect = 'tether_connect',
   TetherGetSettings = 'tether_get_settings',
@@ -340,6 +342,7 @@ export interface Folder {
 }
 
 export interface ImageFile {
+  catalog_image_id?: number | null;
   is_edited: boolean;
   modified: number;
   path: string;
@@ -622,6 +625,7 @@ export interface CullingSettings {
   groupSimilar: boolean;
   filterBlurry: boolean;
   useSubjectDetection: boolean;
+  subjectMode: 'general' | 'people' | 'wildlife' | 'birds' | 'landscape';
 }
 
 export interface ImageAnalysisResult {

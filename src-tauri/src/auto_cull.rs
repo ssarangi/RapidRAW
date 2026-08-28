@@ -2,22 +2,292 @@ use crate::ai_processing::get_or_init_ai_models;
 use crate::app_settings::load_settings;
 use crate::app_state::AppState;
 use crate::culling::{
-    CullingSettings, ImageAnalysisData, analyze_image, build_culling_suggestions,
+    analyze_image, build_culling_suggestions, CullingSettings, ImageAnalysisData,
 };
-use crate::file_management::{AutoCullCandidate, resolve_auto_cull_candidates};
+use crate::file_management::{resolve_auto_cull_candidates, AutoCullCandidate};
 use image_hasher::{HashAlg, HasherConfig};
 use rayon::prelude::*;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct AutoCullProgress {
     current: usize,
     total: usize,
     stage: String,
+}
+
+async fn collect_profile_subject_factors(
+    paths: Vec<String>,
+    subject_mode: &str,
+    completed_before: usize,
+    app_handle: AppHandle,
+    ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+) -> Result<HashMap<String, Vec<CullDecisionFactor>>, String> {
+    let subject_mode = subject_mode.to_string();
+    if matches!(subject_mode.as_str(), "general" | "landscape") || paths.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    tokio::task::spawn_blocking(move || {
+        let total = paths.len();
+        let mut factors = HashMap::new();
+
+        if subject_mode == "people" {
+            let detector = crate::face_detection::load_local_face_detector(&app_handle)?;
+            for (index, path) in paths.into_iter().enumerate() {
+                let _ = app_handle.emit(
+                    "auto-cull-plan-progress",
+                    AutoCullProgress {
+                        current: completed_before + index + 1,
+                        total: completed_before + total,
+                        stage: "Detecting people...".to_string(),
+                    },
+                );
+                let result = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned());
+                let face_count = result.ok().and_then(|permit| {
+                    let count = crate::face_detection::count_faces_for_culling(
+                        &detector,
+                        Path::new(&path),
+                        &app_handle,
+                    );
+                    drop(permit);
+                    count.ok()
+                });
+                let (label, detail) = match face_count {
+                    Some(0) => (
+                        "People detection",
+                        "No faces detected by YuNet.".to_string(),
+                    ),
+                    Some(1) => ("People detection", "1 face detected by YuNet.".to_string()),
+                    Some(count) => (
+                        "People detection",
+                        format!("{count} faces detected by YuNet."),
+                    ),
+                    None => (
+                        "People detection",
+                        "Face analysis was unavailable for this image.".to_string(),
+                    ),
+                };
+                factors.insert(
+                    path,
+                    vec![CullDecisionFactor {
+                        id: "people_detection".to_string(),
+                        label: label.to_string(),
+                        detail,
+                        impact: "context".to_string(),
+                    }],
+                );
+            }
+            return Ok(factors);
+        }
+
+        let ram_plus = crate::tagging::load_ram_plus_models(&app_handle)?;
+        let bioclip = if subject_mode == "birds" {
+            crate::tagging::load_bioclip_models(&app_handle).ok()
+        } else {
+            None
+        };
+        for (index, path) in paths.into_iter().enumerate() {
+            let _ = app_handle.emit(
+                "auto-cull-plan-progress",
+                AutoCullProgress {
+                    current: completed_before + index + 1,
+                    total: completed_before + total,
+                    stage: if subject_mode == "birds" {
+                        "Identifying birds and wildlife...".to_string()
+                    } else {
+                        "Identifying wildlife and animals...".to_string()
+                    },
+                },
+            );
+            let image =
+                crate::face_detection::load_image_for_face_ai(Path::new(&path), &app_handle);
+            let tags = image.and_then(|image| {
+                let permit =
+                    tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
+                let tags = crate::tagging::generate_tags_with_ram_plus(&image, &ram_plus, 6);
+                drop(permit);
+                tags.map(|tags| (image, tags))
+            });
+            let mut image_factors = Vec::new();
+            match tags {
+                Ok((image, tags)) => {
+                    let names = tags
+                        .iter()
+                        .map(|tag| tag.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    image_factors.push(CullDecisionFactor {
+                        id: "subject_tags".to_string(),
+                        label: "Subject classification".to_string(),
+                        detail: if names.is_empty() {
+                            "RAM++ found no confident broad subject tags.".to_string()
+                        } else {
+                            format!("RAM++: {names}")
+                        },
+                        impact: "context".to_string(),
+                    });
+                    let has_wildlife = tags.iter().any(|tag| {
+                        let name = tag.name.to_ascii_lowercase();
+                        name.contains("bird")
+                            || name.contains("animal")
+                            || name.contains("wildlife")
+                    });
+                    if subject_mode == "birds" && has_wildlife {
+                        if let Some(bioclip) = &bioclip {
+                            let permit = tauri::async_runtime::block_on(
+                                ai_semaphore.clone().acquire_owned(),
+                            )
+                            .ok();
+                            let species = crate::tagging::run_bioclip_inference(&image, bioclip);
+                            drop(permit);
+                            if let Ok((taxon, confidence)) = species {
+                                if confidence >= 0.25 {
+                                    image_factors.push(CullDecisionFactor {
+                                        id: "species_classification".to_string(),
+                                        label: "Bird or wildlife candidate".to_string(),
+                                        detail: format!(
+                                            "BioCLIP: {} ({:.0}% similarity)",
+                                            taxon.common_name.unwrap_or(taxon.scientific_name),
+                                            confidence * 100.0
+                                        ),
+                                        impact: "context".to_string(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(_) => image_factors.push(CullDecisionFactor {
+                    id: "subject_tags".to_string(),
+                    label: "Subject classification".to_string(),
+                    detail: "RAM++ analysis was unavailable for this image.".to_string(),
+                    impact: "context".to_string(),
+                }),
+            }
+            factors.insert(path, image_factors);
+        }
+        Ok(factors)
+    })
+    .await
+    .map_err(|error| format!("Subject analysis worker failed: {error}"))?
+}
+
+fn collect_catalog_subject_factors(
+    paths: Vec<String>,
+    image_ids: &HashMap<String, i64>,
+    subject_mode: &str,
+    completed_before: usize,
+    app_handle: &AppHandle,
+    state: &tauri::State<'_, AppState>,
+) -> Result<HashMap<String, Vec<CullDecisionFactor>>, String> {
+    if matches!(subject_mode, "general" | "landscape") || paths.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let db_path = crate::library_db::active_library_path(state)?;
+    let conn = Connection::open(db_path).map_err(|error| error.to_string())?;
+    let total = paths.len();
+    let mut factors = HashMap::new();
+
+    for (index, path) in paths.into_iter().enumerate() {
+        let _ = app_handle.emit(
+            "auto-cull-plan-progress",
+            AutoCullProgress {
+                current: completed_before + index + 1,
+                total: completed_before + total,
+                stage: "Reading catalog subject analysis...".to_string(),
+            },
+        );
+        let Some(image_id) = image_ids.get(&path).copied() else {
+            continue;
+        };
+        let mut image_factors = Vec::new();
+
+        if subject_mode == "people" {
+            let face_count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM faces WHERE image_id = ?1 AND review_state != 'rejected'",
+                    [image_id],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
+            image_factors.push(CullDecisionFactor {
+                id: "people_detection".to_string(),
+                label: "People detection".to_string(),
+                detail: match face_count {
+                    0 => "No catalog faces detected yet.".to_string(),
+                    1 => "1 face from catalog analysis.".to_string(),
+                    count => format!("{count} faces from catalog analysis."),
+                },
+                impact: "context".to_string(),
+            });
+        } else {
+            let mut tags_stmt = conn
+                .prepare(
+                    "SELECT t.name FROM image_ai_tags iat JOIN tags t ON t.id = iat.tag_id WHERE iat.image_id = ?1 AND iat.review_state != 'rejected' ORDER BY iat.confidence DESC LIMIT 6",
+                )
+                .map_err(|error| error.to_string())?;
+            let tags = tags_stmt
+                .query_map([image_id], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            image_factors.push(CullDecisionFactor {
+                id: "subject_tags".to_string(),
+                label: "Subject classification".to_string(),
+                detail: if tags.is_empty() {
+                    "No catalog RAM++ subject tags yet.".to_string()
+                } else {
+                    format!("Catalog RAM++: {}", tags.join(", "))
+                },
+                impact: "context".to_string(),
+            });
+
+            if subject_mode == "birds" {
+                let species: Option<(String, Option<String>, f64)> = conn
+                    .query_row(
+                        "SELECT scientific_name, common_name, confidence FROM species_classifications WHERE image_id = ?1 AND review_state != 'rejected' ORDER BY confidence DESC LIMIT 1",
+                        [image_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .ok();
+                if let Some((scientific_name, common_name, confidence)) = species {
+                    image_factors.push(CullDecisionFactor {
+                        id: "species_classification".to_string(),
+                        label: "Bird or wildlife candidate".to_string(),
+                        detail: format!(
+                            "Catalog BioCLIP: {} ({:.0}% similarity)",
+                            common_name.unwrap_or(scientific_name),
+                            confidence * 100.0
+                        ),
+                        impact: "context".to_string(),
+                    });
+                }
+            }
+        }
+        factors.insert(path, image_factors);
+    }
+
+    Ok(factors)
+}
+
+fn should_reuse_catalog_subjects(
+    settings: &CullingSettings,
+    catalog_image_ids: Option<&HashMap<String, i64>>,
+) -> bool {
+    settings.use_subject_detection
+        && catalog_image_ids.is_some_and(|ids| !ids.is_empty())
+        && matches!(
+            settings.subject_mode.as_str(),
+            "people" | "wildlife" | "birds"
+        )
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -71,6 +341,7 @@ pub async fn plan_auto_cull(
     settings: CullingSettings,
     rejected_folder_name: String,
     delete_instead_of_move: bool,
+    catalog_image_ids: Option<HashMap<String, i64>>,
     app_handle: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<AutoCullPlan, String> {
@@ -96,14 +367,24 @@ pub async fn plan_auto_cull(
 
     let app_settings = load_settings(app_handle.clone()).unwrap_or_default();
     let total_count = candidates.len();
+    let has_profile_analysis = settings.use_subject_detection
+        && matches!(
+            settings.subject_mode.as_str(),
+            "people" | "wildlife" | "birds"
+        );
+    let progress_total = total_count * if has_profile_analysis { 2 } else { 1 };
     let _ = app_handle.emit("auto-cull-plan-start", total_count);
 
-    let ai_models = if settings.use_subject_detection {
+    let use_catalog_subjects = should_reuse_catalog_subjects(&settings, catalog_image_ids.as_ref());
+    let ai_models = if settings.use_subject_detection
+        && settings.subject_mode != "landscape"
+        && !use_catalog_subjects
+    {
         let _ = app_handle.emit(
             "auto-cull-plan-progress",
             AutoCullProgress {
                 current: 0,
-                total: total_count,
+                total: progress_total,
                 stage: "Loading subject detection model...".to_string(),
             },
         );
@@ -131,7 +412,7 @@ pub async fn plan_auto_cull(
                     "auto-cull-plan-progress",
                     AutoCullProgress {
                         current: n,
-                        total: total_count,
+                        total: progress_total,
                         stage: "Analyzing images...".to_string(),
                     },
                 );
@@ -161,9 +442,41 @@ pub async fn plan_auto_cull(
         }
     }
 
+    let subject_paths = successful
+        .iter()
+        .map(|(candidate, _)| candidate.representative_path.clone())
+        .collect();
+    let subject_factors = if !settings.use_subject_detection {
+        HashMap::new()
+    } else if use_catalog_subjects {
+        collect_catalog_subject_factors(
+            subject_paths,
+            catalog_image_ids
+                .as_ref()
+                .expect("catalog subject reuse requires image IDs"),
+            &settings.subject_mode,
+            total_count,
+            &app_handle,
+            &state,
+        )?
+    } else {
+        collect_profile_subject_factors(
+            subject_paths,
+            &settings.subject_mode,
+            total_count,
+            app_handle.clone(),
+            state.ai_job_semaphore.clone(),
+        )
+        .await?
+    };
+
     let personalization = crate::library_db::active_library_path(&state)
         .ok()
-        .and_then(|db_path| crate::library_db::load_cull_personalization_model(&db_path).ok().flatten());
+        .and_then(|db_path| {
+            crate::library_db::load_cull_personalization_model(&db_path)
+                .ok()
+                .flatten()
+        });
     let mut personalization_adjustments: HashMap<String, f64> = HashMap::new();
     if let Some(model) = personalization.as_ref().filter(|model| model.is_ready()) {
         for (_, analysis) in &mut successful {
@@ -178,8 +491,8 @@ pub async fn plan_auto_cull(
     let _ = app_handle.emit(
         "auto-cull-plan-progress",
         AutoCullProgress {
-            current: total_count,
-            total: total_count,
+            current: progress_total,
+            total: progress_total,
             stage: "Grouping and scoring...".to_string(),
         },
     );
@@ -216,7 +529,10 @@ pub async fn plan_auto_cull(
         for dup in &group.duplicates {
             duplicate_references.insert(
                 dup.path.clone(),
-                (group.representative.path.clone(), group.representative.quality_score),
+                (
+                    group.representative.path.clone(),
+                    group.representative.quality_score,
+                ),
             );
             reject_reasons.insert(
                 dup.path.clone(),
@@ -289,6 +605,9 @@ pub async fn plan_auto_cull(
                     impact: "context".to_string(),
                 });
             }
+            if let Some(factors) = subject_factors.get(&candidate.representative_path) {
+                decision_factors.extend(factors.iter().cloned());
+            }
 
             // Only relevant for the move path - deleted files go to the
             // system trash, not a folder, so they can't collide with
@@ -324,13 +643,16 @@ pub async fn plan_auto_cull(
         .and_then(|db_path| {
             let decisions = items
                 .iter()
-                .map(|item| (
-                    item.representative_path.clone(),
-                    item.keep,
-                    item.reason.clone(),
-                    item.quality_score,
-                    serde_json::to_string(&item.decision_factors).unwrap_or_else(|_| "[]".to_string()),
-                ))
+                .map(|item| {
+                    (
+                        item.representative_path.clone(),
+                        item.keep,
+                        item.reason.clone(),
+                        item.quality_score,
+                        serde_json::to_string(&item.decision_factors)
+                            .unwrap_or_else(|_| "[]".to_string()),
+                    )
+                })
                 .collect::<Vec<_>>();
             crate::library_db::record_cull_session(
                 &db_path,
@@ -393,7 +715,9 @@ pub async fn apply_auto_cull_plan(
     let finalize_session = || {
         if let Some(session_id) = plan.session_id {
             if let Ok(db_path) = crate::library_db::active_library_path(&state) {
-                if let Err(error) = crate::library_db::mark_cull_session_applied(&db_path, session_id) {
+                if let Err(error) =
+                    crate::library_db::mark_cull_session_applied(&db_path, session_id)
+                {
                     eprintln!("Failed to finalize culling session {session_id}: {error}");
                 }
             }
@@ -499,6 +823,14 @@ pub async fn apply_auto_cull_plan(
         })
         .collect();
 
+    let catalog_moves: Vec<(String, String)> = moved
+        .iter()
+        .map(|move_record| (move_record.old_path.clone(), move_record.new_path.clone()))
+        .collect();
+    if let Err(error) = crate::library_db::reconcile_catalog_moved_paths(&state, &catalog_moves) {
+        log::warn!("Files were moved but catalog paths could not be reconciled: {error}");
+    }
+
     finalize_session();
 
     Ok(AutoCullResult {
@@ -522,6 +854,7 @@ pub async fn undo_auto_cull(result: AutoCullResult, app_handle: AppHandle) -> Re
         );
     }
 
+    let mut catalog_moves = Vec::with_capacity(result.moved.len());
     for mv in &result.moved {
         let old_parent = Path::new(&mv.old_path)
             .parent()
@@ -533,6 +866,12 @@ pub async fn undo_auto_cull(result: AutoCullResult, app_handle: AppHandle) -> Re
             old_parent,
             app_handle.clone(),
         )?;
+        catalog_moves.push((mv.new_path.clone(), mv.old_path.clone()));
+    }
+
+    let state = app_handle.state::<crate::AppState>();
+    if let Err(error) = crate::library_db::reconcile_catalog_moved_paths(&state, &catalog_moves) {
+        log::warn!("Files were restored but catalog paths could not be reconciled: {error}");
     }
 
     crate::file_management::set_color_label_for_paths(
@@ -552,7 +891,10 @@ mod tests {
     fn auto_cull_plan_item_overrides_persist_in_struct() {
         let mut item = AutoCullPlanItem {
             representative_path: "/photos/DSC001.ARW".to_string(),
-            backing_paths: vec!["/photos/DSC001.ARW".to_string(), "/photos/DSC001.JPG".to_string()],
+            backing_paths: vec![
+                "/photos/DSC001.ARW".to_string(),
+                "/photos/DSC001.JPG".to_string(),
+            ],
             keep: false,
             reason: "Blurry background".to_string(),
             quality_score: 0.35,
@@ -578,5 +920,23 @@ mod tests {
         assert_eq!(plan.total_count, 0);
         assert_eq!(plan.reject_count, 0);
         assert!(plan.items.is_empty());
+    }
+
+    #[test]
+    fn catalog_subject_reuse_requires_enabled_profile_and_catalog_ids() {
+        let mut settings = CullingSettings::default();
+        settings.use_subject_detection = true;
+        settings.subject_mode = "birds".to_string();
+        let image_ids = HashMap::from([("/photos/bird.ARW".to_string(), 42)]);
+
+        assert!(should_reuse_catalog_subjects(&settings, Some(&image_ids)));
+
+        settings.use_subject_detection = false;
+        assert!(!should_reuse_catalog_subjects(&settings, Some(&image_ids)));
+
+        settings.use_subject_detection = true;
+        settings.subject_mode = "landscape".to_string();
+        assert!(!should_reuse_catalog_subjects(&settings, Some(&image_ids)));
+        assert!(!should_reuse_catalog_subjects(&settings, None));
     }
 }

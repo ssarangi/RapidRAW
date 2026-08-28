@@ -458,6 +458,7 @@ export function useTauriListeners({
       listen('auto-cull-plan-start', (event: any) => {
         if (isEffectActive) {
           useUIStore.getState().setUI((state) => ({
+            cullWorkspaceProgress: { current: 0, total: event.payload, stage: 'Initializing...' },
             autoCullModalState: {
               ...state.autoCullModalState,
               progress: { current: 0, total: event.payload, stage: 'Initializing...' },
@@ -469,7 +470,23 @@ export function useTauriListeners({
         if (isEffectActive) {
           useUIStore
             .getState()
-            .setUI((state) => ({ autoCullModalState: { ...state.autoCullModalState, progress: event.payload } }));
+            .setUI((state) => {
+              const previous = state.cullWorkspaceProgress;
+              const next = event.payload;
+              return {
+                cullWorkspaceProgress: {
+                  ...next,
+                  current: Math.max(next.current ?? 0, previous?.current ?? 0),
+                },
+                autoCullModalState: {
+                  ...state.autoCullModalState,
+                  progress: {
+                    ...next,
+                    current: Math.max(next.current ?? 0, previous?.current ?? 0),
+                  },
+                },
+              };
+            });
         }
       }),
     ];

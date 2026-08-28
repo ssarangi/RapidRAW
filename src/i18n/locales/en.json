@@ -1021,6 +1021,7 @@
     "splash": {
       "addFolder": "Add Folder",
       "brand": "RapidRAW",
+      "cullFolder": "Cull a folder",
       "continueSession": "Continue Session",
       "contribute": "Contribute on GitHub",
       "descriptionAndroid": "A blazingly fast, GPU-accelerated RAW image editor. Open the library to begin.",

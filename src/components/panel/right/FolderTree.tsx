@@ -68,7 +68,7 @@ export interface FolderTree {
 
 interface FolderTreeProps {
   isResizing: boolean;
-  onContextMenu(event: any, path: string | null, isPinned?: boolean): void;
+  onContextMenu(event: any, path: string | null, isPinned?: boolean, isCatalogFolder?: boolean): void;
   onAlbumContextMenu(event: any, item: AlbumItem | null): void;
   onFolderSelect(folder: string): void;
   onSelectAlbum(albumId: string, albumName: string, images: string[]): void;
@@ -83,7 +83,7 @@ interface TreeNodeProps {
   expandedFolders: Set<string>;
   isExpanded: boolean;
   node: FolderTree;
-  onContextMenu(event: any, path: string, isPinned?: boolean): void;
+  onContextMenu(event: any, path: string, isPinned?: boolean, isCatalogFolder?: boolean): void;
   onFolderSelect(folder: string): void;
   onToggle(path: string): void;
   selectedPath: string | null;
@@ -1039,9 +1039,18 @@ export default function FolderTree({
     }
   };
 
-  const handleCatalogContextMenu = (event: any) => {
-    event.preventDefault();
-    event.stopPropagation();
+  const handleCatalogContextMenu = (event: any, virtualPath: string) => {
+    const selection = resolveCatalogFolderSelection(virtualPath);
+    if (!selection) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    const folderPath =
+      selection.relativePath === '.'
+        ? selection.root.absolutePath
+        : `${selection.root.absolutePath}/${selection.relativePath}`;
+    onContextMenu(event, folderPath, false, true);
   };
 
   const handleRescanCatalogRoot = async (event: React.MouseEvent, root: CatalogRoot) => {

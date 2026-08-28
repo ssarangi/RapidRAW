@@ -52,7 +52,7 @@ import { useLibraryStore } from '../store/useLibraryStore';
 import { useProcessStore } from '../store/useProcessStore';
 import { useUIStore } from '../store/useUIStore';
 import { useSettingsStore } from '../store/useSettingsStore';
-import { Invokes, Option, OPTION_SEPARATOR, Panel, AlbumItem, Album, AlbumGroup } from '../components/ui/AppProperties';
+import { Invokes, Option, OPTION_SEPARATOR, Panel, AlbumItem, Album, AlbumGroup, LibraryDisplayMode } from '../components/ui/AppProperties';
 import { Color, COLOR_LABELS, INITIAL_ADJUSTMENTS, normalizeLoadedAdjustments } from '../utils/adjustments';
 import TaggingSubMenu from '../context/TaggingSubMenu';
 import { useEditorActions } from './useEditorActions';
@@ -817,7 +817,7 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
   );
 
   const handleFolderTreeContextMenu = useCallback(
-    (event: any, path: string | null, isCurrentlyPinned?: boolean) => {
+    (event: any, path: string | null, isCurrentlyPinned?: boolean, isCatalogFolder = false) => {
       event.preventDefault();
       event.stopPropagation();
 
@@ -827,6 +827,21 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
             icon: RefreshCw,
             label: t('contextMenus.folders.refresh'),
             onClick: () => props.refreshAllFolderTrees(),
+          },
+        ]);
+        return;
+      }
+
+      if (isCatalogFolder) {
+        showContextMenu(event.clientX, event.clientY, [
+          {
+            icon: Wand2,
+            label: t('contextMenus.folders.autoCull'),
+            onClick: () => {
+              const { appSettings, handleSettingsChange } = useSettingsStore.getState();
+              if (appSettings) void handleSettingsChange({ ...appSettings, libraryDisplayMode: LibraryDisplayMode.Cull });
+              useUIStore.getState().setUI({ cullWorkspaceFolderPath: path });
+            },
           },
         ]);
         return;
@@ -909,17 +924,8 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
           icon: Wand2,
           label: t('contextMenus.folders.autoCull'),
           onClick: () => {
-            setUI({
-              autoCullModalState: {
-                isOpen: true,
-                folderPath: targetPath,
-                stage: 'rules',
-                progress: null,
-                plan: null,
-                result: null,
-                error: null,
-              },
-            });
+            if (appSettings) void handleSettingsChange({ ...appSettings, libraryDisplayMode: LibraryDisplayMode.Cull });
+            setUI({ cullWorkspaceFolderPath: targetPath });
           },
         },
         { type: OPTION_SEPARATOR },

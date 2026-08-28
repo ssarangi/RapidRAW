@@ -993,6 +993,20 @@ This first pair proves alignment, persistence, review, model migration, and UI b
 - Add profile confidence, reset/export, and A/B evaluation.
 - Add highlights and configurable automated selection only after assisted-mode quality is measured.
 
+### Phase 6.5: Optional Local Vision-Language Critique
+
+Add a separate, opt-in visual-critique capability for the final candidates in a culling session. This is not a replacement for deterministic technical scoring, duplicate grouping, subject detection, or the per-user preference model.
+
+- Ship Qwen2.5-VL as the initial local VLM adapter. Use a smaller, quantized local pack for batch screening and permit a larger local model only for user-selected finalists. Keep InternVL as a benchmarkable alternative adapter rather than committing the catalog to one model family.
+- Initially run VLM inference behind a locally managed `rapidraw-ai` sidecar with a stable JSON request/response contract. It avoids embedding autoregressive tokenization, image preprocessing, decoder iteration, KV cache handling, and structured-output recovery in the Rust UI process. Add an optional ONNX Runtime backend only after the sidecar contract is proven; Qwen VLM ONNX packs contain coordinated vision, embedding, and decoder graphs rather than one independent image-classification model.
+- Require structured output: composition, lighting, color, technical observations, visual-readability or emotional-readability assessment, positive evidence, concerns, uncertainty, and proposed visual regions. Keep each category distinct from the final culling decision.
+- Add a grounded-critic guard pass before critique generation. A local YOLO-family detector supplies detected objects, bounding boxes, confidence, overlap, scale, image-relative position, edge contact, and pairwise spatial relationships. Build deterministic geometry facts from those detections, such as `person occupies 8% of frame`, `bird intersects right edge`, or `subject is left of horizon`; pass only these facts and verified subject crops to the VLM.
+- Verify model-proposed regions with Grounding DINO and refine verified regions with SAM 2. Reject or downgrade a VLM claim when it refers to an undetected object or conflicts with the geometry facts. A VLM assertion without grounded evidence is displayed as an unverified editorial observation, never as a decisive technical defect.
+- Persist the VLM model revision, prompt/schema revision, inference settings, source preview hash, confidence, JSON output, and verification result. Invalidate analysis when the developed preview materially changes.
+- UI: expose visual critique on the Cull right panel and image provenance view. Show category scores, short evidence, linked masks/boxes, confidence, and a clear `AI composition assessment` label. Let the user mark feedback as useful or not useful; feed this only into the personalization dataset.
+- Jobs: schedule VLM work as low-priority, pausable, cancellable background jobs. It must not delay image browsing, thumbnail generation, face detection, RAM++, or user-initiated editing. Cache one result per preview hash and never send image data off-device unless a future provider is explicitly selected.
+- Safety: VLM output may rank or explain finalists, but cannot move, delete, or reject originals automatically. A comparison baseline and the explicit technical reasons remain visible even when VLM critique is enabled.
+
 ### Phase 7: Insights and Advanced Search
 
 - Build catalog, People, and Cull metrics.

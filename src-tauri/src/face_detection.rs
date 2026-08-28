@@ -160,6 +160,36 @@ fn detect_yunet(image: &DynamicImage, session: &mut Session) -> Result<Vec<Detec
     Ok(accepted)
 }
 
+/// Lightweight detector used by filesystem culling. It deliberately returns
+/// only a count: no catalog rows, embeddings, or person identities are
+/// created for an ad-hoc folder scan.
+pub(crate) struct LocalFaceDetector {
+    session: std::sync::Mutex<Session>,
+}
+
+pub(crate) fn load_local_face_detector(app_handle: &AppHandle) -> Result<LocalFaceDetector, String> {
+    let model_path = crate::face_model_registry::installed_face_model_path(
+        app_handle,
+        "opencv-yunet-sface",
+        YUNET_MODEL,
+    )?;
+    let session = Session::builder()
+        .map_err(|error| error.to_string())?
+        .commit_from_file(model_path)
+        .map_err(|error| error.to_string())?;
+    Ok(LocalFaceDetector { session: std::sync::Mutex::new(session) })
+}
+
+pub(crate) fn count_faces_for_culling(
+    detector: &LocalFaceDetector,
+    path: &Path,
+    app_handle: &AppHandle,
+) -> Result<usize, String> {
+    let image = load_image_for_face_ai(path, app_handle)?;
+    let mut session = detector.session.lock().map_err(|_| "Face detector session lock was poisoned".to_string())?;
+    Ok(detect_yunet(&image, &mut session)?.len())
+}
+
 fn normalize_embedding(mut values: Vec<f32>) -> Result<Vec<f32>, String> {
     let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
     if !norm.is_finite() || norm <= f32::EPSILON {
