@@ -12,7 +12,7 @@ use rapidraw_lib::image_restoration::{
 use rapidraw_lib::resolve_auto_cull_path_candidates;
 use rapidraw_lib::scan_library_root_headless;
 use rapidraw_lib::tagging::run_catalog_ram_plus_tagging_headless;
-use rapidraw_lib::visual_model_registry::visual_model_packs;
+use rapidraw_lib::visual_model_registry::{verified_visual_model_pack_dir, visual_model_packs};
 use rapidraw_lib::{CullingSettings, cull_images_headless};
 use rapidraw_lib::{
     add_library_root_headless, create_library_headless, open_library_headless,
@@ -1084,21 +1084,24 @@ fn verify_installed_model(arguments: &[String]) -> Result<serde_json::Value, Str
                 })
             })
             .collect::<Vec<_>>();
-        let installed = manifest_pack_id.as_deref() == Some(pack.id.as_str())
-            && artifacts
-                .iter()
-                .all(|artifact| artifact["exists"].as_bool() == Some(true));
+        let integrity_check = verified_visual_model_pack_dir(&models_dir, &pack.id);
+        let installed = integrity_check.is_ok();
         let runtime_check = if installed {
             verify_visual_runtime(&directory, &pack.id)
         } else {
-            Err("Pack is not installed".to_string())
+            Err(integrity_check
+                .as_ref()
+                .err()
+                .cloned()
+                .unwrap_or_else(|| "Pack is not installed".to_string()))
         };
         return Ok(json!({
             "id": pack.id,
             "type": "visual",
             "installed": installed,
             "runnable": runtime_check.is_ok(),
-            "integrity": "manifest-artifact-and-runtime-session",
+            "integrity": "manifest-artifact-digest-and-runtime-session",
+            "integrityValidationError": integrity_check.err(),
             "runtimeValidationError": runtime_check.err(),
             "manifestPackId": manifest_pack_id,
             "artifacts": artifacts,

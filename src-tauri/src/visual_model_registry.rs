@@ -1,9 +1,10 @@
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -48,8 +49,16 @@ pub struct VisualModelPackStatus {
 struct InstalledVisualModelPack {
     pack_id: String,
     installed_at: i64,
+    artifacts: Vec<InstalledVisualModelArtifact>,
     #[serde(skip_serializing_if = "Option::is_none")]
     source_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstalledVisualModelArtifact {
+    file_name: String,
+    sha256: String,
 }
 
 fn artifact(file_name: &str) -> VisualModelArtifact {
@@ -150,12 +159,55 @@ fn manifest_path(directory: &Path) -> PathBuf {
     directory.join("manifest.json")
 }
 
-fn installed(pack: &VisualModelPack, directory: &Path) -> bool {
-    manifest_path(directory).exists()
-        && pack
+fn read_installed_manifest(directory: &Path) -> Result<Option<InstalledVisualModelPack>, String> {
+    let path = manifest_path(directory);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    serde_json::from_slice(&fs::read(path).map_err(|error| error.to_string())?)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let bytes = file.read(&mut buffer).map_err(|error| error.to_string())?;
+        if bytes == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn is_complete_install(
+    pack: &VisualModelPack,
+    directory: &Path,
+    manifest: Option<&InstalledVisualModelPack>,
+) -> bool {
+    let Some(manifest) = manifest else {
+        return false;
+    };
+    if manifest.pack_id != pack.id || manifest.artifacts.len() != pack.artifacts.len() {
+        return false;
+    }
+    pack.artifacts.iter().all(|artifact| {
+        let Some(recorded) = manifest
             .artifacts
             .iter()
-            .all(|artifact| directory.join(&artifact.file_name).is_file())
+            .find(|recorded| recorded.file_name == artifact.file_name)
+        else {
+            return false;
+        };
+        let path = directory.join(&artifact.file_name);
+        path.is_file()
+            && sha256_file(&path)
+                .map(|actual| actual.eq_ignore_ascii_case(&recorded.sha256))
+                .unwrap_or(false)
+    })
 }
 
 fn fail_download_job(
@@ -190,7 +242,11 @@ pub fn list_visual_model_pack_statuses(
         .map(|pack| {
             let directory = pack_dir(&app_handle, &pack.id)?;
             Ok(VisualModelPackStatus {
-                installed: installed(&pack, &directory),
+                installed: is_complete_install(
+                    &pack,
+                    &directory,
+                    read_installed_manifest(&directory)?.as_ref(),
+                ),
                 install_path: directory.to_string_lossy().into_owned(),
                 pack,
             })
@@ -342,9 +398,21 @@ pub async fn download_visual_model_pack(
         fs::rename(&temporary, &target)
             .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
     }
+    let artifacts = pack
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            Ok(InstalledVisualModelArtifact {
+                file_name: artifact.file_name.clone(),
+                sha256: sha256_file(&directory.join(&artifact.file_name))?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(|error| fail_download_job(&job, &state, error, total, total))?;
     let manifest = InstalledVisualModelPack {
         pack_id: pack.id.clone(),
         installed_at: Utc::now().timestamp(),
+        artifacts,
         source_path: None,
     };
     let manifest = serde_json::to_vec_pretty(&manifest)
@@ -411,9 +479,20 @@ pub fn install_visual_model_bundle(
         )
         .map_err(|error| format!("Could not install {}: {error}", artifact.file_name))?;
     }
+    let artifacts = pack
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            Ok(InstalledVisualModelArtifact {
+                file_name: artifact.file_name.clone(),
+                sha256: sha256_file(&directory.join(&artifact.file_name))?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
     let manifest = InstalledVisualModelPack {
         pack_id: pack.id.clone(),
         installed_at: Utc::now().timestamp(),
+        artifacts,
         source_path: Some(source.to_string_lossy().into_owned()),
     };
     fs::write(
@@ -449,15 +528,40 @@ pub fn installed_visual_model_path_in_dir(
     pack_id: &str,
     file_name: &str,
 ) -> Result<PathBuf, String> {
-    let path = visual_models_dir.join(pack_id).join(file_name);
+    let directory = verified_visual_model_pack_dir(visual_models_dir, pack_id)?;
+    let path = directory.join(file_name);
     if path.is_file() {
         Ok(path)
     } else {
         Err(format!(
-            "Install the {} visual model pack before running this analysis",
+            "Install or reinstall the {} visual model pack before running this analysis",
             pack_id
         ))
     }
+}
+
+/// Verifies that a model pack's manifest, required files, and recorded SHA-256
+/// digests agree before a GUI or headless caller creates an ONNX session.
+pub fn verified_visual_model_pack_dir(
+    visual_models_dir: &Path,
+    pack_id: &str,
+) -> Result<PathBuf, String> {
+    let pack = visual_model_packs()
+        .into_iter()
+        .find(|candidate| candidate.id == pack_id)
+        .ok_or_else(|| format!("Unknown visual model pack: {pack_id}"))?;
+    let directory = visual_models_dir.join(pack_id);
+    if !is_complete_install(
+        &pack,
+        &directory,
+        read_installed_manifest(&directory)?.as_ref(),
+    ) {
+        return Err(format!(
+            "Install or reinstall the {} visual model pack before running this analysis",
+            pack.display_name
+        ));
+    }
+    Ok(directory)
 }
 
 #[cfg(test)]
@@ -509,5 +613,41 @@ mod tests {
                 "nafnet-sidd-rgb".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn complete_install_requires_matching_artifact_digests() {
+        let pack = visual_model_packs().remove(0);
+        let directory = tempfile::tempdir().unwrap();
+        let mut artifacts = Vec::new();
+        for artifact in &pack.artifacts {
+            let path = directory.path().join(&artifact.file_name);
+            fs::write(&path, artifact.file_name.as_bytes()).unwrap();
+            artifacts.push(InstalledVisualModelArtifact {
+                file_name: artifact.file_name.clone(),
+                sha256: sha256_file(&path).unwrap(),
+            });
+        }
+        let manifest = InstalledVisualModelPack {
+            pack_id: pack.id.clone(),
+            installed_at: 0,
+            artifacts,
+            source_path: None,
+        };
+        assert!(is_complete_install(
+            &pack,
+            directory.path(),
+            Some(&manifest)
+        ));
+        fs::write(
+            directory.path().join(&pack.artifacts[0].file_name),
+            b"modified",
+        )
+        .unwrap();
+        assert!(!is_complete_install(
+            &pack,
+            directory.path(),
+            Some(&manifest)
+        ));
     }
 }
