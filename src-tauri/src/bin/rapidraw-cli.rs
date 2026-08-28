@@ -57,6 +57,23 @@ fn optional_numeric_argument(arguments: &[String], flag: &str) -> Result<Option<
         .transpose()
 }
 
+fn exit_code_for_error(error: &str) -> i32 {
+    let normalized = error.to_ascii_lowercase();
+    if normalized.contains("cancelled") {
+        3
+    } else if error.starts_with("Usage:")
+        || error.starts_with("--")
+        || normalized.contains(" is required")
+        || normalized.contains("must be an integer")
+        || normalized.contains("must be a number")
+        || normalized.starts_with("unknown model")
+    {
+        2
+    } else {
+        1
+    }
+}
+
 fn main() {
     let arguments: Vec<String> = env::args().skip(1).collect();
     let result = match arguments.first().map(String::as_str) {
@@ -93,7 +110,7 @@ fn main() {
         Ok(value) => println!("{}", value),
         Err(error) => {
             eprintln!("{error}");
-            std::process::exit(2);
+            std::process::exit(exit_code_for_error(&error));
         }
     }
 }
@@ -1044,4 +1061,16 @@ fn run_restore_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
         return Err(error);
     }
     Ok(json!({ "jobId": job_id, "imageId": image_id, "state": "completed" }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exit_code_for_error;
+
+    #[test]
+    fn cli_errors_use_stable_automation_exit_codes() {
+        assert_eq!(exit_code_for_error("--database <path> is required"), 2);
+        assert_eq!(exit_code_for_error("Catalog scan cancelled"), 3);
+        assert_eq!(exit_code_for_error("database is locked"), 1);
+    }
 }
