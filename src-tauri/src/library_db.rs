@@ -994,6 +994,35 @@ mod tests {
     }
 
     #[test]
+    fn ai_tag_review_uses_the_sqlite_rowid_for_composite_key_rows() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrate(&connection).unwrap();
+        insert_test_image(&connection);
+        connection
+            .execute("INSERT INTO tags(id, name) VALUES(1, 'bird')", [])
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO image_ai_tags(image_id, tag_id, model_id, model_revision, confidence, review_state, source, created_at, updated_at) VALUES(1, 1, 'ram-plus', 'v1', 0.9, 'suggested', 'local', 0, 0)",
+                [],
+            )
+            .unwrap();
+        let rowid: i64 = connection
+            .query_row("SELECT rowid FROM image_ai_tags", [], |row| row.get(0))
+            .unwrap();
+
+        review_ai_tag_by_rowid(&connection, rowid, "accepted").unwrap();
+        let state: String = connection
+            .query_row(
+                "SELECT review_state FROM image_ai_tags WHERE rowid = ?1",
+                [rowid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "accepted");
+    }
+
+    #[test]
     fn headless_library_creation_and_root_addition_do_not_need_a_tauri_handle() {
         let directory = tempfile::tempdir().unwrap();
         let db_path = directory.path().join("catalog.db");
@@ -4283,7 +4312,7 @@ pub fn list_suggested_ai_tags(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<Vec<CatalogAiTagReviewItem>, String> {
     let conn = open_connection(&active_library_path(&state)?)?;
-    let mut statement = conn.prepare("SELECT iat.id, r.absolute_path || '/' || i.relative_path, t.name, iat.confidence FROM image_ai_tags iat JOIN images i ON i.id = iat.image_id JOIN collection_roots r ON r.id = i.root_id JOIN tags t ON t.id = iat.tag_id WHERE i.status = 'present' AND iat.review_state = 'suggested' ORDER BY iat.confidence DESC, iat.id LIMIT 500").map_err(|error| error.to_string())?;
+    let mut statement = conn.prepare("SELECT iat.rowid, r.absolute_path || '/' || i.relative_path, t.name, iat.confidence FROM image_ai_tags iat JOIN images i ON i.id = iat.image_id JOIN collection_roots r ON r.id = i.root_id JOIN tags t ON t.id = iat.tag_id WHERE i.status = 'present' AND iat.review_state = 'suggested' ORDER BY iat.confidence DESC, iat.rowid LIMIT 500").map_err(|error| error.to_string())?;
     statement
         .query_map([], |row| {
             Ok(CatalogAiTagReviewItem {
@@ -4298,6 +4327,19 @@ pub fn list_suggested_ai_tags(
         .map_err(|error| error.to_string())
 }
 
+fn review_ai_tag_by_rowid(conn: &Connection, id: i64, review_state: &str) -> Result<(), String> {
+    let changed = conn
+        .execute(
+            "UPDATE image_ai_tags SET review_state = ?1, updated_at = strftime('%s','now') WHERE rowid = ?2",
+            params![review_state, id],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err("AI tag suggestion was not found".to_string());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn review_ai_tag(
     id: i64,
@@ -4308,11 +4350,7 @@ pub fn review_ai_tag(
         return Err("Invalid AI tag review state".to_string());
     }
     let conn = open_connection(&active_library_path(&state)?)?;
-    let changed = conn.execute("UPDATE image_ai_tags SET review_state = ?1, updated_at = strftime('%s','now') WHERE id = ?2", params![review_state, id]).map_err(|error| error.to_string())?;
-    if changed == 0 {
-        return Err("AI tag suggestion was not found".to_string());
-    }
-    Ok(())
+    review_ai_tag_by_rowid(&conn, id, &review_state)
 }
 
 #[tauri::command]

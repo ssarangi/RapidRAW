@@ -838,7 +838,7 @@ fn export_tag_suggestions(arguments: &[String]) -> Result<serde_json::Value, Str
     let connection =
         Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
     let mut statement = connection
-        .prepare("SELECT iat.id, r.absolute_path || '/' || i.relative_path, t.name, iat.confidence, iat.model_id FROM image_ai_tags iat JOIN images i ON i.id = iat.image_id JOIN collection_roots r ON r.id = i.root_id JOIN tags t ON t.id = iat.tag_id WHERE i.status = 'present' AND iat.review_state = 'suggested' ORDER BY iat.confidence DESC")
+        .prepare("SELECT iat.rowid, r.absolute_path || '/' || i.relative_path, t.name, iat.confidence, iat.model_id FROM image_ai_tags iat JOIN images i ON i.id = iat.image_id JOIN collection_roots r ON r.id = i.root_id JOIN tags t ON t.id = iat.tag_id WHERE i.status = 'present' AND iat.review_state = 'suggested' ORDER BY iat.confidence DESC")
         .map_err(|error| error.to_string())?;
     let suggestions = statement
         .query_map([], |row| {
