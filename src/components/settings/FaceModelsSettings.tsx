@@ -5,7 +5,7 @@ import { CheckCircle2, Download, ExternalLink, Loader2, RotateCcw, ShieldCheck }
 import Button from '../ui/Button';
 import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
-import { FaceModelPackStatus, Invokes } from '../ui/AppProperties';
+import { FaceModelPack, FaceModelPackStatus, Invokes } from '../ui/AppProperties';
 
 interface DownloadProgress {
   packId: string;
@@ -17,6 +17,61 @@ interface DownloadProgress {
 
 interface FaceModelsSettingsProps {
   onOpenExternal(url: string): Promise<void>;
+}
+
+function normalizeStatus(value: unknown): FaceModelPackStatus | null {
+  if (!value || typeof value !== 'object') return null;
+  const status = value as Record<string, unknown>;
+  const pack = (status.pack && typeof status.pack === 'object' ? status.pack : status) as Record<string, unknown>;
+  if (
+    typeof pack.id !== 'string' ||
+    typeof pack.displayName !== 'string' ||
+    typeof pack.description !== 'string' ||
+    typeof pack.detector !== 'string' ||
+    typeof pack.recognizer !== 'string' ||
+    typeof pack.detectorLandmarks !== 'number' ||
+    (pack.availability !== 'directDownload' && pack.availability !== 'conversionRequired') ||
+    typeof pack.licenseName !== 'string' ||
+    typeof pack.licenseUrl !== 'string' ||
+    typeof pack.modelSourceUrl !== 'string' ||
+    typeof pack.licenseAcknowledgementRequired !== 'boolean' ||
+    !Array.isArray(pack.artifacts)
+  ) return null;
+  const artifacts = pack.artifacts
+    .filter((artifact): artifact is Record<string, unknown> => Boolean(artifact && typeof artifact === 'object'))
+    .filter((artifact) => typeof artifact.fileName === 'string' && typeof artifact.format === 'string' && typeof artifact.sourceUrl === 'string')
+    .map((artifact) => ({
+      fileName: artifact.fileName as string,
+      format: artifact.format as FaceModelPack['artifacts'][number]['format'],
+      sourceUrl: artifact.sourceUrl as string,
+      sha256: typeof artifact.sha256 === 'string' ? artifact.sha256 : null,
+    }));
+  if (artifacts.length !== pack.artifacts.length) return null;
+  return {
+    pack: {
+      id: pack.id,
+      displayName: pack.displayName,
+      description: pack.description,
+      detector: pack.detector,
+      recognizer: pack.recognizer,
+      detectorLandmarks: pack.detectorLandmarks,
+      embeddingDimensions: typeof pack.embeddingDimensions === 'number' ? pack.embeddingDimensions : null,
+      availability: pack.availability,
+      artifacts,
+      licenseName: pack.licenseName,
+      licenseUrl: pack.licenseUrl,
+      licenseAcknowledgementRequired: pack.licenseAcknowledgementRequired,
+      modelSourceUrl: pack.modelSourceUrl,
+    } as FaceModelPack,
+    installed: status.installed === true,
+    installPath: typeof status.installPath === 'string' ? status.installPath : '',
+    installedArtifacts: Array.isArray(status.installedArtifacts)
+      ? status.installedArtifacts
+          .filter((artifact): artifact is Record<string, unknown> => Boolean(artifact && typeof artifact === 'object'))
+          .filter((artifact) => typeof artifact.fileName === 'string' && typeof artifact.sha256 === 'string')
+          .map((artifact) => ({ fileName: artifact.fileName as string, sha256: artifact.sha256 as string }))
+      : [],
+  };
 }
 
 const availabilityLabel = (status: FaceModelPackStatus) =>
@@ -34,16 +89,8 @@ export default function FaceModelsSettings({ onOpenExternal }: FaceModelsSetting
     setLoading(true);
     setLoadingError(null);
     try {
-      const rawStatuses = await invoke<Array<FaceModelPackStatus & { id?: string }>>(
-        Invokes.ListFaceModelPackStatuses,
-      );
-      // Rust serializes FaceModelPackStatus with `#[serde(flatten)]`; normalize it
-      // here so this component remains compatible with both payload shapes.
-      setStatuses(
-        rawStatuses
-          .filter((status): status is FaceModelPackStatus & { id: string } => Boolean(status?.pack?.id || status?.id))
-          .map((status) => (status.pack ? status : { ...status, pack: status } as FaceModelPackStatus)),
-      );
+      const rawStatuses = await invoke<unknown[]>(Invokes.ListFaceModelPackStatuses);
+      setStatuses(rawStatuses.map(normalizeStatus).filter((status): status is FaceModelPackStatus => status !== null));
     } catch (error) {
       setLoadingError(String(error));
     } finally {

@@ -5,9 +5,46 @@ import { CheckCircle2, Download, ExternalLink, FolderOpen, Loader2, RotateCcw, T
 import Button from '../ui/Button';
 import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
-import { Invokes, VisualModelPackStatus } from '../ui/AppProperties';
+import { Invokes, VisualModelPack, VisualModelPackStatus } from '../ui/AppProperties';
 
 interface VisualModelsSettingsProps { onOpenExternal(url: string): Promise<void>; }
+
+function normalizeStatus(value: unknown): VisualModelPackStatus | null {
+  if (!value || typeof value !== 'object') return null;
+  const status = value as Record<string, unknown>;
+  const pack = (status.pack && typeof status.pack === 'object' ? status.pack : status) as Record<string, unknown>;
+  if (
+    typeof pack.id !== 'string' ||
+    typeof pack.displayName !== 'string' ||
+    typeof pack.description !== 'string' ||
+    typeof pack.task !== 'string' ||
+    (pack.availability !== 'directDownload' && pack.availability !== 'bundleRequired') ||
+    typeof pack.licenseName !== 'string' ||
+    typeof pack.licenseUrl !== 'string' ||
+    typeof pack.modelSourceUrl !== 'string' ||
+    !Array.isArray(pack.artifacts)
+  ) return null;
+  const artifacts = pack.artifacts
+    .filter((artifact): artifact is Record<string, unknown> => Boolean(artifact && typeof artifact === 'object'))
+    .filter((artifact) => typeof artifact.fileName === 'string' && typeof artifact.sourceUrl === 'string')
+    .map((artifact) => ({ fileName: artifact.fileName as string, sourceUrl: artifact.sourceUrl as string }));
+  if (artifacts.length !== pack.artifacts.length) return null;
+  return {
+    pack: {
+      id: pack.id,
+      displayName: pack.displayName,
+      description: pack.description,
+      task: pack.task,
+      availability: pack.availability,
+      artifacts,
+      licenseName: pack.licenseName,
+      licenseUrl: pack.licenseUrl,
+      modelSourceUrl: pack.modelSourceUrl,
+    } as VisualModelPack,
+    installed: status.installed === true,
+    installPath: typeof status.installPath === 'string' ? status.installPath : '',
+  };
+}
 
 export default function VisualModelsSettings({ onOpenExternal }: VisualModelsSettingsProps) {
   const [statuses, setStatuses] = useState<VisualModelPackStatus[]>([]);
@@ -21,14 +58,8 @@ export default function VisualModelsSettings({ onOpenExternal }: VisualModelsSet
       // VisualModelPackStatus is flattened by the Rust serializer. Accept the
       // nested shape too so this stays compatible if the command contract is
       // corrected server-side.
-      const rawStatuses = await invoke<Array<VisualModelPackStatus & { id?: string }>>(
-        Invokes.ListVisualModelPackStatuses,
-      );
-      setStatuses(
-        rawStatuses
-          .filter((status): status is VisualModelPackStatus & { id: string } => Boolean(status?.pack?.id || status?.id))
-          .map((status) => (status.pack ? status : { ...status, pack: status } as VisualModelPackStatus)),
-      );
+      const rawStatuses = await invoke<unknown[]>(Invokes.ListVisualModelPackStatuses);
+      setStatuses(rawStatuses.map(normalizeStatus).filter((status): status is VisualModelPackStatus => status !== null));
       setError(null);
     } catch (reason) {
       setError(String(reason));
