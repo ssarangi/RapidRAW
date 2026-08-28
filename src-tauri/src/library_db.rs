@@ -1057,6 +1057,34 @@ mod tests {
     }
 
     #[test]
+    fn cull_retry_payload_requires_a_folder_and_preserves_settings() {
+        let payload = serde_json::json!({
+            "folderPath": "/photos/session",
+            "includeSubfolders": true,
+            "settings": {
+                "similarityThreshold": 24,
+                "blurThreshold": 80.0,
+                "groupSimilar": true,
+                "filterBlurry": true,
+                "useSubjectDetection": true,
+                "subjectMode": "birds"
+            },
+            "rejectedFolderName": "Culled",
+            "deleteInsteadOfMove": false
+        });
+        let parsed = parse_cull_analysis_retry_payload(&payload).unwrap();
+        assert_eq!(parsed.folder_path, "/photos/session");
+        assert!(parsed.include_subfolders);
+        assert_eq!(parsed.settings.subject_mode, "birds");
+        assert_eq!(parsed.rejected_folder_name, "Culled");
+
+        assert_eq!(
+            parse_cull_analysis_retry_payload(&serde_json::json!({})).unwrap_err(),
+            "Culling analysis job has no folder path"
+        );
+    }
+
+    #[test]
     fn headless_library_creation_and_root_addition_do_not_need_a_tauri_handle() {
         let directory = tempfile::tempdir().unwrap();
         let db_path = directory.path().join("catalog.db");
@@ -3114,33 +3142,13 @@ pub fn retry_background_job(
                 .map(|_| ())
         }
         "cull_analysis" => {
-            let folder_path = payload
-                .get("folderPath")
-                .and_then(|value| value.as_str())
-                .ok_or_else(|| "Culling analysis job has no folder path".to_string())?
-                .to_string();
-            let include_subfolders = payload
-                .get("includeSubfolders")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false);
-            let settings =
-                serde_json::from_value(payload.get("settings").cloned().unwrap_or_default())
-                    .map_err(|error| format!("Invalid culling analysis settings: {error}"))?;
-            let rejected_folder_name = payload
-                .get("rejectedFolderName")
-                .and_then(|value| value.as_str())
-                .unwrap_or("Rejected")
-                .to_string();
-            let delete_instead_of_move = payload
-                .get("deleteInsteadOfMove")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false);
+            let retry = parse_cull_analysis_retry_payload(&payload)?;
             tauri::async_runtime::block_on(crate::auto_cull::plan_auto_cull(
-                folder_path,
-                include_subfolders,
-                settings,
-                rejected_folder_name,
-                delete_instead_of_move,
+                retry.folder_path,
+                retry.include_subfolders,
+                retry.settings,
+                retry.rejected_folder_name,
+                retry.delete_instead_of_move,
                 None,
                 app_handle,
                 state,
@@ -3149,6 +3157,46 @@ pub fn retry_background_job(
         }
         _ => Err(format!("Retry is not available for {kind}")),
     }
+}
+
+#[derive(Debug)]
+struct CullAnalysisRetryPayload {
+    folder_path: String,
+    include_subfolders: bool,
+    settings: crate::culling::CullingSettings,
+    rejected_folder_name: String,
+    delete_instead_of_move: bool,
+}
+
+fn parse_cull_analysis_retry_payload(
+    payload: &serde_json::Value,
+) -> Result<CullAnalysisRetryPayload, String> {
+    let folder_path = payload
+        .get("folderPath")
+        .and_then(|value| value.as_str())
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| "Culling analysis job has no folder path".to_string())?
+        .to_string();
+    let settings = serde_json::from_value(payload.get("settings").cloned().unwrap_or_default())
+        .map_err(|error| format!("Invalid culling analysis settings: {error}"))?;
+    Ok(CullAnalysisRetryPayload {
+        folder_path,
+        include_subfolders: payload
+            .get("includeSubfolders")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        settings,
+        rejected_folder_name: payload
+            .get("rejectedFolderName")
+            .and_then(|value| value.as_str())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("Rejected")
+            .to_string(),
+        delete_instead_of_move: payload
+            .get("deleteInsteadOfMove")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+    })
 }
 
 fn color_label_from_tags(tags: Option<&Vec<String>>) -> Option<String> {
