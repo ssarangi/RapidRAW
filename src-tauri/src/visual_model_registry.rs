@@ -261,7 +261,14 @@ fn is_complete_install(
         let path = directory.join(&artifact.file_name);
         path.is_file()
             && sha256_file(&path)
-                .map(|actual| actual.eq_ignore_ascii_case(&recorded.sha256))
+                .map(|actual| {
+                    actual.eq_ignore_ascii_case(&recorded.sha256)
+                        && artifact
+                            .expected_sha256
+                            .as_deref()
+                            .map(|expected| actual.eq_ignore_ascii_case(expected))
+                            .unwrap_or(true)
+                })
                 .unwrap_or(false)
     });
     if verified {
@@ -815,8 +822,18 @@ mod tests {
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
-        assert!(is_complete_install(
+        // A local manifest matching local files cannot override a registry pin.
+        assert!(!is_complete_install(
             &pack,
+            directory.path(),
+            Some(&manifest)
+        ));
+        let mut unpinned_pack = pack.clone();
+        for artifact in &mut unpinned_pack.artifacts {
+            artifact.expected_sha256 = None;
+        }
+        assert!(is_complete_install(
+            &unpinned_pack,
             directory.path(),
             Some(&manifest)
         ));
@@ -834,7 +851,10 @@ mod tests {
 
     #[test]
     fn validated_pack_is_rechecked_when_an_artifact_changes() {
-        let pack = visual_model_packs().remove(0);
+        let pack = visual_model_packs()
+            .into_iter()
+            .find(|pack| pack.availability == VisualModelAvailability::BundleRequired)
+            .unwrap();
         let directory = tempfile::tempdir().unwrap();
         let mut artifacts = Vec::new();
         for artifact in &pack.artifacts {
@@ -875,7 +895,10 @@ mod tests {
 
     #[test]
     fn revision_is_stable_for_a_verified_manifest() {
-        let pack = visual_model_packs().remove(0);
+        let pack = visual_model_packs()
+            .into_iter()
+            .find(|pack| pack.availability == VisualModelAvailability::BundleRequired)
+            .unwrap();
         let models_dir = tempfile::tempdir().unwrap();
         let directory = models_dir.path().join(&pack.id);
         fs::create_dir(&directory).unwrap();
