@@ -1111,8 +1111,8 @@ export default function BottomBar({
                                   <Square size={13} />
                                 </button>
                               )}
-                              {job.kind === 'catalog_scan' && ['failed', 'cancelled'].includes(job.state) && (
-                                <button className="p-1 text-accent hover:bg-bg-primary rounded" onClick={() => void handleRetryBackgroundJob(job.id)} data-tooltip="Retry catalog scan">
+                              {['catalog_scan', 'ram_plus_tagging', 'ai_tagging', 'face_detection', 'face_recognition', 'raw_denoise', 'rgb_denoise', 'deblur', 'upscale'].includes(job.kind) && ['failed', 'cancelled'].includes(job.state) && (
+                                <button className="p-1 text-accent hover:bg-bg-primary rounded" onClick={() => void handleRetryBackgroundJob(job.id)} data-tooltip="Retry job">
                                   <RotateCcw size={13} />
                                 </button>
                               )}

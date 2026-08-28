@@ -2989,10 +2989,9 @@ pub fn resume_background_job(
     )
 }
 
-/// Retries a terminal catalog scan as a new durable job. The original job is
-/// retained as audit history; model jobs are intentionally not retried here
-/// because their model directory/runtime configuration is not stored in a
-/// portable desktop-job payload yet.
+/// Retries a supported terminal job as a new durable job. The original job is
+/// retained as audit history, while the current model and application settings
+/// are resolved again so a repaired model install can recover cleanly.
 #[tauri::command]
 pub fn retry_background_job(
     job_id: String,
@@ -3011,17 +3010,48 @@ pub fn retry_background_job(
     if !matches!(job_state.as_str(), "failed" | "cancelled") {
         return Err("Only failed or cancelled jobs can be retried".to_string());
     }
-    if kind != "catalog_scan" {
-        return Err(format!(
-            "Retry is not available for {kind}; run this operation again from its model workflow"
-        ));
+    let payload = serde_json::from_str::<serde_json::Value>(&payload_json).unwrap_or_default();
+    match kind.as_str() {
+        "catalog_scan" => {
+            let root_id =
+                root_id.ok_or_else(|| "Catalog scan job has no collection root".to_string())?;
+            let recursive = payload
+                .get("recursive")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(true);
+            start_catalog_scan(root_id, recursive, app_handle, state)
+        }
+        "ram_plus_tagging" => {
+            crate::tagging::start_catalog_ram_plus_tagging(app_handle, state).map(|_| ())
+        }
+        "ai_tagging" => tauri::async_runtime::block_on(crate::tagging::start_catalog_ai_tagging(
+            app_handle, state,
+        ))
+        .map(|_| ()),
+        "face_detection" => crate::face_detection::start_face_detection(
+            payload.get("rootId").and_then(|value| value.as_i64()),
+            app_handle,
+            state,
+        )
+        .map(|_| ()),
+        "face_recognition" => crate::face_detection::start_face_recognition(
+            payload.get("rootId").and_then(|value| value.as_i64()),
+            app_handle,
+            state,
+        )
+        .map(|_| ()),
+        "raw_denoise" | "rgb_denoise" | "deblur" | "upscale" => {
+            let image_id = payload
+                .get("imageId")
+                .and_then(|value| value.as_i64())
+                .ok_or_else(|| "Restoration job has no source image".to_string())?;
+            let recipe = serde_json::from_value(payload.get("recipe").cloned().unwrap_or_default())
+                .map_err(|error| format!("Invalid restoration job recipe: {error}"))?;
+            crate::image_restoration::start_image_restoration(image_id, recipe, app_handle, state)
+                .map(|_| ())
+        }
+        _ => Err(format!("Retry is not available for {kind}")),
     }
-    let root_id = root_id.ok_or_else(|| "Catalog scan job has no collection root".to_string())?;
-    let recursive = serde_json::from_str::<serde_json::Value>(&payload_json)
-        .ok()
-        .and_then(|payload| payload.get("recursive").and_then(|value| value.as_bool()))
-        .unwrap_or(true);
-    start_catalog_scan(root_id, recursive, app_handle, state)
 }
 
 fn color_label_from_tags(tags: Option<&Vec<String>>) -> Option<String> {
