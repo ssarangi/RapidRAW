@@ -973,8 +973,6 @@ export function CatalogSpeciesReviewButton() {
 export function CatalogEnhanceMenu() {
   const [open, setOpen] = useState(false);
   const [denoiseStrength, setDenoiseStrength] = useState(0.8);
-  const [microcontrast, setMicrocontrast] = useState(0.35);
-  const [detailRecovery, setDetailRecovery] = useState(0.5);
   const [isProcessing, setIsProcessing] = useState(false);
   const librarySource = useLibraryStore((state) => state.librarySource);
   const libraryActivePath = useLibraryStore((state) => state.libraryActivePath);
@@ -991,6 +989,10 @@ export function CatalogEnhanceMenu() {
       toast.info('Selected image is not indexed in the catalog.');
       return;
     }
+    if (operationKind === 'raw_denoise' && !currentImage.is_raw) {
+      toast.info('RAW Restore is available only for RAW source images.');
+      return;
+    }
     setIsProcessing(true);
     try {
       const recipe = {
@@ -998,8 +1000,10 @@ export function CatalogEnhanceMenu() {
         modelId: operationKind === 'raw_denoise' ? 'rawnind-utnet2-bayer' : 'nafnet-sidd-rgb',
         modelRevision: 'v1',
         denoiseStrength,
-        microcontrastStrength: microcontrast,
-        detailRecovery,
+        // Finish-stage controls belong to the editor, never the catalog
+        // restoration derivative.
+        microcontrastStrength: 0,
+        detailRecovery: 0,
         tileSize: 768,
         tileOverlap: 64,
       };
@@ -1007,7 +1011,7 @@ export function CatalogEnhanceMenu() {
         imageId: currentImage.id,
         recipe,
       });
-      toast.success(`${operationKind === 'raw_denoise' ? 'RAW AI Denoise' : 'RGB AI Denoise'} job started. Check Background Jobs.`);
+      toast.success(`${operationKind === 'raw_denoise' ? 'RAW Restore' : 'RGB Denoise'} job started. Check Background Jobs.`);
       setOpen(false);
     } catch (error) {
       console.error('Failed to start restoration:', error);
@@ -1022,7 +1026,7 @@ export function CatalogEnhanceMenu() {
       <Button
         className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center"
         onClick={() => setOpen(!open)}
-        data-tooltip={isCatalogAvailable ? 'AI Denoise & Microcontrast Sharpening' : 'Open a SQLite library to enhance images'}
+        data-tooltip={isCatalogAvailable ? 'RAW Restore and RGB Denoise' : 'Open a SQLite library to restore catalog images'}
         disabled={!isCatalogAvailable}
       >
         <Sparkles className="w-5 h-5 text-accent" />
@@ -1030,13 +1034,13 @@ export function CatalogEnhanceMenu() {
       {open && (
         <div className="absolute right-0 mt-2 w-80 z-50 bg-surface/95 backdrop-blur-md border border-border-color rounded-lg shadow-xl p-4">
           <Text variant={TextVariants.subheading} weight={TextWeights.semibold} className="mb-3">
-            AI Denoise & Sharpen
+            RAW Restore
           </Text>
 
           <div className="space-y-3 mb-4">
-            <div>
+            {!currentImage?.is_raw && <div>
               <div className="flex justify-between text-xs text-text-secondary mb-1">
-                <span>Denoise Strength</span>
+                <span>Noise Reduction</span>
                 <span>{Math.round(denoiseStrength * 100)}%</span>
               </div>
               <input
@@ -1048,56 +1052,26 @@ export function CatalogEnhanceMenu() {
                 onChange={(e) => setDenoiseStrength(Number(e.target.value))}
                 className="w-full accent-accent"
               />
-            </div>
+            </div>}
 
-            <div>
-              <div className="flex justify-between text-xs text-text-secondary mb-1">
-                <span>Microcontrast Boost</span>
-                <span>{Math.round(microcontrast * 100)}%</span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.05"
-                value={microcontrast}
-                onChange={(e) => setMicrocontrast(Number(e.target.value))}
-                className="w-full accent-accent"
-              />
-            </div>
-
-            <div>
-              <div className="flex justify-between text-xs text-text-secondary mb-1">
-                <span>Detail Recovery</span>
-                <span>{Math.round(detailRecovery * 100)}%</span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.05"
-                value={detailRecovery}
-                onChange={(e) => setDetailRecovery(Number(e.target.value))}
-                className="w-full accent-accent"
-              />
-            </div>
           </div>
 
           <div className="flex gap-2">
-            <Button
+            {currentImage?.is_raw ? <Button
               className="flex-1 bg-accent text-white py-2 text-xs font-medium rounded-md"
               disabled={isProcessing}
               onClick={() => void handleRunEnhance('raw_denoise')}
+              data-tooltip="Run Bayer RAW denoise and demosaic restoration"
             >
-              {isProcessing ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : 'RAW Denoise + Sharp'}
-            </Button>
-            <Button
+              {isProcessing ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : 'RAW Restore'}
+            </Button> : <Button
               className="flex-1 bg-surface-hover border border-border-color text-text-primary py-2 text-xs font-medium rounded-md"
               disabled={isProcessing}
               onClick={() => void handleRunEnhance('rgb_denoise')}
+              data-tooltip="Run developed-image RGB denoise"
             >
-              RGB Denoise
-            </Button>
+              {isProcessing ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : 'RGB Denoise'}
+            </Button>}
           </div>
         </div>
       )}

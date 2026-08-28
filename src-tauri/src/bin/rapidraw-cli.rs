@@ -1,7 +1,6 @@
 use std::env;
 use std::path::PathBuf;
 
-use image::GenericImageView;
 use rusqlite::Connection;
 use rapidraw_lib::visual_model_registry::visual_model_packs;
 use serde_json::json;
@@ -371,63 +370,10 @@ fn list_derivatives(arguments: &[String]) -> Result<serde_json::Value, String> {
 
 fn run_restore_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
     let db_path = database_argument(arguments)?;
-    let connection = Connection::open(&db_path).map_err(|error| error.to_string())?;
     let image_id = numeric_argument(arguments, "--image")?;
-
-    let (root_path, relative_path): (String, String) = connection
-        .query_row(
-            "SELECT r.absolute_path, i.relative_path FROM images i JOIN collection_roots r ON r.id = i.root_id WHERE i.id = ?1",
-            [image_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(|e| format!("Image not found: {e}"))?;
-
-    let source_path = std::path::Path::new(&root_path).join(&relative_path);
-    if !source_path.exists() {
-        return Err(format!("Source image file not found: {}", source_path.display()));
-    }
-
-    let img = image::open(&source_path).map_err(|e| format!("Failed to open image: {e}"))?;
-    let (width, height) = img.dimensions();
-
-    let recipe = rapidraw_lib::image_restoration::RestorationRecipe::default();
-    let enhanced = rapidraw_lib::image_restoration::apply_microcontrast(&img, recipe.microcontrast_strength, recipe.detail_recovery);
-
-    let catalog_dir = db_path.parent().unwrap_or_else(|| std::path::Path::new("."));
-    let final_output = rapidraw_lib::image_restoration::derivative_output_path(catalog_dir, image_id, &recipe.operation_kind, "tiff")?;
-    let temp_output = final_output.with_extension("tmp.tiff");
-
-    enhanced.save(&temp_output).map_err(|e| format!("Failed to save derivative: {e}"))?;
-    std::fs::rename(&temp_output, &final_output).map_err(|e| format!("Failed to publish derivative: {e}"))?;
-
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let recipe_json = serde_json::to_string(&recipe).unwrap_or_default();
-
-    connection.execute(
-        "INSERT INTO image_derivatives(source_image_id, operation_kind, model_id, model_revision, recipe_json, output_path, output_format, width, height, state, created_at, completed_at, updated_at)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, 'tiff', ?7, ?8, 'completed', ?9, ?9, ?9)",
-        rusqlite::params![
-            image_id,
-            recipe.operation_kind,
-            recipe.model_id,
-            recipe.model_revision,
-            recipe_json,
-            final_output.to_string_lossy().to_string(),
-            width as i64,
-            height as i64,
-            now,
-        ],
-    ).map_err(|e| format!("Failed to record derivative: {e}"))?;
-
-    let derivative_id = connection.last_insert_rowid();
-    Ok(json!({
-        "status": "completed",
-        "derivativeId": derivative_id,
-        "outputPath": final_output.to_string_lossy(),
-        "width": width,
-        "height": height,
-    }))
+    let _ = (db_path, image_id);
+    Err(
+        "restore run is temporarily unavailable: it previously wrote a display-referred microcontrast image while recording it as a RawNIND derivative. Use the catalog RAW Restore/RGB Denoise jobs until the CLI uses the same model-backed restoration service."
+            .to_string(),
+    )
 }

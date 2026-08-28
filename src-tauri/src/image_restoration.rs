@@ -27,8 +27,10 @@ impl Default for RestorationRecipe {
             model_id: "rawnind-utnet2-bayer".to_string(),
             model_revision: "v1".to_string(),
             denoise_strength: 0.8,
-            microcontrast_strength: 0.35,
-            detail_recovery: 0.5,
+            // These legacy fields remain in stored recipes for compatibility.
+            // Finish-stage adjustments are deliberately never applied here.
+            microcontrast_strength: 0.0,
+            detail_recovery: 0.0,
             tile_size: 768,
             tile_overlap: 64,
         }
@@ -638,7 +640,7 @@ fn run_restoration_worker(
         return Err("Restoration cancelled".to_string());
     }
 
-    let _ = crate::library_db::update_job(db_path, job_id, "running", "Executing neural restoration and microcontrast filter", 50, 100, None, None);
+    let _ = crate::library_db::update_job(db_path, job_id, "running", "Executing neural restoration", 50, 100, None, None);
 
     // Check if neural model is installed and load session
     let restored = if recipe.operation_kind.contains("denoise") {
@@ -786,9 +788,6 @@ fn run_restoration_worker(
         img
     };
 
-    // Apply microcontrast enhancement and detail sharpening on restored image
-    let enhanced = apply_microcontrast(&restored, recipe.microcontrast_strength, recipe.detail_recovery);
-
     if *job_control.cancellation_receiver().borrow() {
         let _ = fs::remove_file(&temp_output);
         let _ = conn.execute(
@@ -799,7 +798,7 @@ fn run_restoration_worker(
     }
 
     // Save temporary derivative file
-    if let Err(e) = enhanced.save(&temp_output) {
+    if let Err(e) = restored.save(&temp_output) {
         let _ = fs::remove_file(&temp_output);
         let error_msg = format!("Failed to write derivative: {e}");
         let _ = conn.execute(
@@ -820,7 +819,7 @@ fn run_restoration_worker(
         return Err(error_msg);
     }
 
-    let (width, height) = enhanced.dimensions();
+    let (width, height) = restored.dimensions();
 
     // Calculate output hash for provenance verification
     let output_hash = match fs::read(&final_output) {
@@ -895,7 +894,7 @@ mod tests {
     }
 
     #[test]
-    fn microcontrast_enhances_contrast_without_changing_dimensions() {
+    fn microcontrast_finishing_filter_preserves_dimensions() {
         let img = DynamicImage::new_rgb8(100, 100);
         let enhanced = apply_microcontrast(&img, 0.5, 0.3);
         assert_eq!(enhanced.width(), 100);
@@ -928,7 +927,8 @@ mod tests {
         assert_eq!(recipe.operation_kind, "raw_denoise");
         assert_eq!(recipe.model_id, "rawnind-utnet2-bayer");
         assert!(recipe.denoise_strength > 0.0 && recipe.denoise_strength <= 1.0);
-        assert!(recipe.microcontrast_strength >= 0.0);
+        assert_eq!(recipe.microcontrast_strength, 0.0);
+        assert_eq!(recipe.detail_recovery, 0.0);
         assert!(recipe.tile_size >= 256);
         assert!(recipe.tile_overlap < recipe.tile_size);
     }
