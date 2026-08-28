@@ -22,6 +22,7 @@ import {
   FolderOpen,
   Play,
   Database,
+  ChevronDown,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
@@ -1825,7 +1826,7 @@ export default function CullingView(props: any) {
                   <label className="text-sm font-medium text-text-primary">
                     What type of shoot is this?
                   </label>
-                  <div>
+                  <div className="relative w-full max-w-sm">
                     <select
                       value={cullSettings.subjectMode}
                       onChange={(e) => {
@@ -1836,16 +1837,18 @@ export default function CullingView(props: any) {
                           useSubjectDetection: subjectMode !== 'landscape',
                         }));
                       }}
-                      className="h-10 w-full max-w-sm rounded-lg border border-border-color bg-bg-primary px-3 text-sm text-text-primary outline-none focus:border-accent"
+                      className="h-10 w-full appearance-none rounded-lg border border-border-color bg-bg-primary pl-3.5 pr-10 text-sm text-text-primary outline-none focus:border-accent cursor-pointer shadow-xs"
+                      style={{ colorScheme: 'dark' }}
                     >
-                      <option value="people">Family Portraits & People</option>
-                      <option value="people">Weddings & Engagements</option>
-                      <option value="people">Events & Parties</option>
-                      <option value="wildlife">Wildlife & Animals</option>
-                      <option value="birds">Birds & Nature</option>
-                      <option value="landscape">Landscape & Architecture</option>
-                      <option value="general">General / Commercial</option>
+                      <option value="people" className="bg-bg-secondary text-text-primary py-1.5">Family Portraits & People</option>
+                      <option value="people" className="bg-bg-secondary text-text-primary py-1.5">Weddings & Engagements</option>
+                      <option value="people" className="bg-bg-secondary text-text-primary py-1.5">Events & Parties</option>
+                      <option value="wildlife" className="bg-bg-secondary text-text-primary py-1.5">Wildlife & Animals</option>
+                      <option value="birds" className="bg-bg-secondary text-text-primary py-1.5">Birds & Nature</option>
+                      <option value="landscape" className="bg-bg-secondary text-text-primary py-1.5">Landscape & Architecture</option>
+                      <option value="general" className="bg-bg-secondary text-text-primary py-1.5">General / Commercial</option>
                     </select>
+                    <ChevronDown size={16} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-text-secondary" />
                   </div>
                 </div>
 
@@ -2239,8 +2242,33 @@ export default function CullingView(props: any) {
             </div>
             {finalistRanks.has(activePath) && <div className="mt-1 text-xs text-cyan-200">{finalistRanks.get(activePath) === 1 ? 'Top technical finalist' : `Technical finalist #${finalistRanks.get(activePath)}`}</div>}
             {localCullPlan && thumbnails[activePath] && <img className="mt-2 aspect-[4/3] w-full rounded-sm border border-border-color bg-surface object-contain" src={thumbnails[activePath]} alt="Selected culling frame" />}
-            <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-1">{cullDecisions[activePath].reason.startsWith('duplicate_of:') ? 'Near duplicate of a stronger frame' : cullDecisions[activePath].reason}</Text>
-            {localCullPlan && <><div className="mt-2 flex gap-2"><button className="rounded bg-green-400/10 px-2 py-1 text-xs text-green-300 hover:bg-green-400/20" onClick={() => void updateLocalCullDecision(activePath, true, decisionFeedbackReason)}>Keep</button><button className="rounded bg-red-400/10 px-2 py-1 text-xs text-red-300 hover:bg-red-400/20" onClick={() => void updateLocalCullDecision(activePath, false, decisionFeedbackReason)}>Reject</button></div>{localCullPlan.sessionId && <label className="mt-2 block text-xs text-text-secondary">Why this choice?<select value={decisionFeedbackReason} onChange={(event) => setDecisionFeedbackReason(event.target.value)} className="mt-1 h-8 w-full rounded border border-border-color bg-bg-primary px-2 text-xs text-text-primary outline-none focus:border-accent"><option value="">No reason recorded</option>{CULL_FEEDBACK_REASONS.map((reason) => <option key={reason} value={reason}>{reason}</option>)}</select></label>}</>}
+            {localCullPlan && (
+              <>
+                <div className="mt-2 flex gap-2">
+                  <button className="rounded bg-green-400/10 px-2 py-1 text-xs text-green-300 hover:bg-green-400/20" onClick={() => void updateLocalCullDecision(activePath, true, decisionFeedbackReason)}>Keep</button>
+                  <button className="rounded bg-red-400/10 px-2 py-1 text-xs text-red-300 hover:bg-red-400/20" onClick={() => void updateLocalCullDecision(activePath, false, decisionFeedbackReason)}>Reject</button>
+                </div>
+                {localCullPlan.sessionId && (
+                  <label className="mt-2 block text-xs text-text-secondary">
+                    Why this choice?
+                    <div className="relative mt-1">
+                      <select
+                        value={decisionFeedbackReason}
+                        onChange={(event) => setDecisionFeedbackReason(event.target.value)}
+                        className="h-8 w-full appearance-none rounded border border-border-color bg-bg-primary pl-2 pr-7 text-xs text-text-primary outline-none focus:border-accent cursor-pointer"
+                        style={{ colorScheme: 'dark' }}
+                      >
+                        <option value="" className="bg-bg-secondary text-text-primary">No reason recorded</option>
+                        {CULL_FEEDBACK_REASONS.map((reason) => (
+                          <option key={reason} value={reason} className="bg-bg-secondary text-text-primary">{reason}</option>
+                        ))}
+                      </select>
+                      <ChevronDown size={14} className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-text-secondary" />
+                    </div>
+                  </label>
+                )}
+              </>
+            )}
             {activePlanItem && activePlanItem.decisionFactors.length > 0 && <div className="mt-3 space-y-2 border-t border-border-color pt-2">{activePlanItem.decisionFactors.map((factor) => <div key={factor.id} className="text-xs"><div className={factor.impact === 'reject' ? 'text-red-300' : 'text-text-primary'}>{factor.label}</div><div className="mt-0.5 text-text-secondary">{factor.detail}</div></div>)}</div>}
           </div>
         )}
