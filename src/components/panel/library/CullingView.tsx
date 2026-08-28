@@ -28,6 +28,7 @@ import clsx from 'clsx';
 import { AutoCullPlan, AutoCullResult, CatalogRoot, CullingSettings, CullSessionDecision, CullSessionSummary, Invokes, ImageFile } from '../../ui/AppProperties';
 import { Thumbnail } from './LibraryItems';
 import Text from '../../ui/Text';
+import Switch from '../../ui/Switch';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { useProcessStore } from '../../../store/useProcessStore';
 import { useLibraryStore } from '../../../store/useLibraryStore';
@@ -1103,6 +1104,9 @@ export default function CullingView(props: any) {
   const [cullSettings, setCullSettings] = useState<CullingSettings>(DEFAULT_CULL_SETTINGS);
   const [includeSubfolders, setIncludeSubfolders] = useState(false);
   const [isPlanningCull, setIsPlanningCull] = useState(false);
+  const [isConfiguringCull, setIsConfiguringCull] = useState(true);
+  const [duplicateRatio, setDuplicateRatio] = useState<'more' | 'moderate' | 'less'>('moderate');
+  const [highlightPercent, setHighlightPercent] = useState<number>(15);
   const [localCullPlan, setLocalCullPlan] = useState<AutoCullPlan | null>(null);
   const [cullError, setCullError] = useState<string | null>(null);
   const [isApplyingCull, setIsApplyingCull] = useState(false);
@@ -1761,9 +1765,354 @@ export default function CullingView(props: any) {
               </div>
             </div>
           </div>
+        ) : isConfiguringCull ? (
+          <div className="w-full h-full overflow-y-auto p-4 md:p-8 flex justify-center items-start">
+            <div className="w-full max-w-3xl rounded-xl border border-border-color bg-bg-secondary p-6 md:p-8 shadow-2xl">
+              {/* Header */}
+              <div className="flex items-start justify-between border-b border-border-color pb-5">
+                <div>
+                  <h2 className="text-xl font-bold text-text-primary tracking-tight">Set Preferences</h2>
+                  <p className="text-sm text-text-secondary mt-1">Choose your culling settings</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => setIsConfiguringCull(false)}
+                    className="text-xs text-text-secondary hover:text-text-primary underline underline-offset-4 transition-colors"
+                  >
+                    I want to cull manually
+                  </button>
+                  <button
+                    onClick={() => {
+                      setCullSettings(DEFAULT_CULL_SETTINGS);
+                      setHighlightPercent(15);
+                      setDuplicateRatio('moderate');
+                    }}
+                    className="rounded-full bg-surface border border-border-color px-3.5 py-1.5 text-xs font-medium text-text-primary hover:bg-card-active transition-colors"
+                  >
+                    Reset defaults
+                  </button>
+                  {localCullPlan && (
+                    <button
+                      onClick={() => setIsConfiguringCull(false)}
+                      className="p-1 rounded-md text-text-secondary hover:text-text-primary hover:bg-surface"
+                      title="Back to review grid"
+                    >
+                      <X size={18} />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Selected folder badge */}
+              <div className="mt-4 flex items-center justify-between rounded-lg border border-border-color bg-bg-primary px-3.5 py-2 text-xs">
+                <div className="flex items-center gap-2 truncate text-text-secondary">
+                  <FolderOpen size={15} className="text-accent shrink-0" />
+                  <span className="font-mono text-text-primary truncate">{cullCatalogScope?.absoluteFolderPath || cullFolderPath}</span>
+                  <span className="shrink-0 text-text-secondary">({cullImageList.length} photos)</span>
+                </div>
+                <button
+                  onClick={() => void chooseCullFolder()}
+                  className="shrink-0 font-medium text-accent hover:underline ml-2"
+                >
+                  Change folder
+                </button>
+              </div>
+
+              {/* Wizard Form Rows */}
+              <div className="mt-6 space-y-6">
+                {/* Row 1: What type of shoot is this? */}
+                <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] items-center gap-3">
+                  <label className="text-sm font-medium text-text-primary">
+                    What type of shoot is this?
+                  </label>
+                  <div>
+                    <select
+                      value={cullSettings.subjectMode}
+                      onChange={(e) => {
+                        const subjectMode = e.target.value as CullingSettings['subjectMode'];
+                        setCullSettings((s) => ({
+                          ...s,
+                          subjectMode,
+                          useSubjectDetection: subjectMode !== 'landscape',
+                        }));
+                      }}
+                      className="h-10 w-full max-w-sm rounded-lg border border-border-color bg-bg-primary px-3 text-sm text-text-primary outline-none focus:border-accent"
+                    >
+                      <option value="people">Family Portraits & People</option>
+                      <option value="people">Weddings & Engagements</option>
+                      <option value="people">Events & Parties</option>
+                      <option value="wildlife">Wildlife & Animals</option>
+                      <option value="birds">Birds & Nature</option>
+                      <option value="landscape">Landscape & Architecture</option>
+                      <option value="general">General / Commercial</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Row 2: Threshold for culling blurred photos */}
+                <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] items-start gap-3 pt-3 border-t border-border-color/60">
+                  <label className="text-sm font-medium text-text-primary pt-1">
+                    Threshold for culling blurred photos
+                  </label>
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap gap-2">
+                      {([
+                        { label: 'Lenient', value: 70 },
+                        { label: 'Moderate', value: 100 },
+                        { label: 'Strict', value: 140 },
+                      ] as const).map((opt) => (
+                        <button
+                          key={opt.label}
+                          onClick={() => setCullSettings((s) => ({ ...s, blurThreshold: opt.value, filterBlurry: true }))}
+                          className={clsx(
+                            'rounded-full px-5 py-1.5 text-xs font-semibold transition-all shadow-xs',
+                            cullSettings.blurThreshold === opt.value
+                              ? 'bg-cyan-500 text-black ring-2 ring-cyan-400'
+                              : 'border border-border-color bg-bg-primary text-text-secondary hover:text-text-primary hover:bg-surface'
+                          )}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                    {/* Fine-tuning slider */}
+                    <div className="flex items-center gap-3 pt-1 max-w-sm">
+                      <input
+                        type="range"
+                        min="30"
+                        max="200"
+                        step="5"
+                        value={cullSettings.blurThreshold}
+                        onChange={(e) => setCullSettings((s) => ({ ...s, blurThreshold: Number(e.target.value), filterBlurry: true }))}
+                        className="slider-input flex-1 accent-cyan-400 h-1.5 bg-surface rounded-lg cursor-pointer"
+                      />
+                      <span className="text-xs font-mono text-text-secondary w-12 text-right">
+                        {cullSettings.blurThreshold.toFixed(0)}
+                      </span>
+                    </div>
+                    <p className="text-xs text-text-secondary italic">
+                      {cullSettings.blurThreshold <= 75
+                        ? 'Lenient: Only marks heavily blurred photos for review - recommended for fast motion or action.'
+                        : cullSettings.blurThreshold >= 130
+                        ? 'Strict: Rejects any frames that are not tack-sharp - recommended for studio, formal portraits, and macro.'
+                        : 'Moderate: Will include images that are slightly out of focus for your review - recommended for most shooting conditions.'}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Row 3: Criteria for grouping Duplicates */}
+                <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] items-start gap-3 pt-3 border-t border-border-color/60">
+                  <label className="text-sm font-medium text-text-primary pt-1">
+                    Criteria for grouping Duplicates
+                  </label>
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap gap-2">
+                      {([
+                        { label: 'Identical', value: 12 },
+                        { label: 'Similar', value: 24 },
+                        { label: 'Similarish', value: 34 },
+                        { label: 'Loose', value: 46 },
+                      ] as const).map((opt) => (
+                        <button
+                          key={opt.label}
+                          onClick={() => setCullSettings((s) => ({ ...s, similarityThreshold: opt.value, groupSimilar: true }))}
+                          className={clsx(
+                            'rounded-full px-5 py-1.5 text-xs font-semibold transition-all shadow-xs',
+                            cullSettings.similarityThreshold === opt.value
+                              ? 'bg-cyan-500 text-black ring-2 ring-cyan-400'
+                              : 'border border-border-color bg-bg-primary text-text-secondary hover:text-text-primary hover:bg-surface'
+                          )}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                    {/* Fine-tuning slider */}
+                    <div className="flex items-center gap-3 pt-1 max-w-sm">
+                      <input
+                        type="range"
+                        min="5"
+                        max="60"
+                        step="2"
+                        value={cullSettings.similarityThreshold}
+                        onChange={(e) => setCullSettings((s) => ({ ...s, similarityThreshold: Number(e.target.value), groupSimilar: true }))}
+                        className="slider-input flex-1 accent-cyan-400 h-1.5 bg-surface rounded-lg cursor-pointer"
+                      />
+                      <span className="text-xs font-mono text-text-secondary w-12 text-right">
+                        {cullSettings.similarityThreshold}
+                      </span>
+                    </div>
+                    <p className="text-xs text-text-secondary italic">
+                      {cullSettings.similarityThreshold <= 15
+                        ? 'Identical: Groups only burst sequences with near-identical camera framing and subject pose.'
+                        : cullSettings.similarityThreshold <= 26
+                        ? 'Similar: More Selected images - Changes in subject will create a new Duplicate set.'
+                        : cullSettings.similarityThreshold <= 38
+                        ? 'Similarish: Groups moderate variations in expressions and pose together.'
+                        : 'Loose: Broadly groups all photos taken in the same scene/angle into duplicate sets.'}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Row 4: Selections in each duplicate set */}
+                <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] items-start gap-3 pt-3 border-t border-border-color/60">
+                  <label className="text-sm font-medium text-text-primary pt-1">
+                    Selections in each duplicate set
+                  </label>
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap gap-2">
+                      {(['More', 'Moderate', 'Less'] as const).map((opt) => (
+                        <button
+                          key={opt}
+                          onClick={() => setDuplicateRatio(opt.toLowerCase() as any)}
+                          className={clsx(
+                            'rounded-full px-5 py-1.5 text-xs font-semibold transition-all shadow-xs',
+                            duplicateRatio === opt.toLowerCase()
+                              ? 'bg-cyan-500 text-black ring-2 ring-cyan-400'
+                              : 'border border-border-color bg-bg-primary text-text-secondary hover:text-text-primary hover:bg-surface'
+                          )}
+                        >
+                          {opt}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-xs text-text-secondary italic">
+                      {duplicateRatio === 'more'
+                        ? 'More: Chooses top 35% images from each duplicate set for your selection.'
+                        : duplicateRatio === 'less'
+                        ? 'Less: Chooses only the single top 10% / best image from each set.'
+                        : 'Moderate: Chooses top 20% images from a duplicate set.'}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Row 5: Amount of Highlights */}
+                <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] items-start gap-3 pt-3 border-t border-border-color/60">
+                  <label className="text-sm font-medium text-text-primary pt-1">
+                    Amount of Highlights
+                  </label>
+                  <div className="space-y-2">
+                    <div className="flex flex-wrap gap-2">
+                      {([
+                        { label: 'None', value: 0 },
+                        { label: '10%', value: 10 },
+                        { label: '15%', value: 15 },
+                        { label: '20%', value: 20 },
+                        { label: '25%', value: 25 },
+                      ] as const).map((opt) => (
+                        <button
+                          key={opt.label}
+                          onClick={() => setHighlightPercent(opt.value)}
+                          className={clsx(
+                            'rounded-full px-4 py-1.5 text-xs font-semibold transition-all shadow-xs',
+                            highlightPercent === opt.value
+                              ? 'bg-cyan-500 text-black ring-2 ring-cyan-400'
+                              : 'border border-border-color bg-bg-primary text-text-secondary hover:text-text-primary hover:bg-surface'
+                          )}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-xs text-text-secondary italic">
+                      Highlights will pick the best standout images from the selected images for the chosen profile.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Row 6: Enable / Disable AI features */}
+                <div className="grid grid-cols-1 md:grid-cols-[240px_1fr] items-start gap-3 pt-3 border-t border-border-color/60">
+                  <label className="text-sm font-medium text-text-primary pt-1">
+                    Enable / Disable AI features
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-1">
+                    <Switch
+                      label="Closed Eyes"
+                      checked={cullSettings.useSubjectDetection}
+                      onChange={(val) => setCullSettings((s) => ({ ...s, useSubjectDetection: val }))}
+                    />
+                    <Switch
+                      label="Blur"
+                      checked={cullSettings.filterBlurry}
+                      onChange={(val) => setCullSettings((s) => ({ ...s, filterBlurry: val }))}
+                    />
+                    <Switch
+                      label="Duplicates"
+                      checked={cullSettings.groupSimilar}
+                      onChange={(val) => setCullSettings((s) => ({ ...s, groupSimilar: val }))}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Progress if analyzing */}
+              {isPlanningCull && cullProgress && (
+                <div className="mt-6 rounded-lg border border-border-color bg-bg-primary p-4">
+                  <div className="flex items-center justify-between text-xs text-text-secondary mb-1.5">
+                    <span className="font-medium text-text-primary">{cullProgress.stage}</span>
+                    <span className="tabular-nums font-mono">{cullProgress.current} / {cullProgress.total}</span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-surface">
+                    <div
+                      className="h-full bg-cyan-400 transition-[width] duration-200"
+                      style={{ width: `${cullProgress.total > 0 ? Math.min(100, (cullProgress.current / cullProgress.total) * 100) : 0}%` }}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {cullError && (
+                <div className="mt-4 rounded-lg bg-red-500/10 border border-red-500/30 p-3 text-xs text-red-300">
+                  {cullError}
+                </div>
+              )}
+
+              {/* Footer Row */}
+              <div className="mt-8 flex flex-wrap items-center justify-between gap-4 border-t border-border-color pt-5">
+                <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={includeSubfolders}
+                    onChange={(e) => setIncludeSubfolders(e.target.checked)}
+                    className="accent-cyan-400 h-4 w-4 rounded"
+                  />
+                  Include subfolders in culling analysis
+                </label>
+                <div className="flex items-center gap-3">
+                  <button
+                    disabled={isPlanningCull || (!cullFolderPath && imageList.length === 0)}
+                    onClick={() => void startCullFromRail()}
+                    className="inline-flex items-center justify-center gap-2 rounded-full bg-cyan-500 hover:bg-cyan-400 px-8 py-3 text-sm font-bold text-black shadow-lg hover:shadow-cyan-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isPlanningCull ? <Loader2 size={16} className="animate-spin" /> : <Play size={16} fill="currentColor" />}
+                    {isPlanningCull ? 'Analyzing shoot...' : 'Start Culling'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         ) : displayCount === 0 || (localCullPlan && !isCompareMode) ? (
           <div className="w-full h-full overflow-y-auto p-3">
-            <div className="mb-3 flex items-center justify-between gap-3"><Text variant={TextVariants.small} color={TextColors.secondary}>{cullImageList.length} images</Text><div className="flex items-center gap-2">{displayCount > 0 && <button className="rounded border border-border-color px-2 py-1 text-xs text-text-primary hover:bg-surface" onClick={() => setIsCompareMode(true)}>{displayCount === 1 ? 'Inspect selected' : `Compare ${displayCount} selected`}</button>}<Text variant={TextVariants.small} color={TextColors.secondary}>Select frames to inspect or compare</Text></div></div>
+            <div className="mb-3 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <Text variant={TextVariants.small} color={TextColors.secondary}>{cullImageList.length} images</Text>
+                <button
+                  className="rounded border border-border-color px-2.5 py-1 text-xs text-text-primary hover:bg-surface flex items-center gap-1.5 transition-colors"
+                  onClick={() => setIsConfiguringCull(true)}
+                >
+                  <SlidersHorizontal size={13} />
+                  <span>Culling Settings</span>
+                </button>
+              </div>
+              <div className="flex items-center gap-2">
+                {displayCount > 0 && (
+                  <button className="rounded border border-border-color px-2 py-1 text-xs text-text-primary hover:bg-surface" onClick={() => setIsCompareMode(true)}>
+                    {displayCount === 1 ? 'Inspect selected' : `Compare ${displayCount} selected`}
+                  </button>
+                )}
+                <Text variant={TextVariants.small} color={TextColors.secondary}>Select frames to inspect or compare</Text>
+              </div>
+            </div>
             <div ref={cullGridRef} className="relative grid select-none grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-3" onPointerDown={beginGridSelection} onPointerMove={extendGridSelection} onPointerUp={endGridSelection} onPointerCancel={endGridSelection} onClickCapture={(event) => { if (marqueeMoved.current) { event.preventDefault(); event.stopPropagation(); marqueeMoved.current = false; } }}>
               {marqueeBounds && <div className="pointer-events-none absolute z-20 border border-accent bg-accent/15" style={marqueeBounds} />}
               {cullImageList.map((image: ImageFile) => {
@@ -1777,7 +2126,16 @@ export default function CullingView(props: any) {
           </div>
         ) : (
           <div className="flex h-full w-full flex-col gap-2 p-2">
-            {localCullPlan && <div className="flex shrink-0 items-center justify-between px-1"><Text variant={TextVariants.small} color={TextColors.secondary}>{displayCount === 1 ? 'Inspection view' : `Comparing ${displayCount} frames`}</Text><button className="rounded border border-border-color px-2 py-1 text-xs text-text-primary hover:bg-surface" onClick={() => setIsCompareMode(false)}>Back to review grid</button></div>}
+            <div className="flex shrink-0 items-center justify-between px-1">
+              <Text variant={TextVariants.small} color={TextColors.secondary}>{displayCount === 1 ? 'Inspection view' : `Comparing ${displayCount} frames`}</Text>
+              <div className="flex items-center gap-2">
+                <button className="rounded border border-border-color px-2 py-1 text-xs text-text-primary hover:bg-surface flex items-center gap-1" onClick={() => setIsConfiguringCull(true)}>
+                  <SlidersHorizontal size={13} />
+                  <span>Settings</span>
+                </button>
+                {localCullPlan && <button className="rounded border border-border-color px-2 py-1 text-xs text-text-primary hover:bg-surface" onClick={() => setIsCompareMode(false)}>Back to review grid</button>}
+              </div>
+            </div>
             <div
               className={clsx(
               'grid min-h-0 flex-1 gap-2',
@@ -1839,126 +2197,6 @@ export default function CullingView(props: any) {
               Select a source from the center panel
             </div>
           )}
-          <label className="mt-2 block text-xs text-text-secondary">
-            Shooting type
-            <select
-              value={cullSettings.subjectMode}
-              onChange={(event) => {
-                const subjectMode = event.target.value as CullingSettings['subjectMode'];
-                setCullSettings((settings) => ({
-                  ...settings,
-                  subjectMode,
-                  useSubjectDetection: subjectMode !== 'landscape',
-                }));
-              }}
-              className="mt-1 h-8 w-full rounded border border-border-color bg-bg-primary px-2 text-xs text-text-primary outline-none focus:border-accent"
-            >
-              <option value="general">General subjects</option>
-              <option value="people">People and events</option>
-              <option value="wildlife">Wildlife and animals</option>
-              <option value="birds">Birds</option>
-              <option value="landscape">Landscape and architecture</option>
-            </select>
-          </label>
-          <label className="mt-2 flex items-center gap-2 text-xs text-text-secondary">
-            <input
-              type="checkbox"
-              checked={includeSubfolders}
-              onChange={(event) => setIncludeSubfolders(event.target.checked)}
-              className="accent-accent"
-            />
-            Include subfolders
-          </label>
-          <div className="mt-3 border-t border-border-color pt-3">
-            <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>Blur threshold</Text>
-            <div className="mt-1 grid grid-cols-3 gap-1">
-              {([{ label: 'Lenient', value: 70 }, { label: 'Moderate', value: 100 }, { label: 'Strict', value: 140 }] as const).map((option) => (
-                <button
-                  key={option.label}
-                  className={clsx(
-                    'rounded border px-1 py-1 text-xs',
-                    cullSettings.blurThreshold === option.value
-                      ? 'border-accent bg-accent/15 text-text-primary'
-                      : 'border-border-color text-text-secondary hover:bg-surface'
-                  )}
-                  onClick={() => setCullSettings((settings) => ({ ...settings, blurThreshold: option.value, filterBlurry: true }))}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-            <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-3">Duplicate grouping</Text>
-            <div className="mt-1 grid grid-cols-3 gap-1">
-              {([{ label: 'Identical', value: 12 }, { label: 'Similar', value: 28 }, { label: 'Loose', value: 42 }] as const).map((option) => (
-                <button
-                  key={option.label}
-                  className={clsx(
-                    'rounded border px-1 py-1 text-xs',
-                    cullSettings.similarityThreshold === option.value
-                      ? 'border-accent bg-accent/15 text-text-primary'
-                      : 'border-border-color text-text-secondary hover:bg-surface'
-                  )}
-                  onClick={() => setCullSettings((settings) => ({ ...settings, similarityThreshold: option.value, groupSimilar: true }))}
-                >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-            <div className={clsx('mt-3 grid gap-2', cullSettings.subjectMode === 'landscape' ? 'grid-cols-2' : 'grid-cols-3')}>
-              <label className="flex items-center gap-1.5 text-xs text-text-secondary">
-                <input
-                  type="checkbox"
-                  checked={cullSettings.filterBlurry}
-                  onChange={(event) => setCullSettings((settings) => ({ ...settings, filterBlurry: event.target.checked }))}
-                  className="accent-accent"
-                />
-                Blur
-              </label>
-              <label className="flex items-center gap-1.5 text-xs text-text-secondary">
-                <input
-                  type="checkbox"
-                  checked={cullSettings.groupSimilar}
-                  onChange={(event) => setCullSettings((settings) => ({ ...settings, groupSimilar: event.target.checked }))}
-                  className="accent-accent"
-                />
-                Duplicates
-              </label>
-              {cullSettings.subjectMode !== 'landscape' && (
-                <label className="flex items-center gap-1.5 text-xs text-text-secondary">
-                  <input
-                    type="checkbox"
-                    checked={cullSettings.useSubjectDetection}
-                    onChange={(event) => setCullSettings((settings) => ({ ...settings, useSubjectDetection: event.target.checked }))}
-                    className="accent-accent"
-                  />
-                  Subject AI
-                </label>
-              )}
-            </div>
-          </div>
-          {isPlanningCull && cullProgress && (
-            <div className="mt-3">
-              <div className="flex items-center justify-between gap-2 text-xs text-text-secondary">
-                <span className="truncate">{cullProgress.stage}</span>
-                <span className="tabular-nums">{cullProgress.current}/{cullProgress.total}</span>
-              </div>
-              <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface">
-                <div
-                  className="h-full bg-accent transition-[width] duration-200"
-                  style={{ width: `${cullProgress.total > 0 ? Math.min(100, (cullProgress.current / cullProgress.total) * 100) : 0}%` }}
-                />
-              </div>
-            </div>
-          )}
-          {cullError && <Text as="div" variant={TextVariants.small} className="mt-2 text-red-300">{cullError}</Text>}
-          <button
-            disabled={isPlanningCull || (!cullFolderPath && imageList.length === 0)}
-            className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-button-text hover:brightness-110 disabled:opacity-50"
-            onClick={() => void startCullFromRail()}
-          >
-            {isPlanningCull ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} fill="currentColor" />}
-            {isPlanningCull ? 'Analyzing...' : localCullPlan ? 'Run again' : 'Start culling'}
-          </button>
           {localCullPlan && (
             <>
               <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-2">
