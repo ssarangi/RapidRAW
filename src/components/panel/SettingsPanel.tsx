@@ -1304,7 +1304,7 @@ export default function SettingsPanel({
               </Text>
             </div>
 
-            <div className="relative flex w-full max-w-full min-[1200px]:w-[45rem] min-[1200px]:max-w-[calc(100%-13rem)] overflow-x-auto overflow-y-hidden p-2 bg-surface rounded-md custom-scrollbar">
+            <div className="relative flex w-full max-w-full min-[1200px]:w-auto min-[1200px]:max-w-[calc(100%-13rem)] overflow-x-auto overflow-y-hidden p-2 bg-surface rounded-md custom-scrollbar">
               {settingCategories.map((category) => (
                 <button
                   key={category.id}

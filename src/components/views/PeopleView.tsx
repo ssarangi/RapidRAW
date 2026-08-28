@@ -1,20 +1,44 @@
 import { useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { Check, Pencil, RefreshCw, ScanFace, ScanSearch, Trash2, Users, X } from 'lucide-react';
+import { listen } from '@tauri-apps/api/event';
+import { Check, Loader2, Pencil, RefreshCw, ScanFace, ScanSearch, Trash2, Users, X } from 'lucide-react';
 import Button from '../ui/Button';
 import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
-import { CatalogSearchQuery, ImageFile, Invokes } from '../ui/AppProperties';
-import { useLibraryStore } from '../../store/useLibraryStore';
-import { useUIStore } from '../../store/useUIStore';
+import { Invokes } from '../ui/AppProperties';
 
-interface FaceItem { face: { id: number; confidence: number; imageId: number; personId?: number | null; x: number; y: number; width: number; height: number }; imagePath: string; }
-interface Person { id: number; displayName: string; faceCount: number; }
-interface FaceCluster { id: number; faceCount: number; representativeImagePath: string; }
+interface FaceItem {
+  face: {
+    id: number;
+    confidence: number;
+    imageId: number;
+    personId?: number | null;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  imagePath: string;
+  cropPath?: string | null;
+  thumbnailDataUrl?: string | null;
+}
+interface Person {
+  id: number;
+  displayName: string;
+  faceCount: number;
+}
+interface FaceCluster {
+  id: number;
+  faceCount: number;
+  representativeImagePath: string;
+  representativeCropPath?: string | null;
+  representativeThumbnailDataUrl?: string | null;
+}
 
 export default function PeopleView() {
   const [faces, setFaces] = useState<FaceItem[]>([]);
+  const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState('');
   const [starting, setStarting] = useState(false);
   const [recognizing, setRecognizing] = useState(false);
@@ -26,85 +50,500 @@ export default function PeopleView() {
   const [editingPersonId, setEditingPersonId] = useState<number | null>(null);
   const [editingPersonName, setEditingPersonName] = useState('');
   const [removingPersonId, setRemovingPersonId] = useState<number | null>(null);
+
   const load = async () => {
-    try { const [nextFaces, nextPeople, nextClusters] = await Promise.all([invoke<FaceItem[]>(Invokes.ListUnreviewedCatalogFaces), invoke<Person[]>(Invokes.ListCatalogPeople), invoke<FaceCluster[]>(Invokes.ListUnreviewedFaceClusters)]); setFaces(nextFaces); setPeople(nextPeople); setClusters(nextClusters); } catch (error) { setMessage(String(error)); }
+    try {
+      const [nextFaces, nextPeople, nextClusters] = await Promise.all([
+        invoke<FaceItem[]>(Invokes.ListUnreviewedCatalogFaces),
+        invoke<Person[]>(Invokes.ListCatalogPeople),
+        invoke<FaceCluster[]>(Invokes.ListUnreviewedFaceClusters),
+      ]);
+      setFaces(nextFaces);
+      setPeople(nextPeople);
+      setClusters(nextClusters);
+      setLoading(false);
+
+      // Lazily request high-res crops in background for any uncropped faces
+      for (const item of nextFaces) {
+        if (!item.thumbnailDataUrl && !item.cropPath) {
+          invoke<string>('get_or_generate_face_crop', { faceId: item.face.id })
+            .then((cropResult) => {
+              if (cropResult) {
+                const isDataUrl = cropResult.startsWith('data:');
+                setFaces((current) =>
+                  current.map((f) =>
+                    f.face.id === item.face.id
+                      ? {
+                          ...f,
+                          thumbnailDataUrl: isDataUrl ? cropResult : f.thumbnailDataUrl,
+                          cropPath: isDataUrl ? f.cropPath : cropResult,
+                        }
+                      : f
+                  )
+                );
+              }
+            })
+            .catch(() => {});
+        }
+      }
+    } catch (error) {
+      setMessage(String(error));
+      setLoading(false);
+    }
   };
-  const createPerson = async () => { if (!name.trim()) return; try { await invoke(Invokes.CreateCatalogPerson, { displayName: name }); setName(''); await load(); } catch (error) { setMessage(String(error)); } };
-  const review = async (faceId: number, personId: number | null, reviewState: string) => { try { await invoke(Invokes.ReviewCatalogFace, { faceId, personId, reviewState }); await load(); } catch (error) { setMessage(String(error)); } };
-  const confirmCluster = async (clusterId: number, personId: number) => { try { await invoke(Invokes.ConfirmFaceCluster, { clusterId, personId }); await load(); } catch (error) { setMessage(String(error)); } };
-  useEffect(() => { void load(); }, []);
+
+  const createPerson = async () => {
+    if (!name.trim()) return;
+    try {
+      await invoke(Invokes.CreateCatalogPerson, { displayName: name });
+      setName('');
+      await load();
+    } catch (error) {
+      setMessage(String(error));
+    }
+  };
+
+  const review = async (faceId: number, personId: number | null, reviewState: string) => {
+    try {
+      await invoke(Invokes.ReviewCatalogFace, { faceId, personId, reviewState });
+      await load();
+    } catch (error) {
+      setMessage(String(error));
+    }
+  };
+
+  const confirmCluster = async (clusterId: number, personId: number) => {
+    try {
+      await invoke(Invokes.ConfirmFaceCluster, { clusterId, personId });
+      await load();
+    } catch (error) {
+      setMessage(String(error));
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
   useEffect(() => {
     let disposed = false;
     let sawActiveFaceJob = false;
     const refreshAfterFaceJob = async () => {
       try {
         const jobs = await invoke<Array<{ kind: string; state: string }>>(Invokes.ListBackgroundJobs);
-        const active = jobs.some((job) => ['face_detection', 'face_recognition'].includes(job.kind) && ['queued', 'running', 'paused', 'cancelling'].includes(job.state));
-        if (active) { sawActiveFaceJob = true; return; }
+        const active = jobs.some((job) =>
+          ['face_detection', 'face_recognition'].includes(job.kind) &&
+          ['queued', 'running', 'paused', 'cancelling'].includes(job.state)
+        );
+        if (active) {
+          sawActiveFaceJob = true;
+          return;
+        }
         if (sawActiveFaceJob && !disposed) {
           sawActiveFaceJob = false;
           await load();
           if (!disposed) setMessage('Face analysis finished. Results refreshed.');
         }
-      } catch { /* A library may be closed while this view is unmounting. */ }
+      } catch {
+        /* A library may be closed while this view is unmounting. */
+      }
     };
     const timer = window.setInterval(() => void refreshAfterFaceJob(), 3000);
     void refreshAfterFaceJob();
-    return () => { disposed = true; window.clearInterval(timer); };
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
   }, []);
+
   const scan = async () => {
-    setStarting(true); setMessage('Starting face detection. Progress is available in Background Jobs.');
-    try { await invoke(Invokes.StartFaceDetection, { rootId: null }); } catch (error) { setMessage(String(error)); }
-    finally { setStarting(false); }
+    setStarting(true);
+    setMessage('Starting face detection. Progress is available in Background Jobs.');
+    try {
+      await invoke(Invokes.StartFaceDetection, { rootId: null });
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setStarting(false);
+    }
   };
+
   const recognize = async () => {
-    setRecognizing(true); setMessage('Starting face recognition. Progress is available in Background Jobs.');
-    try { await invoke(Invokes.StartFaceRecognition, { rootId: null }); } catch (error) { setMessage(String(error)); }
-    finally { setRecognizing(false); }
+    setRecognizing(true);
+    setMessage('Starting face recognition. Progress is available in Background Jobs.');
+    try {
+      await invoke(Invokes.StartFaceRecognition, { rootId: null });
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setRecognizing(false);
+    }
   };
+
   const openPerson = async (person: Person) => {
     try {
       const query: CatalogSearchQuery = { person: person.displayName, limit: 20_000 };
       const files = await invoke<ImageFile[]>(Invokes.SearchCatalogImages, { query });
       const imageRatings: Record<string, number> = {};
-      files.forEach((file) => { imageRatings[file.path] = file.rating || 0; });
-      useLibraryStore.getState().setLibrary({ currentFolderPath: `Library: ${person.displayName}`, activeAlbumId: null, imageList: files, imageRatings, multiSelectedPaths: [], libraryActivePath: null, libraryScrollTop: 0 });
+      files.forEach((file) => {
+        imageRatings[file.path] = file.rating || 0;
+      });
+      useLibraryStore.getState().setLibrary({
+        currentFolderPath: `Library: ${person.displayName}`,
+        activeAlbumId: null,
+        imageList: files,
+        imageRatings,
+        multiSelectedPaths: [],
+        libraryActivePath: null,
+        libraryScrollTop: 0,
+      });
       useLibraryStore.getState().setSearchCriteria({ text: '', tags: [], mode: 'OR' });
       useUIStore.getState().setUI({ activeView: 'library' });
-    } catch (error) { setMessage(`Failed to open ${person.displayName}: ${String(error)}`); }
+    } catch (error) {
+      setMessage(`Failed to open ${person.displayName}: ${String(error)}`);
+    }
   };
+
   const mergePeople = async () => {
     if (!mergeSourceId || !mergeTargetId || mergeSourceId === mergeTargetId) return;
-    try { await invoke(Invokes.MergeCatalogPeople, { sourcePersonId: Number(mergeSourceId), targetPersonId: Number(mergeTargetId) }); setMergeSourceId(''); setMergeTargetId(''); await load(); }
-    catch (error) { setMessage(`Failed to merge people: ${String(error)}`); }
+    try {
+      await invoke(Invokes.MergeCatalogPeople, {
+        sourcePersonId: Number(mergeSourceId),
+        targetPersonId: Number(mergeTargetId),
+      });
+      setMergeSourceId('');
+      setMergeTargetId('');
+      await load();
+    } catch (error) {
+      setMessage(`Failed to merge people: ${String(error)}`);
+    }
   };
+
   const renamePerson = async () => {
     if (editingPersonId === null || !editingPersonName.trim()) return;
     try {
-      await invoke(Invokes.RenameCatalogPerson, { personId: editingPersonId, displayName: editingPersonName });
+      await invoke(Invokes.RenameCatalogPerson, {
+        personId: editingPersonId,
+        displayName: editingPersonName,
+      });
       setEditingPersonId(null);
       setEditingPersonName('');
       await load();
-    } catch (error) { setMessage(`Failed to rename person: ${String(error)}`); }
+    } catch (error) {
+      setMessage(`Failed to rename person: ${String(error)}`);
+    }
   };
+
   const removePerson = async (person: Person) => {
     try {
       await invoke(Invokes.RemoveCatalogPerson, { personId: person.id });
       setRemovingPersonId(null);
       await load();
       setMessage(`${person.displayName} was removed. Their faces are available for relabeling.`);
-    } catch (error) { setMessage(`Failed to remove person: ${String(error)}`); }
+    } catch (error) {
+      setMessage(`Failed to remove person: ${String(error)}`);
+    }
   };
-  return <div className="flex-1 overflow-y-auto p-5">
-    <div className="flex flex-wrap justify-between gap-4 mb-6">
-      <div><Text variant={TextVariants.title} color={TextColors.accent}>People</Text><Text variant={TextVariants.small}>Review detected faces and build your local people library.</Text></div>
-      <div className="flex gap-2"><Button className="h-9 w-9 p-0 bg-surface text-text-primary shadow-none" onClick={() => void load()} data-tooltip="Refresh people"><RefreshCw size={16} /></Button><Button onClick={() => void recognize()} disabled={recognizing}><ScanSearch size={16} />{recognizing ? 'Starting Recognition' : 'Recognize Faces'}</Button><Button onClick={() => void scan()} disabled={starting}><ScanFace size={16} />{starting ? 'Starting Scan' : 'Scan Faces'}</Button></div>
+
+  return (
+    <div className="flex-1 overflow-y-auto p-5">
+      <div className="flex flex-wrap justify-between gap-4 mb-6">
+        <div>
+          <Text variant={TextVariants.title} color={TextColors.accent}>
+            People
+          </Text>
+          <Text variant={TextVariants.small}>
+            Review detected faces and build your local people library.
+          </Text>
+        </div>
+        <div className="flex gap-2">
+          <Button
+            className="h-9 w-9 p-0 bg-surface text-text-primary shadow-none"
+            onClick={() => void load()}
+            data-tooltip="Refresh people"
+          >
+            <RefreshCw size={16} />
+          </Button>
+          <Button onClick={() => void recognize()} disabled={recognizing}>
+            <ScanSearch size={16} />
+            {recognizing ? 'Starting Recognition' : 'Recognize Faces'}
+          </Button>
+          <Button onClick={() => void scan()} disabled={starting}>
+            <ScanFace size={16} />
+            {starting ? 'Starting Scan' : 'Scan Faces'}
+          </Button>
+        </div>
+      </div>
+      {message && (
+        <div className="mb-4 rounded-md border border-border-color bg-bg-primary p-3 select-text">
+          <Text variant={TextVariants.small} className="select-text break-words font-mono text-xs">
+            {message}
+          </Text>
+        </div>
+      )}
+      {people.length > 0 && (
+        <div className="mb-5">
+          <Text variant={TextVariants.small} color={TextColors.secondary}>
+            People
+          </Text>
+          <div className="mt-2 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
+            {people.map((person) => (
+              <div
+                key={person.id}
+                className="p-2 rounded-md border border-border-color bg-bg-primary flex flex-col justify-between"
+              >
+                <div className="min-w-0">
+                  {editingPersonId === person.id ? (
+                    <input
+                      className="w-full bg-surface border border-border-color rounded px-1.5 py-0.5 text-xs text-text-primary focus:outline-none focus:border-accent"
+                      value={editingPersonName}
+                      onChange={(e) => setEditingPersonName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') void renamePerson();
+                        if (e.key === 'Escape') setEditingPersonId(null);
+                      }}
+                      autoFocus
+                    />
+                  ) : (
+                    <Text variant={TextVariants.small} className="truncate font-medium">
+                      {person.displayName}
+                    </Text>
+                  )}
+                  <Text variant={TextVariants.small} color={TextColors.secondary}>
+                    {person.faceCount} photos
+                  </Text>
+                </div>
+                <div className="mt-2 flex items-center justify-end">
+                  {removingPersonId === person.id ? (
+                    <div className="flex gap-1 items-center">
+                      <button
+                        className="p-1 text-red-400 hover:bg-surface rounded"
+                        onClick={() => void removePerson(person.id)}
+                        data-tooltip="Confirm removal"
+                      >
+                        <Check size={15} />
+                      </button>
+                      <button
+                        className="p-1 text-text-secondary hover:bg-surface rounded"
+                        onClick={() => setRemovingPersonId(null)}
+                        data-tooltip="Cancel"
+                      >
+                        <X size={15} />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex gap-1 items-center">
+                      <button
+                        className="p-1 text-text-secondary hover:bg-surface rounded"
+                        onClick={() => {
+                          setEditingPersonId(person.id);
+                          setEditingPersonName(person.displayName);
+                        }}
+                        data-tooltip="Rename person"
+                      >
+                        <Pencil size={14} />
+                      </button>
+                      <button
+                        className="p-1 text-red-400 hover:bg-surface rounded"
+                        onClick={() => setRemovingPersonId(person.id)}
+                        data-tooltip="Remove person"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {clusters.length > 0 && (
+        <div className="space-y-2">
+          <Text variant={TextVariants.small} color={TextColors.secondary}>
+            Unknown clusters
+          </Text>
+          <div className="mt-2 flex gap-2 overflow-x-auto">
+            {clusters.map((cluster) => {
+              const cropSrc =
+                cluster.representativeThumbnailDataUrl ||
+                (cluster.representativeCropPath
+                  ? convertFileSrc(cluster.representativeCropPath)
+                  : null);
+              return (
+                <div key={cluster.id} className="w-28 shrink-0">
+                  <div className="w-28 h-28 rounded-md border border-border-color overflow-hidden bg-surface flex items-center justify-center mb-1.5">
+                    {cropSrc ? (
+                      <img
+                        src={cropSrc}
+                        className="w-full h-full object-cover select-none"
+                        alt="Face cluster"
+                      />
+                    ) : (
+                      <Loader2 size={16} className="animate-spin text-text-secondary" />
+                    )}
+                  </div>
+                  <Text variant={TextVariants.small}>{cluster.faceCount} faces</Text>
+                  <select
+                    className="mt-1 w-full bg-surface border border-border-color rounded px-1 py-1 text-xs"
+                    defaultValue=""
+                    onChange={(event) => {
+                      if (event.target.value) void confirmCluster(cluster.id, Number(event.target.value));
+                    }}
+                  >
+                    <option value="">Assign...</option>
+                    {people.map((person) => (
+                      <option key={person.id} value={person.id}>
+                        {person.displayName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+      <div className="mb-5 flex flex-wrap gap-2">
+        <input
+          value={name}
+          onChange={(event) => setName(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') void createPerson();
+          }}
+          placeholder="Add person"
+          className="bg-bg-primary border border-border-color rounded-md px-3 py-2 text-sm"
+        />
+        <Button onClick={() => void createPerson()} disabled={!name.trim()}>
+          Add Person
+        </Button>
+        {people.length > 1 && (
+          <>
+            <select
+              className="bg-bg-primary border border-border-color rounded-md px-2 py-2 text-sm"
+              value={mergeSourceId}
+              onChange={(event) => setMergeSourceId(event.target.value)}
+            >
+              <option value="">Merge person...</option>
+              {people.map((person) => (
+                <option key={person.id} value={person.id}>
+                  {person.displayName}
+                </option>
+              ))}
+            </select>
+            <select
+              className="bg-bg-primary border border-border-color rounded-md px-2 py-2 text-sm"
+              value={mergeTargetId}
+              onChange={(event) => setMergeTargetId(event.target.value)}
+            >
+              <option value="">Into person...</option>
+              {people.map((person) => (
+                <option key={person.id} value={person.id}>
+                  {person.displayName}
+                </option>
+              ))}
+            </select>
+            <Button
+              className="bg-bg-primary text-text-primary border border-border-color shadow-none"
+              onClick={() => void mergePeople()}
+              disabled={!mergeSourceId || !mergeTargetId || mergeSourceId === mergeTargetId}
+            >
+              Merge
+            </Button>
+          </>
+        )}
+      </div>
+      {loading && faces.length === 0 ? (
+        <div className="min-h-64 flex flex-col items-center justify-center text-center">
+          <Loader2 size={32} className="animate-spin text-accent mb-3" />
+          <Text variant={TextVariants.body}>Loading faces...</Text>
+        </div>
+      ) : faces.length === 0 ? (
+        <div className="min-h-64 flex flex-col items-center justify-center text-center">
+          <Users size={32} className="text-text-secondary mb-3" />
+          <Text variant={TextVariants.heading}>No unknown faces to review</Text>
+          <Text variant={TextVariants.small}>
+            Run Scan Faces after installing the YuNet + SFace model pack.
+          </Text>
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          {faces.map((item) => {
+            const suggested = people.find((person) => person.id === item.face.personId);
+            const cropSrc =
+              item.thumbnailDataUrl ||
+              (item.cropPath ? convertFileSrc(item.cropPath) : null);
+
+            return (
+              <div
+                key={item.face.id}
+                className="rounded-md border border-border-color bg-bg-primary overflow-hidden"
+              >
+                <div className="w-full aspect-square overflow-hidden bg-surface flex items-center justify-center relative">
+                  {cropSrc ? (
+                    <img
+                      src={cropSrc}
+                      className="w-full h-full object-cover select-none"
+                      alt="Detected face"
+                      onError={() => {
+                        void invoke<string>('get_or_generate_face_crop', { faceId: item.face.id })
+                          .then((freshCrop) => {
+                            if (freshCrop) {
+                              const isDataUrl = freshCrop.startsWith('data:');
+                              setFaces((prev) =>
+                                prev.map((f) =>
+                                  f.face.id === item.face.id
+                                    ? {
+                                        ...f,
+                                        thumbnailDataUrl: isDataUrl ? freshCrop : f.thumbnailDataUrl,
+                                        cropPath: isDataUrl ? f.cropPath : freshCrop,
+                                      }
+                                    : f
+                                )
+                              );
+                            }
+                          })
+                          .catch(() => {});
+                      }}
+                    />
+                  ) : (
+                    <Loader2 size={24} className="animate-spin text-text-secondary" />
+                  )}
+                </div>
+                <div className="p-2 space-y-2">
+                  <Text variant={TextVariants.small}>
+                    {suggested ? 'Suggested match' : 'Unknown face'}
+                  </Text>
+                  <Text variant={TextVariants.small} color={TextColors.secondary}>
+                    {Math.round(item.face.confidence * 100)}% confidence
+                  </Text>
+                  <select
+                    className="w-full bg-surface border border-border-color rounded px-2 py-1 text-xs"
+                    value={item.face.personId || ''}
+                    onChange={(event) => {
+                      if (event.target.value)
+                        void review(item.face.id, Number(event.target.value), 'confirmed');
+                    }}
+                  >
+                    <option value="">Name as...</option>
+                    {people.map((person) => (
+                      <option key={person.id} value={person.id}>
+                        {person.displayName}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="text-red-300 hover:text-red-200 text-xs inline-flex items-center gap-1"
+                    onClick={() => void review(item.face.id, null, 'rejected')}
+                  >
+                    <X size={13} /> Not a face
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
-    {message && <div className="mb-4 rounded-md border border-border-color bg-bg-primary p-3"><Text variant={TextVariants.small}>{message}</Text></div>}
-    {people.length > 0 && <div className="mb-5"><Text variant={TextVariants.small} color={TextColors.secondary}>People</Text><div className="mt-2 grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">{people.map((person) => <div key={person.id} className="rounded-md border border-border-color bg-bg-primary px-3 py-2"><div className="flex items-start gap-2"><button className="min-w-0 flex-1 text-left hover:text-accent" onClick={() => void openPerson(person)}>{editingPersonId === person.id ? <input autoFocus className="w-full bg-surface border border-border-color rounded px-2 py-1 text-sm" value={editingPersonName} onChange={(event) => setEditingPersonName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void renamePerson(); if (event.key === 'Escape') setEditingPersonId(null); }} /> : <Text variant={TextVariants.small}>{person.displayName}</Text>}<Text as="div" variant={TextVariants.small} color={TextColors.secondary}>{person.faceCount} confirmed faces</Text></button>{removingPersonId === person.id ? <div className="flex gap-1"><button className="p-1 text-red-300 hover:bg-red-500/10 rounded" onClick={() => void removePerson(person)} data-tooltip={`Remove ${person.displayName}`}><Check size={15} /></button><button className="p-1 text-text-secondary hover:bg-surface rounded" onClick={() => setRemovingPersonId(null)} data-tooltip="Cancel removal"><X size={15} /></button></div> : editingPersonId === person.id ? <button className="p-1 text-accent hover:bg-surface rounded" onClick={() => void renamePerson()} data-tooltip="Save person name"><Check size={15} /></button> : <div className="flex gap-1"><button className="p-1 text-text-secondary hover:bg-surface rounded" onClick={() => { setEditingPersonId(person.id); setEditingPersonName(person.displayName); }} data-tooltip={`Rename ${person.displayName}`}><Pencil size={14} /></button><button className="p-1 text-red-300 hover:bg-red-500/10 rounded" onClick={() => setRemovingPersonId(person.id)} data-tooltip={`Remove ${person.displayName}`}><Trash2 size={14} /></button></div>}</div></div>)}</div></div>}
-    {clusters.length > 0 && <div className="mb-5"><Text variant={TextVariants.small} color={TextColors.secondary}>Unknown clusters</Text><div className="mt-2 flex gap-2 overflow-x-auto">{clusters.map((cluster) => <div key={cluster.id} className="w-28 shrink-0"><img src={convertFileSrc(cluster.representativeImagePath)} className="w-28 h-24 object-cover rounded-md border border-border-color" alt="Face cluster" /><Text variant={TextVariants.small}>{cluster.faceCount} faces</Text><select className="mt-1 w-full bg-surface border border-border-color rounded px-1 py-1 text-xs" defaultValue="" onChange={(event) => { if (event.target.value) void confirmCluster(cluster.id, Number(event.target.value)); }}><option value="">Assign...</option>{people.map((person) => <option key={person.id} value={person.id}>{person.displayName}</option>)}</select></div>)}</div></div>}
-    <div className="mb-5 flex flex-wrap gap-2"><input value={name} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void createPerson(); }} placeholder="Add person" className="bg-bg-primary border border-border-color rounded-md px-3 py-2 text-sm" /><Button onClick={() => void createPerson()} disabled={!name.trim()}>Add Person</Button>{people.length > 1 && <><select className="bg-bg-primary border border-border-color rounded-md px-2 py-2 text-sm" value={mergeSourceId} onChange={(event) => setMergeSourceId(event.target.value)}><option value="">Merge person...</option>{people.map((person) => <option key={person.id} value={person.id}>{person.displayName}</option>)}</select><select className="bg-bg-primary border border-border-color rounded-md px-2 py-2 text-sm" value={mergeTargetId} onChange={(event) => setMergeTargetId(event.target.value)}><option value="">Into person...</option>{people.map((person) => <option key={person.id} value={person.id}>{person.displayName}</option>)}</select><Button className="bg-bg-primary text-text-primary border border-border-color shadow-none" onClick={() => void mergePeople()} disabled={!mergeSourceId || !mergeTargetId || mergeSourceId === mergeTargetId}>Merge</Button></>}</div>
-    {faces.length === 0 ? <div className="min-h-64 flex flex-col items-center justify-center text-center"><Users size={32} className="text-text-secondary mb-3" /><Text variant={TextVariants.heading}>No unknown faces to review</Text><Text variant={TextVariants.small}>Run Scan Faces after installing the YuNet + SFace model pack.</Text></div> :
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">{faces.map((item) => { const suggested = people.find((person) => person.id === item.face.personId); const zoom = Math.max(1, Math.min(5, 0.78 / Math.max(item.face.width, item.face.height))); const centerX = (item.face.x + item.face.width / 2) * 100; const centerY = (item.face.y + item.face.height / 2) * 100; return <div key={item.face.id} className="rounded-md border border-border-color bg-bg-primary overflow-hidden"><div className="w-full aspect-square overflow-hidden bg-surface"><img src={convertFileSrc(item.imagePath)} className="w-full h-full object-cover" style={{ transform: `scale(${zoom})`, transformOrigin: `${centerX}% ${centerY}%` }} alt="Detected face" /></div><div className="p-2 space-y-2"><Text variant={TextVariants.small}>{suggested ? 'Suggested match' : 'Unknown face'}</Text><Text variant={TextVariants.small} color={TextColors.secondary}>{Math.round(item.face.confidence * 100)}% confidence</Text><select className="w-full bg-surface border border-border-color rounded px-2 py-1 text-xs" value={item.face.personId || ''} onChange={(event) => { if (event.target.value) void review(item.face.id, Number(event.target.value), 'confirmed'); }}><option value="">Name as...</option>{people.map((person) => <option key={person.id} value={person.id}>{person.displayName}</option>)}</select><button className="text-red-300 hover:text-red-200 text-xs inline-flex items-center gap-1" onClick={() => void review(item.face.id, null, 'rejected')}><X size={13} /> Not a face</button></div></div>; })}</div>}
-  </div>;
+  );
 }

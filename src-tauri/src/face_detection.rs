@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use image::{DynamicImage, imageops::FilterType};
 use ndarray::Array4;
@@ -12,7 +13,7 @@ use crate::library_db::{active_library_path, create_background_job, update_job};
 
 const YUNET_MODEL: &str = "face_detection_yunet_2023mar.onnx";
 const SFACE_MODEL: &str = "face_recognition_sface_2021dec.onnx";
-const INPUT_SIZE: u32 = 320;
+const INPUT_SIZE: u32 = 640;
 const SFACE_INPUT_SIZE: u32 = 112;
 
 #[derive(Debug, Clone)]
@@ -34,68 +35,124 @@ fn intersection_over_union(a: &Detection, b: &Detection) -> f32 {
     intersection / (a.width * a.height + b.width * b.height - intersection).max(f32::EPSILON)
 }
 
-fn detect_yunet(image: DynamicImage, session: &mut Session) -> Result<Vec<Detection>, String> {
+fn detect_yunet(image: &DynamicImage, session: &mut Session) -> Result<Vec<Detection>, String> {
     let (original_width, original_height) = (image.width(), image.height());
     if original_width == 0 || original_height == 0 {
         return Ok(Vec::new());
     }
+    let scale = (INPUT_SIZE as f32 / original_width as f32).min(INPUT_SIZE as f32 / original_height as f32);
+    let scaled_w = ((original_width as f32 * scale).round() as u32).clamp(1, INPUT_SIZE);
+    let scaled_h = ((original_height as f32 * scale).round() as u32).clamp(1, INPUT_SIZE);
+    let pad_x = (INPUT_SIZE - scaled_w) / 2;
+    let pad_y = (INPUT_SIZE - scaled_h) / 2;
     let resized = image
-        .resize_exact(INPUT_SIZE, INPUT_SIZE, FilterType::Triangle)
+        .resize_exact(scaled_w, scaled_h, FilterType::Triangle)
         .to_rgb8();
     let mut input = Array4::<f32>::zeros((1, 3, INPUT_SIZE as usize, INPUT_SIZE as usize));
     for (x, y, pixel) in resized.enumerate_pixels() {
-        input[[0, 0, y as usize, x as usize]] = pixel[2] as f32;
-        input[[0, 1, y as usize, x as usize]] = pixel[1] as f32;
-        input[[0, 2, y as usize, x as usize]] = pixel[0] as f32;
+        input[[0, 0, (y + pad_y) as usize, (x + pad_x) as usize]] = pixel[2] as f32;
+        input[[0, 1, (y + pad_y) as usize, (x + pad_x) as usize]] = pixel[1] as f32;
+        input[[0, 2, (y + pad_y) as usize, (x + pad_x) as usize]] = pixel[0] as f32;
     }
     let outputs = session
         .run(ort::inputs![
             Tensor::from_array(input).map_err(|error| error.to_string())?
         ])
         .map_err(|error| error.to_string())?;
-    let values = outputs[0]
-        .try_extract_array::<f32>()
-        .map_err(|error| error.to_string())?
-        .to_owned();
-    let rows = values
-        .into_dimensionality::<ndarray::Ix3>()
-        .map_err(|error| format!("Unexpected YuNet output shape: {error}"))?;
+
+    // YuNet output indices:
+    // Stride 8:  cls=0, obj=3, bbox=6, kps=9
+    // Stride 16: cls=1, obj=4, bbox=7, kps=10
+    // Stride 32: cls=2, obj=5, bbox=8, kps=11
+    let strides = [(8u32, 0, 3, 6, 9), (16u32, 1, 4, 7, 10), (32u32, 2, 5, 8, 11)];
     let mut candidates = Vec::new();
-    for row in rows.index_axis(ndarray::Axis(0), 0).outer_iter() {
-        if row.len() < 15 || row[14] < 0.7 {
-            continue;
+
+    for (stride, cls_idx, obj_idx, bbox_idx, kps_idx) in strides {
+        let cls_arr = outputs[cls_idx]
+            .try_extract_array::<f32>()
+            .map_err(|e| e.to_string())?;
+        let obj_arr = outputs[obj_idx]
+            .try_extract_array::<f32>()
+            .map_err(|e| e.to_string())?;
+        let bbox_arr = outputs[bbox_idx]
+            .try_extract_array::<f32>()
+            .map_err(|e| e.to_string())?;
+        let kps_arr = outputs[kps_idx]
+            .try_extract_array::<f32>()
+            .map_err(|e| e.to_string())?;
+
+        let cols = INPUT_SIZE / stride;
+        let count = cls_arr.shape()[1];
+
+        for i in 0..count {
+            let cls = cls_arr[[0, i, 0]].clamp(0.0, 1.0);
+            let obj = obj_arr[[0, i, 0]].clamp(0.0, 1.0);
+            let score = (cls * obj).sqrt();
+
+            // DigiKam / OpenCV Zoo recommended score threshold (0.80) to avoid false detections on hands/patterns
+            if score < 0.80 {
+                continue;
+            }
+
+            let gy = (i as u32) / cols;
+            let gx = (i as u32) % cols;
+
+            let cx = ((gx as f32) + bbox_arr[[0, i, 0]]) * (stride as f32);
+            let cy = ((gy as f32) + bbox_arr[[0, i, 1]]) * (stride as f32);
+            let w = bbox_arr[[0, i, 2]].exp() * (stride as f32);
+            let h = bbox_arr[[0, i, 3]].exp() * (stride as f32);
+
+            let x = cx - w / 2.0;
+            let y = cy - h / 2.0;
+
+            let orig_x = ((x - pad_x as f32) / scale).max(0.0);
+            let orig_y = ((y - pad_y as f32) / scale).max(0.0);
+            let orig_w = (w / scale).min(original_width as f32 - orig_x).max(0.0);
+            let orig_h = (h / scale).min(original_height as f32 - orig_y).max(0.0);
+
+            let norm_x = orig_x / original_width as f32;
+            let norm_y = orig_y / original_height as f32;
+            let norm_w = orig_w / original_width as f32;
+            let norm_h = orig_h / original_height as f32;
+
+            // Filter out tiny noise and unnatural aspect ratios (faces are between 0.45 and 1.8 aspect ratio)
+            if orig_w < 16.0 || orig_h < 16.0 || norm_w / norm_h < 0.40 || norm_w / norm_h > 1.90 {
+                continue;
+            }
+
+            let mut landmarks = [[0.0; 2]; 5];
+            for k in 0..5 {
+                let lx = ((gx as f32) + kps_arr[[0, i, 2 * k]]) * (stride as f32);
+                let ly = ((gy as f32) + kps_arr[[0, i, 2 * k + 1]]) * (stride as f32);
+                let orig_lx = ((lx - pad_x as f32) / scale).max(0.0) / original_width as f32;
+                let orig_ly = ((ly - pad_y as f32) / scale).max(0.0) / original_height as f32;
+                landmarks[k] = [orig_lx, orig_ly];
+            }
+
+            // Geometric landmark validation:
+            // 0: right eye, 1: left eye, 2: nose tip, 3: right mouth, 4: left mouth
+            let eye_dist = ((landmarks[0][0] - landmarks[1][0]).powi(2) + (landmarks[0][1] - landmarks[1][1]).powi(2)).sqrt();
+            if eye_dist < norm_w * 0.10 {
+                continue;
+            }
+
+            candidates.push(Detection {
+                confidence: score,
+                x: norm_x,
+                y: norm_y,
+                width: norm_w,
+                height: norm_h,
+                landmarks,
+            });
         }
-        let scale_x = original_width as f32 / INPUT_SIZE as f32;
-        let scale_y = original_height as f32 / INPUT_SIZE as f32;
-        let x = (row[0] * scale_x).max(0.0);
-        let y = (row[1] * scale_y).max(0.0);
-        let width = (row[2] * scale_x).min(original_width as f32 - x).max(0.0);
-        let height = (row[3] * scale_y).min(original_height as f32 - y).max(0.0);
-        if width < 4.0 || height < 4.0 {
-            continue;
-        }
-        let mut landmarks = [[0.0; 2]; 5];
-        for index in 0..5 {
-            landmarks[index] = [
-                row[4 + index * 2] * scale_x / original_width as f32,
-                row[5 + index * 2] * scale_y / original_height as f32,
-            ];
-        }
-        candidates.push(Detection {
-            confidence: row[14],
-            x: x / original_width as f32,
-            y: y / original_height as f32,
-            width: width / original_width as f32,
-            height: height / original_height as f32,
-            landmarks,
-        });
     }
+
     candidates.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
     let mut accepted = Vec::new();
     for candidate in candidates {
         if accepted
             .iter()
-            .all(|existing| intersection_over_union(existing, &candidate) < 0.3)
+            .all(|existing| intersection_over_union(existing, &candidate) < 0.30)
         {
             accepted.push(candidate);
         }
@@ -180,7 +237,7 @@ fn suggest_people(conn: &rusqlite::Connection) -> Result<(), String> {
             .map(|(person_id, (centroid, _))| (*person_id, cosine_similarity(&vector, centroid)))
             .max_by(|a, b| a.1.total_cmp(&b.1));
         if let Some((person_id, similarity)) = best {
-            if similarity >= 0.55 {
+            if similarity >= 0.45 {
                 conn.execute("UPDATE faces SET person_id = ?1, updated_at = strftime('%s','now') WHERE id = ?2", params![person_id, face_id]).map_err(|error| error.to_string())?;
             }
         }
@@ -210,7 +267,7 @@ fn cluster_unknown_faces(conn: &rusqlite::Connection) -> Result<usize, String> {
             .iter()
             .enumerate()
             .filter_map(|(candidate_index, (id, vector))| {
-                if !assigned[candidate_index] && cosine_similarity(representative, vector) >= 0.62 {
+                if !assigned[candidate_index] && cosine_similarity(representative, vector) >= 0.48 {
                     assigned[candidate_index] = true;
                     Some((*id, cosine_similarity(representative, vector)))
                 } else {
@@ -241,12 +298,21 @@ fn extract_sface_embedding(
 ) -> Result<Vec<f32>, String> {
     let image_width = image.width() as f64;
     let image_height = image.height() as f64;
-    let left = (x * image_width).clamp(0.0, image_width - 1.0) as u32;
-    let top = (y * image_height).clamp(0.0, image_height - 1.0) as u32;
-    let crop_width = (width * image_width)
+
+    // Add 10% context margin around face bounding box for better embedding alignment
+    let margin_x = width * 0.10;
+    let margin_y = height * 0.10;
+    let norm_left = (x - margin_x).max(0.0);
+    let norm_top = (y - margin_y).max(0.0);
+    let norm_width = (width + margin_x * 2.0).min(1.0 - norm_left);
+    let norm_height = (height + margin_y * 2.0).min(1.0 - norm_top);
+
+    let left = (norm_left * image_width).clamp(0.0, image_width - 1.0) as u32;
+    let top = (norm_top * image_height).clamp(0.0, image_height - 1.0) as u32;
+    let crop_width = (norm_width * image_width)
         .max(1.0)
         .min(image_width - left as f64) as u32;
-    let crop_height = (height * image_height)
+    let crop_height = (norm_height * image_height)
         .max(1.0)
         .min(image_height - top as f64) as u32;
     let face = image
@@ -272,6 +338,132 @@ fn extract_sface_embedding(
         .copied()
         .collect::<Vec<_>>();
     normalize_embedding(embedding)
+}
+
+pub fn get_face_crops_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
+    let cache_dir = app_handle
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?;
+    let face_crops_dir = cache_dir.join("face_crops");
+    if !face_crops_dir.exists() {
+        fs::create_dir_all(&face_crops_dir).map_err(|e| e.to_string())?;
+    }
+    Ok(face_crops_dir)
+}
+
+pub fn extract_square_face_crop(
+    image: &DynamicImage,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    target_size: u32,
+) -> DynamicImage {
+    let img_w = image.width() as f64;
+    let img_h = image.height() as f64;
+
+    let cx = (x + width / 2.0) * img_w;
+    let cy = (y + height / 2.0) * img_h;
+
+    // 25% padding on each side (side length = 1.5x max face dimension)
+    let face_dim_px = (width * img_w).max(height * img_h);
+    let mut crop_side = face_dim_px * 1.5;
+
+    crop_side = crop_side.min(img_w).min(img_h).max(16.0);
+
+    let mut left = cx - crop_side / 2.0;
+    let mut top = cy - crop_side / 2.0;
+
+    if left < 0.0 {
+        left = 0.0;
+    } else if left + crop_side > img_w {
+        left = img_w - crop_side;
+    }
+
+    if top < 0.0 {
+        top = 0.0;
+    } else if top + crop_side > img_h {
+        top = img_h - crop_side;
+    }
+
+    let left = left.max(0.0) as u32;
+    let top = top.max(0.0) as u32;
+    let crop_side = (crop_side as u32)
+        .min(image.width() - left)
+        .min(image.height() - top);
+
+    let cropped = image.crop_imm(left, top, crop_side, crop_side);
+    cropped.resize_exact(target_size, target_size, FilterType::Lanczos3)
+}
+
+pub fn extract_square_face_crop_jpeg(
+    image: &DynamicImage,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    target_size: u32,
+) -> Result<Vec<u8>, String> {
+    let crop = extract_square_face_crop(image, x, y, width, height, target_size);
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    crop.write_to(&mut bytes, image::ImageFormat::Jpeg)
+        .map_err(|e| e.to_string())?;
+    Ok(bytes.into_inner())
+}
+
+pub fn save_face_crop_image(
+    image: &DynamicImage,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    face_id: i64,
+    app_handle: &AppHandle,
+) -> Result<PathBuf, String> {
+    let face_crops_dir = get_face_crops_dir(app_handle)?;
+    let crop_path = face_crops_dir.join(format!("{face_id}.jpg"));
+    let crop_image = extract_square_face_crop(image, x, y, width, height, 320);
+    crop_image
+        .save_with_format(&crop_path, image::ImageFormat::Jpeg)
+        .map_err(|e| e.to_string())?;
+    Ok(crop_path)
+}
+
+pub fn load_image_for_face_ai(path: &Path, app_handle: &AppHandle) -> Result<DynamicImage, String> {
+    let path_str = path.to_string_lossy();
+    if crate::formats::is_raw_file(path) {
+        // 1. Comprehensive multi-IFD TIFF/RAF/ARW embedded JPEG extraction
+        if let Ok(file_bytes) = std::fs::read(path) {
+            if let Some(img) = crate::image_loader::safe_embedded_preview_fallback(&file_bytes, &path_str) {
+                if img.width() >= 800 || img.height() >= 800 {
+                    return Ok(img);
+                }
+            }
+        }
+        // 2. Check if a companion JPG/JPEG exists in the same directory (e.g. RAW+JPG shooting)
+        for ext in &["JPG", "jpg", "JPEG", "jpeg"] {
+            let companion = path.with_extension(ext);
+            if companion.exists() && companion != path {
+                if let Ok(img) = image::open(&companion) {
+                    return Ok(img);
+                }
+            }
+        }
+        // 3. Extract rawler preview
+        if let Ok(img) = rawler::analyze::extract_preview_pixels(path, &rawler::decoders::RawDecodeParams::default()) {
+            return Ok(img);
+        }
+        // 4. Try embedded preview with lower res threshold
+        if let Some(img) = crate::file_management::try_load_embedded_raw_preview(path, 720) {
+            return Ok(img);
+        }
+    }
+    if let Ok(img) = image::open(path) {
+        return Ok(img);
+    }
+    crate::file_management::get_cached_or_generate_thumbnail_image(&path_str, app_handle, None)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -303,6 +495,7 @@ pub fn start_face_detection(
     tauri::async_runtime::spawn_blocking(move || {
         let ai_semaphore = app.state::<crate::AppState>().ai_job_semaphore.clone();
         let result = run_face_detection(
+            &app,
             &db_path,
             root_id,
             &model_path,
@@ -368,6 +561,7 @@ pub fn start_face_recognition(
     tauri::async_runtime::spawn_blocking(move || {
         let ai_semaphore = app.state::<crate::AppState>().ai_job_semaphore.clone();
         let result = run_face_recognition(
+            &app,
             &db_path,
             root_id,
             &model_path,
@@ -406,6 +600,7 @@ pub fn start_face_recognition(
 }
 
 fn run_face_recognition(
+    app_handle: &AppHandle,
     db_path: &Path,
     root_id: Option<i64>,
     model_path: &Path,
@@ -491,26 +686,53 @@ fn run_face_recognition(
         }
         let path = Path::new(&root).join(&relative);
         let current = index as i64 + 1;
-        let _ = update_job(
-            db_path,
-            job_id,
-            "running",
-            "Embedding face",
-            current,
-            total,
-            Some(&path.to_string_lossy()),
-            None,
-        );
-        let image = match image::open(&path) {
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
+        let image = match load_image_for_face_ai(&path, app_handle) {
             Ok(image) => image,
-            Err(_) => continue,
+            Err(e) => {
+                let _ = update_job(
+                    db_path,
+                    job_id,
+                    "running",
+                    &format!("{file_name}: Skipped ({e})"),
+                    current,
+                    total,
+                    Some(&path.to_string_lossy()),
+                    None,
+                );
+                continue;
+            }
         };
         let _permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
         let embedding_result = extract_sface_embedding(&image, x, y, width, height, &mut session);
         drop(_permit);
         let embedding = match embedding_result {
-            Ok(embedding) => embedding,
-            Err(_) => continue,
+            Ok(embedding) => {
+                let _ = update_job(
+                    db_path,
+                    job_id,
+                    "running",
+                    &format!("{file_name}: Extracted face embedding"),
+                    current,
+                    total,
+                    Some(&path.to_string_lossy()),
+                    None,
+                );
+                embedding
+            },
+            Err(e) => {
+                let _ = update_job(
+                    db_path,
+                    job_id,
+                    "running",
+                    &format!("{file_name}: Embedding failed ({e})"),
+                    current,
+                    total,
+                    Some(&path.to_string_lossy()),
+                    None,
+                );
+                continue;
+            }
         };
         let bytes: Vec<u8> = embedding
             .iter()
@@ -523,6 +745,23 @@ fn run_face_recognition(
             params![embedding_id, face_id],
         )
         .map_err(|error| error.to_string())?;
+
+        // Mirror embedding to companion face in RAW+JPG pair
+        let _ = conn.execute(
+            "UPDATE faces SET embedding_id = ?1, updated_at = strftime('%s','now')
+             WHERE id IN (
+                 SELECT f2.id FROM faces f2
+                 JOIN images i2 ON i2.id = f2.image_id
+                 JOIN faces f1 ON f1.id = ?2
+                 JOIN images i1 ON i1.id = f1.image_id
+                 WHERE i2.folder_id = i1.folder_id
+                   AND i2.id != i1.id
+                   AND substr(i2.file_name, 1, instr(i2.file_name || '.', '.') - 1) = substr(i1.file_name, 1, instr(i1.file_name || '.', '.') - 1)
+                   AND abs(f2.bbox_x - f1.bbox_x) < 0.05
+                   AND abs(f2.bbox_y - f1.bbox_y) < 0.05
+             )",
+            params![embedding_id, face_id],
+        );
     }
     suggest_people(&conn)?;
     cluster_unknown_faces(&conn)?;
@@ -538,7 +777,17 @@ fn run_face_recognition(
     )
 }
 
+struct ScannedImageRecord {
+    id: i64,
+    root: String,
+    relative: String,
+    file_name: String,
+    folder_id: i64,
+    is_raw: bool,
+}
+
 fn run_face_detection(
+    app_handle: &AppHandle,
     db_path: &Path,
     root_id: Option<i64>,
     model_path: &Path,
@@ -547,19 +796,22 @@ fn run_face_detection(
     ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 ) -> Result<(), String> {
     let conn = rusqlite::Connection::open(db_path).map_err(|error| error.to_string())?;
-    let mut sql = "SELECT i.id, r.absolute_path, i.relative_path FROM images i JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present'".to_string();
+    let mut sql = "SELECT i.id, r.absolute_path, i.relative_path, i.folder_id, i.file_name, i.is_raw FROM images i JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present'".to_string();
     if root_id.is_some() {
         sql.push_str(" AND i.root_id = ?1");
     }
     let mut statement = conn.prepare(&sql).map_err(|error| error.to_string())?;
-    let images: Vec<(i64, String, String)> = if let Some(root_id) = root_id {
+    let raw_images: Vec<ScannedImageRecord> = if let Some(root_id) = root_id {
         statement
             .query_map([root_id], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
+                Ok(ScannedImageRecord {
+                    id: row.get(0)?,
+                    root: row.get(1)?,
+                    relative: row.get(2)?,
+                    folder_id: row.get(3)?,
+                    file_name: row.get(4)?,
+                    is_raw: row.get::<_, i64>(5)? != 0,
+                })
             })
             .map_err(|error| error.to_string())?
             .collect::<Result<_, _>>()
@@ -567,17 +819,45 @@ fn run_face_detection(
     } else {
         statement
             .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
+                Ok(ScannedImageRecord {
+                    id: row.get(0)?,
+                    root: row.get(1)?,
+                    relative: row.get(2)?,
+                    folder_id: row.get(3)?,
+                    file_name: row.get(4)?,
+                    is_raw: row.get::<_, i64>(5)? != 0,
+                })
             })
             .map_err(|error| error.to_string())?
             .collect::<Result<_, _>>()
             .map_err(|error| error.to_string())?
     };
-    let total = images.len() as i64;
+
+    // Group images by (folder_id, lower(file_stem)) to identify RAW+JPG pairs
+    let mut paired_groups: std::collections::BTreeMap<(i64, String), Vec<ScannedImageRecord>> = std::collections::BTreeMap::new();
+    for item in raw_images {
+        let stem = Path::new(&item.file_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&item.file_name)
+            .to_lowercase();
+        paired_groups.entry((item.folder_id, stem)).or_default().push(item);
+    }
+
+    // For each group, prioritize JPG (raster) over RAW as the primary scan target
+    let mut scan_tasks: Vec<(ScannedImageRecord, Vec<i64>)> = Vec::new();
+    for (_key, mut items) in paired_groups {
+        items.sort_by_key(|img| {
+            let lower = img.file_name.to_lowercase();
+            let is_jpg = lower.ends_with(".jpg") || lower.ends_with(".jpeg");
+            (!is_jpg, img.is_raw)
+        });
+        let primary = items.remove(0);
+        let companion_ids: Vec<i64> = items.into_iter().map(|it| it.id).collect();
+        scan_tasks.push((primary, companion_ids));
+    }
+
+    let total = scan_tasks.len() as i64;
     update_job(
         db_path,
         job_id,
@@ -593,37 +873,107 @@ fn run_face_detection(
         .map_err(|error| error.to_string())?
         .commit_from_file(model_path)
         .map_err(|error| error.to_string())?;
-    for (index, (image_id, root, relative)) in images.into_iter().enumerate() {
+    for (index, (primary, companion_ids)) in scan_tasks.into_iter().enumerate() {
         if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
             return Err("Face detection cancelled".to_string());
         }
         if *job_control.cancellation_receiver().borrow() {
             return Err("Face detection cancelled".to_string());
         }
-        let path = Path::new(&root).join(&relative);
+        let path = Path::new(&primary.root).join(&primary.relative);
         let current = index as i64 + 1;
+        let file_name = primary.file_name.as_str();
+        let (detections, loaded_image) = match load_image_for_face_ai(&path, app_handle) {
+            Ok(image) => {
+                let _permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
+                let res = detect_yunet(&image, &mut session);
+                drop(_permit);
+                match res {
+                    Ok(detections) => (detections, Some(image)),
+                    Err(e) => return Err(e),
+                }
+            },
+            Err(e) => {
+                let _ = update_job(
+                    db_path,
+                    job_id,
+                    "running",
+                    &format!("{file_name}: Skipped ({e})"),
+                    current,
+                    total,
+                    Some(&path.to_string_lossy()),
+                    None,
+                );
+                continue;
+            }
+        };
+        let face_count = detections.len();
+        let detection_msg = match face_count {
+            0 => format!("{file_name}: No faces detected"),
+            1 => format!("{file_name}: 1 face detected ({:.0}% confidence)", detections[0].confidence * 100.0),
+            n => format!("{file_name}: {n} faces detected"),
+        };
         let _ = update_job(
             db_path,
             job_id,
             "running",
-            "Detecting faces",
+            &detection_msg,
             current,
             total,
             Some(&path.to_string_lossy()),
             None,
         );
-        let detections = match image::open(&path) {
-            Ok(image) => {
-                let _permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
-                let res = detect_yunet(image, &mut session)?;
-                drop(_permit);
-                res
-            },
-            Err(_) => continue,
-        };
-        conn.execute("DELETE FROM faces WHERE image_id = ?1 AND model_pack_id = 'opencv-yunet-sface' AND source = 'local' AND review_state = 'unreviewed'", [image_id]).map_err(|error| error.to_string())?;
+
+        // Delete unreviewed faces for primary and all companions in the pair
+        conn.execute("DELETE FROM faces WHERE image_id = ?1 AND model_pack_id = 'opencv-yunet-sface' AND source = 'local' AND review_state = 'unreviewed'", [primary.id]).map_err(|error| error.to_string())?;
+        for &comp_id in &companion_ids {
+            let _ = conn.execute("DELETE FROM faces WHERE image_id = ?1 AND model_pack_id = 'opencv-yunet-sface' AND source = 'local' AND review_state = 'unreviewed'", [comp_id]);
+        }
+
         for detection in detections {
-            conn.execute("INSERT INTO faces(image_id, model_pack_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, landmarks_json, review_state, source, created_at, updated_at) VALUES(?1, 'opencv-yunet-sface', ?2, ?3, ?4, ?5, ?6, ?7, 'unreviewed', 'local', strftime('%s','now'), strftime('%s','now'))", params![image_id, detection.confidence, detection.x, detection.y, detection.width, detection.height, serde_json::to_string(&detection.landmarks).map_err(|error| error.to_string())?]).map_err(|error| error.to_string())?;
+            let thumb_bytes = if let Some(ref img) = loaded_image {
+                extract_square_face_crop_jpeg(img, detection.x as f64, detection.y as f64, detection.width as f64, detection.height as f64, 256).ok()
+            } else {
+                None
+            };
+            conn.execute(
+                "INSERT INTO faces(image_id, model_pack_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, landmarks_json, thumbnail_jpeg, review_state, source, created_at, updated_at) VALUES(?1, 'opencv-yunet-sface', ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'unreviewed', 'local', strftime('%s','now'), strftime('%s','now'))",
+                params![
+                    primary.id,
+                    detection.confidence,
+                    detection.x,
+                    detection.y,
+                    detection.width,
+                    detection.height,
+                    serde_json::to_string(&detection.landmarks).map_err(|error| error.to_string())?,
+                    thumb_bytes.as_ref(),
+                ],
+            ).map_err(|error| error.to_string())?;
+            let face_id = conn.last_insert_rowid();
+            if let Some(ref img) = loaded_image {
+                let _ = save_face_crop_image(img, detection.x as f64, detection.y as f64, detection.width as f64, detection.height as f64, face_id, app_handle);
+            }
+
+            // Mirror face detection to companion RAW images in the same pair
+            for &comp_id in &companion_ids {
+                let _ = conn.execute(
+                    "INSERT INTO faces(image_id, model_pack_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, landmarks_json, thumbnail_jpeg, review_state, source, created_at, updated_at) VALUES(?1, 'opencv-yunet-sface', ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'unreviewed', 'local', strftime('%s','now'), strftime('%s','now'))",
+                    params![
+                        comp_id,
+                        detection.confidence,
+                        detection.x,
+                        detection.y,
+                        detection.width,
+                        detection.height,
+                        serde_json::to_string(&detection.landmarks).map_err(|error| error.to_string())?,
+                        thumb_bytes.as_ref(),
+                    ],
+                );
+                let comp_face_id = conn.last_insert_rowid();
+                if let Some(ref img) = loaded_image {
+                    let _ = save_face_crop_image(img, detection.x as f64, detection.y as f64, detection.width as f64, detection.height as f64, comp_face_id, app_handle);
+                }
+            }
         }
     }
     update_job(
@@ -687,5 +1037,25 @@ mod tests {
         let a = vec![1.0, 0.0];
         let b = vec![-1.0, 0.0];
         assert_eq!(cosine_similarity(&a, &b), -1.0);
+    }
+
+    #[test]
+    fn test_yunet_detection() {
+        let model_path = Path::new("/home/ssarangi/.local/share/io.github.CyberTimon.RapidRAW/models/face/opencv-yunet-sface/face_detection_yunet_2023mar.onnx");
+        if !model_path.exists() {
+            return;
+        }
+        let _ = ort::init().commit();
+        let mut session = Session::builder().unwrap().commit_from_file(model_path).unwrap();
+        
+        let test_img_path = "/home/ssarangi/Pictures/Shadow & Simba & Sachit & Soumya/DSCF8273.JPG";
+        if let Ok(img) = image::open(test_img_path) {
+            let detections = detect_yunet(&img, &mut session).unwrap();
+            println!("test_yunet_detection found {} faces:", detections.len());
+            for (i, det) in detections.iter().enumerate() {
+                println!("  Face {i}: conf={:.2}%, bbox=({:.3}, {:.3}, {:.3}, {:.3})", det.confidence * 100.0, det.x, det.y, det.width, det.height);
+            }
+            assert_eq!(detections.len(), 1, "Expected exactly 1 face detected in test photo");
+        }
     }
 }

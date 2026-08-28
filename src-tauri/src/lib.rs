@@ -2457,6 +2457,7 @@ pub fn run() {
             library_db::list_catalog_faces,
             library_db::list_unreviewed_catalog_faces,
             library_db::list_unreviewed_face_clusters,
+            library_db::get_or_generate_face_crop,
             library_db::confirm_face_cluster,
             library_db::list_suggested_ai_tags,
             library_db::review_ai_tag,

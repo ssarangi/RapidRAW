@@ -252,6 +252,8 @@ pub struct CatalogFace {
 pub struct CatalogFaceReviewItem {
     pub face: CatalogFace,
     pub image_path: String,
+    pub crop_path: Option<String>,
+    pub thumbnail_data_url: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -260,6 +262,8 @@ pub struct CatalogFaceCluster {
     pub id: i64,
     pub face_count: i64,
     pub representative_image_path: String,
+    pub representative_crop_path: Option<String>,
+    pub representative_thumbnail_data_url: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -642,6 +646,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           bbox_width REAL NOT NULL CHECK(bbox_width > 0 AND bbox_width <= 1),
           bbox_height REAL NOT NULL CHECK(bbox_height > 0 AND bbox_height <= 1),
           landmarks_json TEXT,
+          thumbnail_jpeg BLOB,
           review_state TEXT NOT NULL DEFAULT 'unreviewed' CHECK(review_state IN ('unreviewed', 'confirmed', 'rejected')),
           source TEXT NOT NULL DEFAULT 'local' CHECK(source IN ('local', 'imported')),
           created_at INTEGER NOT NULL,
@@ -827,6 +832,8 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         ",
     )
     .map_err(|e| e.to_string())?;
+
+    let _ = conn.execute("ALTER TABLE faces ADD COLUMN thumbnail_jpeg BLOB", []);
 
     conn.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(?1, ?2)",
@@ -3264,15 +3271,31 @@ fn list_faces_for_image_internal(
 
 #[tauri::command]
 pub fn list_unreviewed_catalog_faces(
+    app_handle: tauri::AppHandle,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<Vec<CatalogFaceReviewItem>, String> {
+    use base64::Engine;
     let conn = open_connection(&active_library_path(&state)?)?;
-    let mut statement = conn.prepare("SELECT f.id, f.image_id, f.person_id, f.model_pack_id, f.detector_confidence, f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height, f.review_state, r.absolute_path || '/' || i.relative_path FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE f.review_state = 'unreviewed' AND i.status = 'present' ORDER BY f.detector_confidence DESC LIMIT 500").map_err(|error| error.to_string())?;
+    let face_crops_dir = crate::face_detection::get_face_crops_dir(&app_handle).ok();
+    let mut statement = conn.prepare("SELECT f.id, f.image_id, f.person_id, f.model_pack_id, f.detector_confidence, f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height, f.review_state, r.absolute_path || '/' || i.relative_path, f.thumbnail_jpeg FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE f.review_state = 'unreviewed' AND i.status = 'present' GROUP BY i.folder_id, substr(i.file_name, 1, instr(i.file_name || '.', '.') - 1), round(f.bbox_x, 2), round(f.bbox_y, 2) ORDER BY f.detector_confidence DESC LIMIT 500").map_err(|error| error.to_string())?;
     statement
         .query_map([], |row| {
+            let face_id: i64 = row.get(0)?;
+            let thumb_blob: Option<Vec<u8>> = row.get(11)?;
+            let thumbnail_data_url = thumb_blob.map(|b| {
+                format!("data:image/jpeg;base64,{}", base64::prelude::BASE64_STANDARD.encode(&b))
+            });
+            let crop_path = face_crops_dir.as_ref().and_then(|dir| {
+                let p = dir.join(format!("{face_id}.jpg"));
+                if p.exists() {
+                    Some(p.to_string_lossy().to_string())
+                } else {
+                    None
+                }
+            });
             Ok(CatalogFaceReviewItem {
                 face: CatalogFace {
-                    id: row.get(0)?,
+                    id: face_id,
                     image_id: row.get(1)?,
                     person_id: row.get(2)?,
                     model_pack_id: row.get(3)?,
@@ -3284,6 +3307,8 @@ pub fn list_unreviewed_catalog_faces(
                     review_state: row.get(9)?,
                 },
                 image_path: row.get(10)?,
+                crop_path,
+                thumbnail_data_url,
             })
         })
         .map_err(|error| error.to_string())?
@@ -3293,21 +3318,76 @@ pub fn list_unreviewed_catalog_faces(
 
 #[tauri::command]
 pub fn list_unreviewed_face_clusters(
+    app_handle: tauri::AppHandle,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<Vec<CatalogFaceCluster>, String> {
+    use base64::Engine;
     let conn = open_connection(&active_library_path(&state)?)?;
-    let mut statement = conn.prepare("SELECT c.id, COUNT(m.face_id), r.absolute_path || '/' || i.relative_path FROM face_clusters c JOIN face_cluster_members m ON m.cluster_id = c.id JOIN faces f ON f.id = c.representative_face_id JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE c.state = 'unreviewed' GROUP BY c.id ORDER BY COUNT(m.face_id) DESC, c.id").map_err(|error| error.to_string())?;
+    let face_crops_dir = crate::face_detection::get_face_crops_dir(&app_handle).ok();
+    let mut statement = conn.prepare("SELECT c.id, COUNT(m.face_id), r.absolute_path || '/' || i.relative_path, c.representative_face_id, f.thumbnail_jpeg FROM face_clusters c JOIN face_cluster_members m ON m.cluster_id = c.id JOIN faces f ON f.id = c.representative_face_id JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE c.state = 'unreviewed' GROUP BY c.id ORDER BY COUNT(m.face_id) DESC, c.id").map_err(|error| error.to_string())?;
     statement
         .query_map([], |row| {
+            let rep_face_id: Option<i64> = row.get(3)?;
+            let thumb_blob: Option<Vec<u8>> = row.get(4)?;
+            let representative_thumbnail_data_url = thumb_blob.map(|b| {
+                format!("data:image/jpeg;base64,{}", base64::prelude::BASE64_STANDARD.encode(&b))
+            });
+            let representative_crop_path = rep_face_id.and_then(|id| {
+                face_crops_dir.as_ref().and_then(|dir| {
+                    let p = dir.join(format!("{id}.jpg"));
+                    if p.exists() {
+                        Some(p.to_string_lossy().to_string())
+                    } else {
+                        None
+                    }
+                })
+            });
             Ok(CatalogFaceCluster {
                 id: row.get(0)?,
                 face_count: row.get(1)?,
                 representative_image_path: row.get(2)?,
+                representative_crop_path,
+                representative_thumbnail_data_url,
             })
         })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn get_or_generate_face_crop(
+    face_id: i64,
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<String, String> {
+    use base64::Engine;
+    let conn = open_connection(&active_library_path(&state)?)?;
+    let (bbox_x, bbox_y, bbox_w, bbox_h, img_path, thumb_blob): (f64, f64, f64, f64, String, Option<Vec<u8>>) = conn
+        .query_row(
+            "SELECT f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height, r.absolute_path || '/' || i.relative_path, f.thumbnail_jpeg FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE f.id = ?1",
+            [face_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        )
+        .map_err(|e| e.to_string())?;
+
+    if let Some(blob) = thumb_blob {
+        return Ok(format!("data:image/jpeg;base64,{}", base64::prelude::BASE64_STANDARD.encode(&blob)));
+    }
+
+    let img = crate::face_detection::load_image_for_face_ai(Path::new(&img_path), &app_handle)?;
+    let thumb_bytes = crate::face_detection::extract_square_face_crop_jpeg(&img, bbox_x, bbox_y, bbox_w, bbox_h, 256)?;
+    let _ = conn.execute("UPDATE faces SET thumbnail_jpeg = ?1 WHERE id = ?2", params![&thumb_bytes, face_id]);
+    let _ = crate::face_detection::save_face_crop_image(
+        &img,
+        bbox_x,
+        bbox_y,
+        bbox_w,
+        bbox_h,
+        face_id,
+        &app_handle,
+    );
+    Ok(format!("data:image/jpeg;base64,{}", base64::prelude::BASE64_STANDARD.encode(&thumb_bytes)))
 }
 
 #[tauri::command]
@@ -3332,6 +3412,24 @@ pub fn confirm_face_cluster(
     if changed == 0 {
         return Err("Face cluster has no reviewable faces".to_string());
     }
+    // Also propagate cluster confirmation to companion faces in RAW+JPG pairs
+    let _ = conn.execute(
+        "UPDATE faces
+         SET person_id = ?1, review_state = 'confirmed', updated_at = strftime('%s','now')
+         WHERE review_state = 'unreviewed'
+           AND id IN (
+               SELECT f2.id FROM faces f2
+               JOIN images i2 ON i2.id = f2.image_id
+               JOIN faces f1 ON f1.id IN (SELECT face_id FROM face_cluster_members WHERE cluster_id = ?2)
+               JOIN images i1 ON i1.id = f1.image_id
+               WHERE i2.folder_id = i1.folder_id
+                 AND i2.id != i1.id
+                 AND substr(i2.file_name, 1, instr(i2.file_name || '.', '.') - 1) = substr(i1.file_name, 1, instr(i1.file_name || '.', '.') - 1)
+                 AND abs(f2.bbox_x - f1.bbox_x) < 0.05
+                 AND abs(f2.bbox_y - f1.bbox_y) < 0.05
+           )",
+        params![person_id, cluster_id],
+    );
     conn.execute("UPDATE face_clusters SET state = 'accepted', updated_at = strftime('%s','now') WHERE id = ?1", [cluster_id]).map_err(|error| error.to_string())?;
     Ok(())
 }
@@ -3405,17 +3503,37 @@ pub fn review_catalog_face(
             return Err("Selected person is not available".to_string());
         }
     }
+    let now = now_secs();
     let changed = conn
         .execute(
             "UPDATE faces
              SET person_id = ?1, review_state = ?2, updated_at = ?3
              WHERE id = ?4",
-            params![person_id, review_state, now_secs(), face_id],
+            params![person_id, review_state, now, face_id],
         )
         .map_err(|error| error.to_string())?;
     if changed == 0 {
         return Err("Face observation was not found".to_string());
     }
+
+    // Also propagate review decision to companion face in RAW+JPG pair (same folder, same stem, matching bbox)
+    let _ = conn.execute(
+        "UPDATE faces
+         SET person_id = ?1, review_state = ?2, updated_at = ?3
+         WHERE id IN (
+             SELECT f2.id FROM faces f2
+             JOIN images i2 ON i2.id = f2.image_id
+             JOIN faces f1 ON f1.id = ?4
+             JOIN images i1 ON i1.id = f1.image_id
+             WHERE i2.folder_id = i1.folder_id
+               AND i2.id != i1.id
+               AND substr(i2.file_name, 1, instr(i2.file_name || '.', '.') - 1) = substr(i1.file_name, 1, instr(i1.file_name || '.', '.') - 1)
+               AND abs(f2.bbox_x - f1.bbox_x) < 0.05
+               AND abs(f2.bbox_y - f1.bbox_y) < 0.05
+         )",
+        params![person_id, review_state, now, face_id],
+    );
+
     Ok(())
 }
 

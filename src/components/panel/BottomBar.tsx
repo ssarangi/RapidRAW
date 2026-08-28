@@ -16,7 +16,7 @@ import {
   Play,
   Square,
 } from 'lucide-react';
-import { invoke } from '@tauri-apps/api/core';
+import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import clsx from 'clsx';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useShallow } from 'zustand/react/shallow';
@@ -237,10 +237,12 @@ export default function BottomBar({
   const [isCatalogScanModalOpen, setIsCatalogScanModalOpen] = useState(false);
   const [backgroundJobs, setBackgroundJobs] = useState<BackgroundJob[]>([]);
   const [backgroundJobsError, setBackgroundJobsError] = useState<string | null>(null);
-  const { catalogScan, catalogScanThumbnail } = useProcessStore(
+  const [thumbError, setThumbError] = useState(false);
+  const { catalogScan, catalogScanThumbnail, thumbnails } = useProcessStore(
     useShallow((state) => ({
       catalogScan: state.catalogScan,
       catalogScanThumbnail: state.catalogScan.currentPath ? state.thumbnails[state.catalogScan.currentPath] : undefined,
+      thumbnails: state.thumbnails,
     })),
   );
   const { filterCriteria, setFilterCriteria } = useLibraryStore(
@@ -250,18 +252,48 @@ export default function BottomBar({
     })),
   );
 
+  const isRawFile = (path: string | null | undefined): boolean => {
+    if (!path) return false;
+    const ext = path.split('.').pop()?.toLowerCase();
+    return ['arw', 'cr2', 'cr3', 'nef', 'dng', 'orf', 'rw2', 'pef', 'raf', 'raw', 'sr2', 'srf', 'nrw', 'kdc', 'mrw'].includes(ext || '');
+  };
+
   const allColors = [...COLOR_LABELS, { name: 'none', color: '#9ca3af' }];
   const currentHeight = filmstripHeight ?? 120;
   const isCollapsed = !isFilmstripVisible;
   const effectiveHeight = isFilmstripVisible ? currentHeight : 0;
   const shouldAnimate = !isInstantTransition && (!isResizing || isCollapsed);
   const catalogScanFileName = catalogScan.currentPath?.split(/[\\/]/).pop() || '';
-  const catalogScanPercent =
-    catalogScan.total > 0 ? Math.min(100, Math.round((catalogScan.current / catalogScan.total) * 100)) : null;
   const activeBackgroundJobs = backgroundJobs.filter((job) =>
     ['queued', 'running', 'paused', 'cancelling'].includes(job.state),
   );
   const activeBackgroundJob = activeBackgroundJobs[0];
+  const currentDisplayedPath =
+    catalogScan.isActive
+      ? catalogScan.currentPath
+      : activeBackgroundJob?.currentItem || catalogScan.currentPath || null;
+  const currentThumbnailSrc =
+    catalogScan.isActive && catalogScanThumbnail
+      ? catalogScanThumbnail
+      : currentDisplayedPath
+        ? thumbnails[currentDisplayedPath] || (!isRawFile(currentDisplayedPath) ? convertFileSrc(currentDisplayedPath) : undefined)
+        : undefined;
+
+  useEffect(() => {
+    setThumbError(false);
+    if (
+      currentDisplayedPath &&
+      !thumbnails[currentDisplayedPath]
+    ) {
+      invoke('update_thumbnail_queue', { paths: [{ path: currentDisplayedPath, modified: null }] }).catch(() => {});
+    }
+  }, [currentDisplayedPath, thumbnails]);
+  const catalogScanPercent =
+    catalogScan.isActive && catalogScan.total > 0
+      ? Math.min(100, Math.round((catalogScan.current / catalogScan.total) * 100))
+      : activeBackgroundJob && activeBackgroundJob.total > 0
+        ? Math.min(100, Math.round((activeBackgroundJob.current / activeBackgroundJob.total) * 100))
+        : null;
 
   const handlePauseCatalogScan = async () => {
     try {
@@ -311,7 +343,6 @@ export default function BottomBar({
   };
 
   useEffect(() => {
-    if (!isCatalogScanModalOpen && !isLibraryView) return;
     let active = true;
     const loadJobs = async () => {
       try {
@@ -330,7 +361,7 @@ export default function BottomBar({
       active = false;
       window.clearInterval(timer);
     };
-  }, [isCatalogScanModalOpen, isLibraryView]);
+  }, [isCatalogScanModalOpen]);
 
   useEffect(() => {
     if (isZoomReady && !isDraggingSlider.current) {
@@ -637,7 +668,7 @@ export default function BottomBar({
             </div>
           </div>
 
-          {(catalogScan.isActive || catalogScan.error || isLibraryView) && (
+          {(catalogScan.isActive || catalogScan.error || isLibraryView || activeBackgroundJobs.length > 0) && (
             <>
               <div className="h-5 w-px bg-surface"></div>
               <button
@@ -645,7 +676,7 @@ export default function BottomBar({
                 onClick={() => setIsCatalogScanModalOpen(true)}
                 data-tooltip="Indexing details"
               >
-                {catalogScanThumbnail ? (
+                {catalogScanThumbnail && catalogScan.isActive ? (
                   <img
                     src={catalogScanThumbnail}
                     className="h-6 w-6 rounded object-cover border border-border-color shrink-0"
@@ -661,11 +692,15 @@ export default function BottomBar({
                     ? 'Indexing failed'
                     : catalogScan.isPaused
                       ? `Indexing paused ${catalogScan.current}/${catalogScan.total || '?'}`
-                      : catalogScan.total > 0
+                      : catalogScan.isActive && catalogScan.total > 0
                         ? `Indexing collection ${catalogScan.current}/${catalogScan.total}${catalogScanFileName ? ` · ${catalogScanFileName}` : ''}`
                         : activeBackgroundJobs.length > 0
                           ? activeBackgroundJobs.length === 1
-                            ? activeBackgroundJob?.message || 'Background job running'
+                            ? `${activeBackgroundJob?.message || 'Background job running'}${
+                                activeBackgroundJob && activeBackgroundJob.total > 0
+                                  ? ` ${activeBackgroundJob.current}/${activeBackgroundJob.total}`
+                                  : ''
+                              }`
                             : `${activeBackgroundJobs.length} active background jobs`
                           : 'Background jobs'}
                 </Text>
@@ -826,10 +861,22 @@ export default function BottomBar({
                 <div>
                   <div className="flex items-center justify-between mb-2">
                     <Text variant={TextVariants.small}>
-                      {catalogScan.isPaused ? 'Indexing paused' : catalogScan.message || 'Indexing collection'}
+                      {catalogScan.isPaused
+                        ? 'Indexing paused'
+                        : catalogScan.isActive
+                          ? catalogScan.message || 'Indexing collection'
+                          : activeBackgroundJob
+                            ? activeBackgroundJob.message
+                            : catalogScan.message || 'No active background job'}
                     </Text>
                     <Text variant={TextVariants.small} color={TextColors.secondary}>
-                      {catalogScan.total > 0 ? `${catalogScan.current}/${catalogScan.total}` : 'Preparing'}
+                      {catalogScan.isActive && catalogScan.total > 0
+                        ? `${catalogScan.current}/${catalogScan.total}`
+                        : activeBackgroundJob && activeBackgroundJob.total > 0
+                          ? `${activeBackgroundJob.current}/${activeBackgroundJob.total}`
+                          : catalogScan.isActive
+                            ? 'Preparing'
+                            : ''}
                     </Text>
                   </div>
                   <div className="h-2 rounded-full bg-surface overflow-hidden">
@@ -837,9 +884,13 @@ export default function BottomBar({
                       className="h-full bg-accent transition-all"
                       style={{
                         width:
-                          catalogScan.total > 0
+                          catalogScan.isActive && catalogScan.total > 0
                             ? `${Math.min(100, (catalogScan.current / catalogScan.total) * 100)}%`
-                            : '15%',
+                            : activeBackgroundJob && activeBackgroundJob.total > 0
+                              ? `${Math.min(100, (activeBackgroundJob.current / activeBackgroundJob.total) * 100)}%`
+                              : catalogScan.isActive
+                                ? '15%'
+                                : '0%',
                       }}
                     />
                   </div>
@@ -875,17 +926,22 @@ export default function BottomBar({
                 )}
 
                 {catalogScan.error && (
-                  <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2">
-                    <Text variant={TextVariants.small}>{catalogScan.error}</Text>
+                  <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 select-text">
+                    <Text variant={TextVariants.small} className="text-red-300 select-text break-words whitespace-pre-wrap font-mono text-xs">{catalogScan.error}</Text>
                   </div>
                 )}
 
                 <div className="rounded-md border border-border-color bg-bg-primary p-3">
                   <div className="grid grid-cols-[96px_minmax(0,1fr)] gap-4">
                     <div className="h-24 w-24 rounded-md border border-border-color bg-surface overflow-hidden flex items-center justify-center">
-                      {catalogScanThumbnail ? (
-                        <img src={catalogScanThumbnail} className="h-full w-full object-cover" alt="" />
-                      ) : catalogScan.isActive ? (
+                      {currentThumbnailSrc && !thumbError ? (
+                        <img
+                          src={currentThumbnailSrc}
+                          className="h-full w-full object-cover"
+                          alt=""
+                          onError={() => setThumbError(true)}
+                        />
+                      ) : (catalogScan.isActive || activeBackgroundJobs.length > 0) ? (
                         <Loader2 size={22} className="animate-spin text-accent" />
                       ) : (
                         <Database size={22} className="text-text-secondary" />
@@ -894,31 +950,131 @@ export default function BottomBar({
                     <div className="min-w-0 space-y-3">
                       <div>
                         <Text variant={TextVariants.label}>Current Image</Text>
-                        <Text variant={TextVariants.small} className="break-all">
-                          {catalogScan.currentPath || 'Waiting for first image...'}
+                        <Text variant={TextVariants.small} className="break-all select-text font-mono text-xs">
+                          {currentDisplayedPath || 'Waiting for first image...'}
                         </Text>
                       </div>
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                        <div>
-                          <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
-                            Camera
-                          </Text>
-                          <Text variant={TextVariants.small}>{catalogScan.camera || '-'}</Text>
+                      {catalogScan.isActive ? (
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          <div>
+                            <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
+                              Camera
+                            </Text>
+                            <Text variant={TextVariants.small}>{catalogScan.camera || '-'}</Text>
+                          </div>
+                          <div>
+                            <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
+                              Lens
+                            </Text>
+                            <Text variant={TextVariants.small}>{catalogScan.lens || '-'}</Text>
+                          </div>
+                          <div>
+                            <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
+                              Year
+                            </Text>
+                            <Text variant={TextVariants.small}>{catalogScan.year || '-'}</Text>
+                          </div>
                         </div>
-                        <div>
-                          <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
-                            Lens
-                          </Text>
-                          <Text variant={TextVariants.small}>{catalogScan.lens || '-'}</Text>
+                      ) : activeBackgroundJob ? (
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          <div>
+                            <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
+                              Job Type
+                            </Text>
+                            <Text variant={TextVariants.small}>
+                              {({
+                                catalog_scan: 'Catalog scan',
+                                model_download: 'Model download',
+                                ram_plus_tagging: 'RAM++ tagging',
+                                ai_tagging: 'AI tagging',
+                                face_detection: 'Face detection',
+                                face_recognition: 'Face recognition',
+                                raw_denoise: 'RAW AI denoise',
+                                rgb_denoise: 'RGB AI denoise',
+                                deblur: 'AI deblur',
+                                upscale: 'AI upscale',
+                              } as Record<string, string>)[activeBackgroundJob.kind] || activeBackgroundJob.kind}
+                            </Text>
+                          </div>
+                          <div>
+                            <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
+                              Progress
+                            </Text>
+                            <Text variant={TextVariants.small}>
+                              {activeBackgroundJob.total > 0
+                                ? `${activeBackgroundJob.current}/${activeBackgroundJob.total}`
+                                : 'Working'}
+                            </Text>
+                          </div>
+                          <div>
+                            <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
+                              Status
+                            </Text>
+                            <Text
+                              variant={TextVariants.small}
+                              color={
+                                activeBackgroundJob.state === 'failed'
+                                  ? TextColors.error
+                                  : activeBackgroundJob.state === 'completed'
+                                    ? TextColors.success
+                                    : TextColors.accent
+                              }
+                            >
+                              {activeBackgroundJob.state}
+                            </Text>
+                          </div>
                         </div>
-                        <div>
-                          <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
-                            Year
-                          </Text>
-                          <Text variant={TextVariants.small}>{catalogScan.year || '-'}</Text>
+                      ) : (
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                          <div>
+                            <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
+                              Camera
+                            </Text>
+                            <Text variant={TextVariants.small}>{catalogScan.camera || '-'}</Text>
+                          </div>
+                          <div>
+                            <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
+                              Lens
+                            </Text>
+                            <Text variant={TextVariants.small}>{catalogScan.lens || '-'}</Text>
+                          </div>
+                          <div>
+                            <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
+                              Year
+                            </Text>
+                            <Text variant={TextVariants.small}>{catalogScan.year || '-'}</Text>
+                          </div>
                         </div>
-                      </div>
+                      )}
                     </div>
+                  </div>
+                </div>
+
+                {/* Per-File Output Section */}
+                <div className="rounded-md border border-border-color bg-bg-primary p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <Text variant={TextVariants.label}>File Processing Output</Text>
+                    {activeBackgroundJob && (
+                      <span className="text-[11px] px-2 py-0.5 rounded bg-surface border border-border-color text-text-secondary font-medium">
+                        {activeBackgroundJob.kind.replace(/_/g, ' ')}
+                      </span>
+                    )}
+                  </div>
+                  <div className="rounded bg-surface/60 border border-border-color/60 p-2.5 select-text">
+                    <Text
+                      variant={TextVariants.small}
+                      className="select-text break-words font-mono text-xs"
+                      color={
+                        activeBackgroundJob?.error || catalogScan.error
+                          ? TextColors.error
+                          : TextColors.primary
+                      }
+                    >
+                      {activeBackgroundJob?.message ||
+                        (catalogScan.isActive ? catalogScan.message : null) ||
+                        (backgroundJobs[0]?.message) ||
+                        'No background job output yet.'}
+                    </Text>
                   </div>
                 </div>
 
@@ -947,10 +1103,16 @@ export default function BottomBar({
                               )}
                             </div>
                           </div>
-                          <Text variant={TextVariants.small} color={TextColors.secondary} className="truncate">{job.message}</Text>
-                          {job.currentItem && <Text variant={TextVariants.small} color={TextColors.secondary} className="truncate">{job.currentItem.split(/[\\/]/).pop()}</Text>}
+                          <Text variant={TextVariants.small} color={TextColors.secondary} className="select-text break-words">{job.message}</Text>
+                          {job.currentItem && <Text variant={TextVariants.small} color={TextColors.secondary} className="select-text break-all font-mono text-xs">{job.currentItem.split(/[\\/]/).pop()}</Text>}
                           {job.total > 0 && <Text variant={TextVariants.small} color={TextColors.secondary}>{job.current}/{job.total}</Text>}
-                          {job.error && <Text variant={TextVariants.small} className="text-red-300 truncate">{job.error}</Text>}
+                          {job.error && (
+                            <div className="mt-1.5 rounded bg-red-500/10 border border-red-500/30 p-2 select-text">
+                              <Text variant={TextVariants.small} className="text-red-300 select-text break-words whitespace-pre-wrap font-mono text-xs">
+                                {job.error}
+                              </Text>
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>
