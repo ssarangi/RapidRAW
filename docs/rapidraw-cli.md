@@ -34,10 +34,16 @@ rapidraw-cli faces detect --database /data/archive/rapidraw.db --face-models-dir
 rapidraw-cli faces recognize --database /data/archive/rapidraw.db --face-models-dir /data/models/face --root 1
 rapidraw-cli people list --database /data/archive/rapidraw.db
 rapidraw-cli people images --database /data/archive/rapidraw.db --person 12
+rapidraw-cli tags export-suggestions --database /data/archive/rapidraw.db
+rapidraw-cli tags review --database /data/archive/rapidraw.db --id 41 --state accepted
+rapidraw-cli species list --database /data/archive/rapidraw.db
+rapidraw-cli species review --database /data/archive/rapidraw.db --id 18 --state rejected
 rapidraw-cli cull analyze --database /data/archive/rapidraw.db --root 1
 ```
 
 `cull analyze` only proposes a review session. It does not move, delete, rate, or label source files. RAW/JPEG siblings are represented as one logical capture. The headless path currently performs deterministic duplicate, sharpness, focus, and exposure analysis; subject-aware model analysis remains an explicit desktop workflow.
+
+`tags review` accepts a suggestion row ID from `tags export-suggestions`. `species list` defaults to pending suggestions and accepts `--state suggested|accepted|rejected`; `species review` changes a species suggestion's state. Both review commands reject unknown IDs instead of reporting a false success.
 
 ## Inspection And Derivatives
 

@@ -1023,6 +1023,40 @@ mod tests {
     }
 
     #[test]
+    fn species_review_updates_existing_suggestions_and_rejects_unknown_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("catalog.db");
+        let connection = open_connection(&db_path).unwrap();
+        migrate(&connection).unwrap();
+        insert_test_image(&connection);
+        connection
+            .execute(
+                "INSERT INTO species_classifications(image_id, scientific_name, common_name, confidence, model_id, model_revision, review_state, created_at, updated_at) VALUES(1, 'Turdus migratorius', 'American robin', 0.91, 'bioclip', 'test-v1', 'suggested', 0, 0)",
+                [],
+            )
+            .unwrap();
+        let suggestion_id = connection.last_insert_rowid();
+        drop(connection);
+
+        review_species_headless(&db_path, suggestion_id, "accepted").unwrap();
+        let connection = open_connection(&db_path).unwrap();
+        let state: String = connection
+            .query_row(
+                "SELECT review_state FROM species_classifications WHERE id = ?1",
+                [suggestion_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "accepted");
+        drop(connection);
+
+        assert_eq!(
+            review_species_headless(&db_path, suggestion_id + 1, "rejected").unwrap_err(),
+            "Species suggestion was not found"
+        );
+    }
+
+    #[test]
     fn headless_library_creation_and_root_addition_do_not_need_a_tauri_handle() {
         let directory = tempfile::tempdir().unwrap();
         let db_path = directory.path().join("catalog.db");
@@ -4340,6 +4374,20 @@ fn review_ai_tag_by_rowid(conn: &Connection, id: i64, review_state: &str) -> Res
     Ok(())
 }
 
+/// Reviews an AI tag suggestion without requiring a running Tauri application.
+/// The ID is SQLite's rowid because `image_ai_tags` has a composite primary key.
+pub fn review_ai_tag_headless(
+    database_path: &Path,
+    id: i64,
+    review_state: &str,
+) -> Result<(), String> {
+    if !matches!(review_state, "accepted" | "rejected") {
+        return Err("Invalid AI tag review state".to_string());
+    }
+    let conn = open_connection(database_path)?;
+    review_ai_tag_by_rowid(&conn, id, review_state)
+}
+
 #[tauri::command]
 pub fn review_ai_tag(
     id: i64,
@@ -4798,15 +4846,27 @@ pub fn review_species(
     if !["accepted", "rejected"].contains(&review_state.as_str()) {
         return Err("review_state must be 'accepted' or 'rejected'".to_string());
     }
-    let db_path = active_library_path(&state)?;
-    let conn = open_connection(&db_path)?;
-    let now = now_secs();
+    review_species_headless(&active_library_path(&state)?, id, &review_state)
+}
 
-    conn.execute(
-        "UPDATE species_classifications SET review_state = ?1, updated_at = ?2 WHERE id = ?3",
-        params![review_state, now, id],
-    )
-    .map_err(|e| e.to_string())?;
-
+/// Reviews a BioCLIP species suggestion without requiring a running Tauri application.
+pub fn review_species_headless(
+    database_path: &Path,
+    id: i64,
+    review_state: &str,
+) -> Result<(), String> {
+    if !matches!(review_state, "accepted" | "rejected") {
+        return Err("review_state must be 'accepted' or 'rejected'".to_string());
+    }
+    let conn = open_connection(database_path)?;
+    let changed = conn
+        .execute(
+            "UPDATE species_classifications SET review_state = ?1, updated_at = ?2 WHERE id = ?3",
+            params![review_state, now_secs(), id],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("Species suggestion was not found".to_string());
+    }
     Ok(())
 }

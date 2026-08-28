@@ -38,7 +38,7 @@ pub use library_db::scan_library_root_headless;
 pub use library_db::update_job;
 pub use library_db::{
     add_library_root_headless, create_library_headless, open_library_headless,
-    remove_library_root_headless,
+    remove_library_root_headless, review_ai_tag_headless, review_species_headless,
 };
 mod inpainting;
 mod launch_request;
