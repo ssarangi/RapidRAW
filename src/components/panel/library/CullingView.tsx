@@ -1822,51 +1822,177 @@ export default function CullingView(props: any) {
         onContextMenu={handleSidebarEmptyContextMenu}
       >
         <div className="shrink-0 border-b border-border-color p-3">
-          <div className="mb-2 flex items-center justify-between gap-2"><Text variant={TextVariants.small} weight={TextWeights.semibold}>Culling session</Text>{isPlanningCull && <Loader2 size={14} className="animate-spin text-accent" />}</div>
-          {cullFolderPath ? <>
-            <button className="w-full truncate rounded-md border border-border-color bg-bg-primary px-2 py-1.5 text-left text-xs text-text-primary hover:bg-surface" title={cullCatalogScope?.absoluteFolderPath || cullFolderPath} onClick={() => void chooseCullFolder()}>{cullCatalogScope?.absoluteFolderPath || cullFolderPath}</button>
-            <label className="mt-2 block text-xs text-text-secondary">Shooting type<select value={cullSettings.subjectMode} onChange={(event) => { const subjectMode = event.target.value as CullingSettings['subjectMode']; setCullSettings((settings) => ({ ...settings, subjectMode, useSubjectDetection: subjectMode !== 'landscape' })); }} className="mt-1 h-8 w-full rounded border border-border-color bg-bg-primary px-2 text-xs text-text-primary outline-none focus:border-accent"><option value="general">General subjects</option><option value="people">People and events</option><option value="wildlife">Wildlife and animals</option><option value="birds">Birds</option><option value="landscape">Landscape and architecture</option></select></label>
-            <label className="mt-2 flex items-center gap-2 text-xs text-text-secondary"><input type="checkbox" checked={includeSubfolders} onChange={(event) => setIncludeSubfolders(event.target.checked)} className="accent-accent" /> Include subfolders</label>
-            <div className="mt-3 border-t border-border-color pt-3">
-              <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>Blur threshold</Text>
-              <div className="mt-1 grid grid-cols-3 gap-1">
-                {([{ label: 'Lenient', value: 70 }, { label: 'Moderate', value: 100 }, { label: 'Strict', value: 140 }] as const).map((option) => <button key={option.label} className={clsx('rounded border px-1 py-1 text-xs', cullSettings.blurThreshold === option.value ? 'border-accent bg-accent/15 text-text-primary' : 'border-border-color text-text-secondary hover:bg-surface')} onClick={() => setCullSettings((settings) => ({ ...settings, blurThreshold: option.value, filterBlurry: true }))}>{option.label}</button>)}
-              </div>
-              <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-3">Duplicate grouping</Text>
-              <div className="mt-1 grid grid-cols-3 gap-1">
-                {([{ label: 'Identical', value: 12 }, { label: 'Similar', value: 28 }, { label: 'Loose', value: 42 }] as const).map((option) => <button key={option.label} className={clsx('rounded border px-1 py-1 text-xs', cullSettings.similarityThreshold === option.value ? 'border-accent bg-accent/15 text-text-primary' : 'border-border-color text-text-secondary hover:bg-surface')} onClick={() => setCullSettings((settings) => ({ ...settings, similarityThreshold: option.value, groupSimilar: true }))}>{option.label}</button>)}
-              </div>
-              <div className={clsx('mt-3 grid gap-2', cullSettings.subjectMode === 'landscape' ? 'grid-cols-2' : 'grid-cols-3')}>
-                <label className="flex items-center gap-1.5 text-xs text-text-secondary"><input type="checkbox" checked={cullSettings.filterBlurry} onChange={(event) => setCullSettings((settings) => ({ ...settings, filterBlurry: event.target.checked }))} className="accent-accent" /> Blur</label>
-                <label className="flex items-center gap-1.5 text-xs text-text-secondary"><input type="checkbox" checked={cullSettings.groupSimilar} onChange={(event) => setCullSettings((settings) => ({ ...settings, groupSimilar: event.target.checked }))} className="accent-accent" /> Duplicates</label>
-                {cullSettings.subjectMode !== 'landscape' && <label className="flex items-center gap-1.5 text-xs text-text-secondary"><input type="checkbox" checked={cullSettings.useSubjectDetection} onChange={(event) => setCullSettings((settings) => ({ ...settings, useSubjectDetection: event.target.checked }))} className="accent-accent" /> Subject AI</label>}
-              </div>
-            </div>
-            {isPlanningCull && cullProgress && <div className="mt-3"><div className="flex items-center justify-between gap-2 text-xs text-text-secondary"><span className="truncate">{cullProgress.stage}</span><span className="tabular-nums">{cullProgress.current}/{cullProgress.total}</span></div><div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface"><div className="h-full bg-accent transition-[width] duration-200" style={{ width: `${cullProgress.total > 0 ? Math.min(100, (cullProgress.current / cullProgress.total) * 100) : 0}%` }} /></div></div>}
-            {cullError && <Text as="div" variant={TextVariants.small} className="mt-2 text-red-300">{cullError}</Text>}
-            <button disabled={isPlanningCull} className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-button-text hover:brightness-110 disabled:opacity-60" onClick={() => void startCullFromRail()}>{isPlanningCull ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} fill="currentColor" />}{isPlanningCull ? 'Analyzing...' : localCullPlan ? 'Run again' : 'Start culling'}</button>
-            {localCullPlan && <><Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-2">{localCullPlan.rejectCount} frames marked for review out of {localCullPlan.totalCount}.</Text><div className="mt-2 grid grid-cols-2 gap-2"><button className="rounded border border-border-color px-2 py-1.5 text-xs text-text-primary hover:bg-surface" onClick={selectAllCullCandidates}>Select all</button><button className="rounded border border-border-color px-2 py-1.5 text-xs text-text-secondary hover:bg-surface" onClick={onClearSelection}>Clear selection</button></div>{multiSelectedPaths.filter((path: string) => localCullPlan.items.some((item) => item.representativePath === path)).length > 0 && <div className="mt-2 grid grid-cols-2 gap-2"><button className="rounded border border-green-400/40 px-2 py-1.5 text-xs text-green-300 hover:bg-green-400/10" onClick={() => void updateSelectedCullDecisions(true)}>Keep selected</button><button className="rounded border border-red-400/40 px-2 py-1.5 text-xs text-red-300 hover:bg-red-400/10" onClick={() => void updateSelectedCullDecisions(false)}>Reject selected</button></div>}<button disabled={isApplyingCull || localCullPlan.rejectCount === 0} className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-md border border-red-500/50 px-3 py-2 text-sm text-red-200 hover:bg-red-500/10 disabled:opacity-50" onClick={() => void applyCullFromRail()}>{isApplyingCull ? <Loader2 size={15} className="animate-spin" /> : null}{isApplyingCull ? 'Moving rejected frames...' : `Move ${localCullPlan.rejectCount} rejected frames`}</button></>}
-          </> : <button className="flex w-full items-center justify-center gap-2 rounded-md border border-border-color bg-bg-primary px-3 py-2 text-sm text-text-primary hover:bg-surface" onClick={() => void chooseCullFolder()}><FolderOpen size={16} /> Choose folder</button>}
-        </div>
-        {imageList.length === 0 ? (
-          <div className="flex min-h-0 flex-1 flex-col p-4">
-            <div className="border-b border-border-color pb-4">
-              <Text variant={TextVariants.small} weight={TextWeights.semibold}>Culling setup</Text>
-              <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-1">Start from a folder. The next step lets you set the shooting type and review rules.</Text>
-            </div>
-            <div className="space-y-4 py-4">
-              <div>
-                <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>Photo selection</Text>
-                <button className="mt-1.5 flex w-full items-center gap-2 rounded-md border border-border-color bg-bg-primary px-3 py-2 text-left text-sm text-text-primary hover:bg-surface" onClick={() => void chooseCullFolder()}><FolderOpen size={16} className="text-text-secondary" /><span className="truncate">Choose a folder</span></button>
-              </div>
-              <div className="border-t border-border-color pt-4">
-                <Text as="div" variant={TextVariants.small} weight={TextWeights.semibold}>Analysis</Text>
-                <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-1">Duplicate groups, focus quality, and subject-aware focus are always reviewable before any files move.</Text>
-              </div>
-            </div>
-            <button className="mt-auto inline-flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-button-text hover:brightness-110" onClick={() => void chooseCullFolder()}><Play size={15} fill="currentColor" /> Select a folder</button>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <Text variant={TextVariants.small} weight={TextWeights.semibold}>Culling session</Text>
+            {isPlanningCull && <Loader2 size={14} className="animate-spin text-accent" />}
           </div>
-        ) : (isCatalog || localCullPlan) && <div className="shrink-0 border-b border-border-color p-3"><div className="flex items-center gap-2 mb-2"><Filter size={14} className="text-text-secondary" /><Text variant={TextVariants.small} weight={TextWeights.semibold}>Quick filters</Text></div><div className="space-y-1">{(['selected', 'highlights', 'duplicates', 'blurry', 'all'] as const).map((filter) => <button key={filter} className={clsx('w-full flex items-center justify-between rounded px-2 py-1.5 text-left text-sm', reviewFilter === filter ? 'bg-surface text-text-primary' : 'text-text-secondary hover:bg-surface')} onClick={() => setReviewFilter(filter)}><span className="flex items-center gap-2"><span className={filter === 'selected' ? 'h-2 w-2 rounded-full bg-green-400' : filter === 'highlights' ? 'h-2 w-2 rounded-full bg-cyan-400' : filter === 'duplicates' ? 'h-2 w-2 rounded-full bg-amber-400' : filter === 'blurry' ? 'h-2 w-2 rounded-full bg-red-400' : 'h-2 w-2 rounded-full bg-text-secondary'} />{filter === 'selected' ? 'Selected' : filter === 'highlights' ? 'Highlights' : filter === 'duplicates' ? 'Duplicates' : filter === 'blurry' ? 'Blurry' : 'All'}</span><span className="tabular-nums text-xs">{cullFilterCounts[filter]}</span></button>)}</div></div>}
+          {cullFolderPath ? (
+            <button
+              className="w-full truncate rounded-md border border-border-color bg-bg-primary px-2 py-1.5 text-left text-xs text-text-primary hover:bg-surface"
+              title={cullCatalogScope?.absoluteFolderPath || cullFolderPath}
+              onClick={() => void chooseCullFolder()}
+            >
+              {cullCatalogScope?.absoluteFolderPath || cullFolderPath}
+            </button>
+          ) : (
+            <div className="rounded-md border border-dashed border-border-color bg-bg-primary/50 px-2.5 py-1.5 text-xs text-text-secondary">
+              Select a source from the center panel
+            </div>
+          )}
+          <label className="mt-2 block text-xs text-text-secondary">
+            Shooting type
+            <select
+              value={cullSettings.subjectMode}
+              onChange={(event) => {
+                const subjectMode = event.target.value as CullingSettings['subjectMode'];
+                setCullSettings((settings) => ({
+                  ...settings,
+                  subjectMode,
+                  useSubjectDetection: subjectMode !== 'landscape',
+                }));
+              }}
+              className="mt-1 h-8 w-full rounded border border-border-color bg-bg-primary px-2 text-xs text-text-primary outline-none focus:border-accent"
+            >
+              <option value="general">General subjects</option>
+              <option value="people">People and events</option>
+              <option value="wildlife">Wildlife and animals</option>
+              <option value="birds">Birds</option>
+              <option value="landscape">Landscape and architecture</option>
+            </select>
+          </label>
+          <label className="mt-2 flex items-center gap-2 text-xs text-text-secondary">
+            <input
+              type="checkbox"
+              checked={includeSubfolders}
+              onChange={(event) => setIncludeSubfolders(event.target.checked)}
+              className="accent-accent"
+            />
+            Include subfolders
+          </label>
+          <div className="mt-3 border-t border-border-color pt-3">
+            <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>Blur threshold</Text>
+            <div className="mt-1 grid grid-cols-3 gap-1">
+              {([{ label: 'Lenient', value: 70 }, { label: 'Moderate', value: 100 }, { label: 'Strict', value: 140 }] as const).map((option) => (
+                <button
+                  key={option.label}
+                  className={clsx(
+                    'rounded border px-1 py-1 text-xs',
+                    cullSettings.blurThreshold === option.value
+                      ? 'border-accent bg-accent/15 text-text-primary'
+                      : 'border-border-color text-text-secondary hover:bg-surface'
+                  )}
+                  onClick={() => setCullSettings((settings) => ({ ...settings, blurThreshold: option.value, filterBlurry: true }))}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-3">Duplicate grouping</Text>
+            <div className="mt-1 grid grid-cols-3 gap-1">
+              {([{ label: 'Identical', value: 12 }, { label: 'Similar', value: 28 }, { label: 'Loose', value: 42 }] as const).map((option) => (
+                <button
+                  key={option.label}
+                  className={clsx(
+                    'rounded border px-1 py-1 text-xs',
+                    cullSettings.similarityThreshold === option.value
+                      ? 'border-accent bg-accent/15 text-text-primary'
+                      : 'border-border-color text-text-secondary hover:bg-surface'
+                  )}
+                  onClick={() => setCullSettings((settings) => ({ ...settings, similarityThreshold: option.value, groupSimilar: true }))}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <div className={clsx('mt-3 grid gap-2', cullSettings.subjectMode === 'landscape' ? 'grid-cols-2' : 'grid-cols-3')}>
+              <label className="flex items-center gap-1.5 text-xs text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={cullSettings.filterBlurry}
+                  onChange={(event) => setCullSettings((settings) => ({ ...settings, filterBlurry: event.target.checked }))}
+                  className="accent-accent"
+                />
+                Blur
+              </label>
+              <label className="flex items-center gap-1.5 text-xs text-text-secondary">
+                <input
+                  type="checkbox"
+                  checked={cullSettings.groupSimilar}
+                  onChange={(event) => setCullSettings((settings) => ({ ...settings, groupSimilar: event.target.checked }))}
+                  className="accent-accent"
+                />
+                Duplicates
+              </label>
+              {cullSettings.subjectMode !== 'landscape' && (
+                <label className="flex items-center gap-1.5 text-xs text-text-secondary">
+                  <input
+                    type="checkbox"
+                    checked={cullSettings.useSubjectDetection}
+                    onChange={(event) => setCullSettings((settings) => ({ ...settings, useSubjectDetection: event.target.checked }))}
+                    className="accent-accent"
+                  />
+                  Subject AI
+                </label>
+              )}
+            </div>
+          </div>
+          {isPlanningCull && cullProgress && (
+            <div className="mt-3">
+              <div className="flex items-center justify-between gap-2 text-xs text-text-secondary">
+                <span className="truncate">{cullProgress.stage}</span>
+                <span className="tabular-nums">{cullProgress.current}/{cullProgress.total}</span>
+              </div>
+              <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface">
+                <div
+                  className="h-full bg-accent transition-[width] duration-200"
+                  style={{ width: `${cullProgress.total > 0 ? Math.min(100, (cullProgress.current / cullProgress.total) * 100) : 0}%` }}
+                />
+              </div>
+            </div>
+          )}
+          {cullError && <Text as="div" variant={TextVariants.small} className="mt-2 text-red-300">{cullError}</Text>}
+          <button
+            disabled={isPlanningCull || (!cullFolderPath && imageList.length === 0)}
+            className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-button-text hover:brightness-110 disabled:opacity-50"
+            onClick={() => void startCullFromRail()}
+          >
+            {isPlanningCull ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} fill="currentColor" />}
+            {isPlanningCull ? 'Analyzing...' : localCullPlan ? 'Run again' : 'Start culling'}
+          </button>
+          {localCullPlan && (
+            <>
+              <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-2">
+                {localCullPlan.rejectCount} frames marked for review out of {localCullPlan.totalCount}.
+              </Text>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <button className="rounded border border-border-color px-2 py-1.5 text-xs text-text-primary hover:bg-surface" onClick={selectAllCullCandidates}>
+                  Select all
+                </button>
+                <button className="rounded border border-border-color px-2 py-1.5 text-xs text-text-secondary hover:bg-surface" onClick={onClearSelection}>
+                  Clear selection
+                </button>
+              </div>
+              {multiSelectedPaths.filter((path: string) => localCullPlan.items.some((item) => item.representativePath === path)).length > 0 && (
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <button className="rounded border border-green-400/40 px-2 py-1.5 text-xs text-green-300 hover:bg-green-400/10" onClick={() => void updateSelectedCullDecisions(true)}>
+                    Keep selected
+                  </button>
+                  <button className="rounded border border-red-400/40 px-2 py-1.5 text-xs text-red-300 hover:bg-red-400/10" onClick={() => void updateSelectedCullDecisions(false)}>
+                    Reject selected
+                  </button>
+                </div>
+              )}
+              <button
+                disabled={isApplyingCull || localCullPlan.rejectCount === 0}
+                className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-md border border-red-500/50 px-3 py-2 text-sm text-red-200 hover:bg-red-500/10 disabled:opacity-50"
+                onClick={() => void applyCullFromRail()}
+              >
+                {isApplyingCull ? <Loader2 size={15} className="animate-spin" /> : null}
+                {isApplyingCull ? 'Moving rejected frames...' : `Move ${localCullPlan.rejectCount} rejected frames`}
+              </button>
+            </>
+          )}
+        </div>
         {activePath && cullDecisions[activePath] && (
           <div className="shrink-0 border-b border-border-color px-3 py-2">
             <div className="flex items-center justify-between gap-2">
