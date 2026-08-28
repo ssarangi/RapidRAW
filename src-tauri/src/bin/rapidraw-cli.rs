@@ -322,22 +322,38 @@ fn run_catalog_thumbnails_cli(arguments: &[String]) -> Result<serde_json::Value,
     );
     match result {
         Ok(stats) => {
+            let summary_message = format!(
+                "Thumbnail generation complete: {} generated, {} skipped, {} failed",
+                stats.generated, stats.skipped, stats.failed
+            );
+            let state = if stats.total > 0 && stats.generated + stats.skipped == 0 {
+                "failed"
+            } else {
+                "completed"
+            };
+            let error_str = if !stats.failure_reasons.is_empty() {
+                Some(stats.failure_reasons.join("; "))
+            } else {
+                None
+            };
             rapidraw_lib::update_job(
                 &db_path,
                 &job_id,
-                "completed",
-                "Thumbnail generation complete",
-                stats.total as i64,
+                state,
+                &summary_message,
+                (stats.generated + stats.skipped) as i64,
                 stats.total as i64,
                 None,
-                None,
+                error_str.as_deref(),
             )?;
             Ok(json!({
                 "jobId": job_id,
-                "state": "completed",
+                "state": state,
                 "rootId": root_id,
                 "total": stats.total,
                 "generated": stats.generated,
+                "skipped": stats.skipped,
+                "failed": stats.failed,
             }))
         }
         Err(error) => {
@@ -396,22 +412,37 @@ fn run_catalog_metadata_cli(arguments: &[String]) -> Result<serde_json::Value, S
     );
     match result {
         Ok(stats) => {
+            let summary_message = format!(
+                "Metadata extraction complete: {} processed, {} failed",
+                stats.processed, stats.failed
+            );
+            let state = if stats.total > 0 && stats.processed == 0 {
+                "failed"
+            } else {
+                "completed"
+            };
+            let error_str = if !stats.failure_reasons.is_empty() {
+                Some(stats.failure_reasons.join("; "))
+            } else {
+                None
+            };
             rapidraw_lib::update_job(
                 &db_path,
                 &job_id,
-                "completed",
-                "Metadata extraction complete",
-                stats.total as i64,
+                state,
+                &summary_message,
+                stats.processed as i64,
                 stats.total as i64,
                 None,
-                None,
+                error_str.as_deref(),
             )?;
             Ok(json!({
                 "jobId": job_id,
-                "state": "completed",
+                "state": state,
                 "rootId": root_id,
                 "total": stats.total,
                 "processed": stats.processed,
+                "failed": stats.failed,
             }))
         }
         Err(error) => {

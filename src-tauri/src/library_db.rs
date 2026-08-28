@@ -1604,6 +1604,44 @@ mod tests {
         assert_eq!(result.generated, 1);
     }
 
+    fn create_test_tiff_with_embedded_jpeg(jpeg_bytes: &[u8]) -> Vec<u8> {
+        let mut data = Vec::new();
+        // Header (8 bytes): "II" (little endian), magic 42, offset to IFD0 = 8
+        data.extend_from_slice(b"II\x2a\x00\x08\x00\x00\x00");
+        
+        let num_entries: u16 = 3;
+        data.extend_from_slice(&num_entries.to_le_bytes());
+        
+        let offset_to_jpeg = (8 + 2 + 12 * 3 + 4) as u32;
+        let len_of_jpeg = jpeg_bytes.len() as u32;
+
+        // Tag 259 (Compression), Type 3 (SHORT), Count 1, Value 7 (JPEG)
+        data.extend_from_slice(&259u16.to_le_bytes());
+        data.extend_from_slice(&3u16.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&7u32.to_le_bytes());
+
+        // Tag 273 (StripOffsets), Type 4 (LONG), Count 1, Value offset_to_jpeg
+        data.extend_from_slice(&273u16.to_le_bytes());
+        data.extend_from_slice(&4u16.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&offset_to_jpeg.to_le_bytes());
+
+        // Tag 279 (StripByteCounts), Type 4 (LONG), Count 1, Value len_of_jpeg
+        data.extend_from_slice(&279u16.to_le_bytes());
+        data.extend_from_slice(&4u16.to_le_bytes());
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&len_of_jpeg.to_le_bytes());
+
+        // Next IFD offset: 0
+        data.extend_from_slice(&0u32.to_le_bytes());
+
+        // Embedded JPEG payload
+        data.extend_from_slice(jpeg_bytes);
+
+        data
+    }
+
     #[test]
     fn thumbnail_generation_headless_handles_raw_files() {
         let directory = tempfile::tempdir().unwrap();
@@ -1612,19 +1650,22 @@ mod tests {
         let thumb_dir = directory.path().join("thumbs");
         fs::create_dir_all(&photos_dir).unwrap();
 
-        // Create a raw file accompanied by a companion JPEG for raw pipeline fallback
-        let raw_path = photos_dir.join("photo.arw");
-        let companion_path = photos_dir.join("photo.jpg");
-        let sample = image::RgbImage::new(120, 80);
-        sample.save(&companion_path).unwrap();
-        fs::write(&raw_path, b"RAW_SAMPLE_BYTES").unwrap();
+        // Create a standalone RAW file containing an embedded JPEG preview via TIFF IFD
+        let raw_path = photos_dir.join("photo.dng");
+        let sample = image::RgbImage::new(800, 600);
+        let mut jpeg_bytes = Vec::new();
+        let mut cursor = std::io::Cursor::new(&mut jpeg_bytes);
+        sample.write_to(&mut cursor, image::ImageFormat::Jpeg).unwrap();
+
+        let tiff_dng_bytes = create_test_tiff_with_embedded_jpeg(&jpeg_bytes);
+        fs::write(&raw_path, &tiff_dng_bytes).unwrap();
 
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
         connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
         connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
-        connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.arw', 'photo.arw', 0, 0, 0, 'present')", []).unwrap();
+        connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.dng', 'photo.dng', 0, 0, 0, 'present')", []).unwrap();
         drop(connection);
 
         let control = crate::app_state::BackgroundJobControl::new();
@@ -1639,21 +1680,55 @@ mod tests {
 
         assert_eq!(report.total, 1);
         assert_eq!(report.generated, 1);
+        assert_eq!(report.failed, 0);
+        assert!(thumb_dir.exists());
     }
 
     #[test]
-    fn thumbnail_generation_failure_preserves_job_progress() {
-        let connection = Connection::open_in_memory().unwrap();
+    fn thumbnail_generation_tracks_failures_for_missing_and_corrupt_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("catalog.db");
+        let photos_dir = directory.path().join("photos");
+        let thumb_dir = directory.path().join("thumbs");
+        fs::create_dir_all(&photos_dir).unwrap();
+
+        // 1 valid image
+        let img1_path = photos_dir.join("valid.jpg");
+        let sample = image::RgbImage::new(100, 100);
+        sample.save(&img1_path).unwrap();
+
+        // 1 corrupted image
+        let img2_path = photos_dir.join("corrupt.jpg");
+        fs::write(&img2_path, b"NOT_A_VALID_IMAGE_BYTES").unwrap();
+
+        // 1 missing image (not created on disk)
+        let _img3_path = photos_dir.join("missing.jpg");
+
+        let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
-        connection.execute(
-            "INSERT INTO background_jobs(id, kind, state, payload_json, current, total, current_item, message, created_at, updated_at) VALUES('thumb-progress-job', 'thumbnail_generation', 'running', '{\"rootId\": 1}', 42, 100, '/photos/img42.arw', 'Generating thumbnails', 0, 0)",
-            [],
+        connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
+        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
+        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'valid.jpg', 'valid.jpg', 0, 0, 0, 'present')", []).unwrap();
+        connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(2, 1, 1, 'corrupt.jpg', 'corrupt.jpg', 0, 0, 0, 'present')", []).unwrap();
+        connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(3, 1, 1, 'missing.jpg', 'missing.jpg', 0, 0, 0, 'present')", []).unwrap();
+        drop(connection);
+
+        let control = crate::app_state::BackgroundJobControl::new();
+        let report = run_catalog_thumbnail_generation_headless(
+            db_path,
+            Some(1),
+            thumb_dir,
+            false,
+            control,
+            |_cur, _tot, _path| {},
         ).unwrap();
 
-        let (current, total, current_item) = read_job_progress(&connection, "thumb-progress-job").unwrap();
-        assert_eq!(current, 42);
-        assert_eq!(total, 100);
-        assert_eq!(current_item.as_deref(), Some("/photos/img42.arw"));
+        assert_eq!(report.total, 3);
+        assert_eq!(report.generated, 1);
+        assert_eq!(report.skipped, 0);
+        assert_eq!(report.failed, 2);
+        assert_eq!(report.failure_reasons.len(), 2);
     }
 
     #[test]
@@ -1690,6 +1765,7 @@ mod tests {
 
         assert_eq!(report.total, 1);
         assert_eq!(report.processed, 1);
+        assert_eq!(report.failed, 0);
         assert!(progress_calls >= 1);
     }
 
@@ -1765,6 +1841,7 @@ mod tests {
         let result = handle.join().unwrap().unwrap();
         assert_eq!(result.total, 1);
         assert_eq!(result.processed, 1);
+        assert_eq!(result.failed, 0);
     }
 
     #[test]
@@ -1801,18 +1878,92 @@ mod tests {
     }
 
     #[test]
-    fn metadata_extraction_failure_preserves_job_progress() {
-        let connection = Connection::open_in_memory().unwrap();
+    fn worker_failure_preserves_job_progress_in_sqlite() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("catalog.db");
+        let photos_dir = directory.path().join("photos");
+        fs::create_dir_all(&photos_dir).unwrap();
+
+        let img1_path = photos_dir.join("photo1.jpg");
+        let sample1 = image::RgbImage::new(100, 100);
+        sample1.save(&img1_path).unwrap();
+
+        let img2_path = photos_dir.join("photo2.jpg");
+        let sample2 = image::RgbImage::new(100, 100);
+        sample2.save(&img2_path).unwrap();
+
+        let img3_path = photos_dir.join("photo3.jpg");
+        let sample3 = image::RgbImage::new(100, 100);
+        sample3.save(&img3_path).unwrap();
+
+        let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
-        connection.execute(
-            "INSERT INTO background_jobs(id, kind, state, payload_json, current, total, current_item, message, created_at, updated_at) VALUES('meta-progress-job', 'metadata_extraction', 'running', '{\"rootId\": 1}', 85, 200, '/photos/img85.jpg', 'Extracting metadata', 0, 0)",
-            [],
+        connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
+        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
+        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo1.jpg', 'photo1.jpg', 0, 0, 0, 'present')", []).unwrap();
+        connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(2, 1, 1, 'photo2.jpg', 'photo2.jpg', 0, 0, 0, 'present')", []).unwrap();
+        connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(3, 1, 1, 'photo3.jpg', 'photo3.jpg', 0, 0, 0, 'present')", []).unwrap();
+        // Insert version for image 1 only so metadata extraction on image 2 will trigger transaction error
+        connection.execute("INSERT INTO image_versions(id, image_id, copy_id, display_name, sidecar_path, rating, is_edited, created_at, updated_at) VALUES(1, 1, '', 'photo1.jpg', '', 0, 0, 0, 0)", []).unwrap();
+        drop(connection);
+
+        let job_id = create_background_job(&db_path, "metadata_extraction", serde_json::json!({ "rootId": 1 })).unwrap();
+        let control = crate::app_state::BackgroundJobControl::new();
+
+        let progress_db = db_path.clone();
+        let progress_job_id = job_id.clone();
+        let result = run_catalog_metadata_extraction_headless(
+            db_path.clone(),
+            Some(1),
+            crate::app_settings::AppSettings::default(),
+            control,
+            move |current, total, current_item| {
+                let _ = update_job(
+                    &progress_db,
+                    &progress_job_id,
+                    "running",
+                    "Extracting metadata",
+                    current as i64,
+                    total as i64,
+                    current_item,
+                    None,
+                );
+            },
+        );
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err();
+
+        // Check SQLite directly to verify the running job record was at image 2 and update on failure preserved it
+        let conn = open_connection(&db_path).unwrap();
+        let (current, total, current_item) = read_job_progress(&conn, &job_id).unwrap();
+        assert_eq!(current, 2);
+        assert_eq!(total, 3);
+        assert_eq!(current_item.as_deref(), Some(img2_path.to_str().unwrap()));
+
+        // Simulate launcher error handling update
+        update_job(
+            &db_path,
+            &job_id,
+            "failed",
+            &err_msg,
+            current,
+            total,
+            current_item.as_deref(),
+            Some(&err_msg),
         ).unwrap();
 
-        let (current, total, current_item) = read_job_progress(&connection, "meta-progress-job").unwrap();
-        assert_eq!(current, 85);
-        assert_eq!(total, 200);
-        assert_eq!(current_item.as_deref(), Some("/photos/img85.jpg"));
+        let (state, current, total, current_item, error): (String, i64, i64, Option<String>, Option<String>) = conn.query_row(
+            "SELECT state, current, total, current_item, error FROM background_jobs WHERE id = ?1",
+            params![job_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        ).unwrap();
+        assert_eq!(state, "failed");
+        assert_eq!(current, 2);
+        assert_eq!(total, 3);
+        assert_eq!(current_item.as_deref(), Some(img2_path.to_str().unwrap()));
+        assert!(error.unwrap().contains("Failed to query version id"));
     }
 
     #[test]
@@ -3268,6 +3419,9 @@ pub fn list_catalog_thumbnail_candidates(
 pub struct CatalogThumbnailBatchReport {
     pub total: usize,
     pub generated: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub failure_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3275,6 +3429,8 @@ pub struct CatalogThumbnailBatchReport {
 pub struct CatalogMetadataBatchReport {
     pub total: usize,
     pub processed: usize,
+    pub failed: usize,
+    pub failure_reasons: Vec<String>,
 }
 
 pub fn run_catalog_thumbnail_generation_headless<F>(
@@ -3292,6 +3448,9 @@ where
     let candidates = list_catalog_thumbnail_candidates(&db_path, root_id)?;
     let total = candidates.len();
     let mut generated = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+    let mut failure_reasons = Vec::new();
 
     for (index, (_image_id, path_str, modified)) in candidates.into_iter().enumerate() {
         if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
@@ -3301,48 +3460,80 @@ where
         on_progress(current, total, Some(&path_str));
 
         let source_path = PathBuf::from(&path_str);
-        if source_path.exists() {
-            let cache_hash = crate::file_management::compute_thumbnail_cache_hash(
-                &path_str,
-                &[],
-                modified,
-            );
-            if let Some(cache_hash) = cache_hash {
-                let cache_path = thumb_cache_dir.join(format!("{cache_hash}.jpg"));
-                if force_regenerate || !cache_path.exists() {
-                    let image_result = if crate::formats::is_raw_file(&source_path) {
-                        crate::face_detection::load_image_for_local_ai(&source_path)
-                            .or_else(|_| {
-                                fs::read(&source_path)
-                                    .map_err(|e| e.to_string())
-                                    .and_then(|bytes| {
-                                        crate::raw_processing::develop_raw_image(
-                                            &bytes,
-                                            true,
-                                            0.0,
-                                            "sRGB".to_string(),
-                                            None,
-                                        )
-                                        .map_err(|e| e.to_string())
-                                    })
-                            })
-                    } else {
-                        image::open(&source_path).map_err(|e| e.to_string())
-                    };
-                    if let Ok(img) = image_result {
-                        let target_width = 720;
-                        if let Ok(thumb_data) = crate::file_management::encode_thumbnail(&img, target_width) {
-                            let _ = fs::write(&cache_path, &thumb_data);
+        if !source_path.exists() {
+            failed += 1;
+            failure_reasons.push(format!("{path_str}: source image file does not exist"));
+            continue;
+        }
+
+        let cache_hash = crate::file_management::compute_thumbnail_cache_hash(
+            &path_str,
+            &[],
+            modified,
+        );
+        let Some(cache_hash) = cache_hash else {
+            failed += 1;
+            failure_reasons.push(format!("{path_str}: failed to compute thumbnail cache hash"));
+            continue;
+        };
+
+        let cache_path = thumb_cache_dir.join(format!("{cache_hash}.jpg"));
+        if !force_regenerate && cache_path.exists() {
+            skipped += 1;
+            continue;
+        }
+
+        let image_result = if crate::formats::is_raw_file(&source_path) {
+            crate::face_detection::load_image_for_local_ai(&source_path)
+                .or_else(|_| {
+                    fs::read(&source_path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|bytes| {
+                            crate::raw_processing::develop_raw_image(
+                                &bytes,
+                                true,
+                                0.0,
+                                "sRGB".to_string(),
+                                None,
+                            )
+                            .map_err(|e| e.to_string())
+                        })
+                })
+        } else {
+            image::open(&source_path).map_err(|e| e.to_string())
+        };
+
+        match image_result {
+            Ok(img) => {
+                let target_width = 720;
+                match crate::file_management::encode_thumbnail(&img, target_width) {
+                    Ok(thumb_data) => {
+                        if let Err(e) = fs::write(&cache_path, &thumb_data) {
+                            failed += 1;
+                            failure_reasons.push(format!("{path_str}: write error: {e}"));
+                        } else {
                             generated += 1;
                         }
                     }
-                } else {
-                    generated += 1;
+                    Err(e) => {
+                        failed += 1;
+                        failure_reasons.push(format!("{path_str}: encode error: {e}"));
+                    }
                 }
+            }
+            Err(e) => {
+                failed += 1;
+                failure_reasons.push(format!("{path_str}: decode error: {e}"));
             }
         }
     }
-    Ok(CatalogThumbnailBatchReport { total, generated })
+    Ok(CatalogThumbnailBatchReport {
+        total,
+        generated,
+        skipped,
+        failed,
+        failure_reasons,
+    })
 }
 
 fn run_catalog_thumbnail_generation_impl(
@@ -3369,7 +3560,13 @@ fn run_catalog_thumbnail_generation_impl(
             None,
             None,
         )?;
-        return Ok(CatalogThumbnailBatchReport { total: 0, generated: 0 });
+        return Ok(CatalogThumbnailBatchReport {
+            total: 0,
+            generated: 0,
+            skipped: 0,
+            failed: 0,
+            failure_reasons: Vec::new(),
+        });
     }
 
     update_job(
@@ -3384,6 +3581,9 @@ fn run_catalog_thumbnail_generation_impl(
     )?;
 
     let mut generated = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+    let mut failure_reasons = Vec::new();
     let mut last_progress_update = std::time::Instant::now();
 
     for (index, (_image_id, path_str, modified)) in candidates.into_iter().enumerate() {
@@ -3410,6 +3610,26 @@ fn run_catalog_thumbnail_generation_impl(
             last_progress_update = std::time::Instant::now();
         }
 
+        let source_path = PathBuf::from(&path_str);
+        if !source_path.exists() {
+            failed += 1;
+            failure_reasons.push(format!("{path_str}: source image file does not exist"));
+            continue;
+        }
+
+        let cache_hash = crate::file_management::compute_thumbnail_cache_hash(
+            &path_str,
+            &[],
+            modified,
+        );
+        if !force_regenerate
+            && let Some(ref hash) = cache_hash
+            && thumb_cache_dir.join(format!("{hash}.jpg")).exists()
+        {
+            skipped += 1;
+            continue;
+        }
+
         let state = app.state::<crate::AppState>();
         let gpu_context = crate::gpu_processing::get_or_init_gpu_context(&state, app).ok();
 
@@ -3433,21 +3653,45 @@ fn run_catalog_thumbnail_generation_impl(
                 is_edited,
             );
             generated += 1;
+        } else {
+            failed += 1;
+            failure_reasons.push(format!("{path_str}: thumbnail generation failed"));
         }
     }
+
+    let summary_message = format!(
+        "Thumbnail generation complete: {} generated, {} skipped, {} failed",
+        generated, skipped, failed
+    );
+    let job_state = if total > 0 && generated + skipped == 0 {
+        "failed"
+    } else {
+        "completed"
+    };
+    let error_summary = if !failure_reasons.is_empty() {
+        Some(failure_reasons.join("; "))
+    } else {
+        None
+    };
 
     update_job(
         db_path,
         job_id,
-        "completed",
-        "Thumbnail generation complete",
-        total as i64,
+        job_state,
+        &summary_message,
+        (generated + skipped) as i64,
         total as i64,
         None,
-        None,
+        error_summary.as_deref(),
     )?;
 
-    Ok(CatalogThumbnailBatchReport { total, generated })
+    Ok(CatalogThumbnailBatchReport {
+        total,
+        generated,
+        skipped,
+        failed,
+        failure_reasons,
+    })
 }
 
 #[tauri::command]
@@ -3572,6 +3816,8 @@ where
     let candidates = list_catalog_metadata_candidates(&db_path, root_id)?;
     let total = candidates.len();
     let mut processed = 0usize;
+    let mut failed = 0usize;
+    let mut failure_reasons = Vec::new();
 
     for (index, (image_id, _root_id, path_buf, _modified)) in candidates.into_iter().enumerate() {
         if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
@@ -3581,48 +3827,57 @@ where
         let path_str = path_buf.to_string_lossy().to_string();
         on_progress(current, total, Some(&path_str));
 
-        if path_buf.exists() {
-            let sidecar_path = parse_virtual_path(&path_str).1;
-            let (is_edited, rating, tags) = sidecar_metadata_with_settings(&path_buf, &sidecar_path, &settings);
-            let tags_json = tags.as_ref().and_then(|t| serde_json::to_string(t).ok());
-            let sidecar_modified = if sidecar_path.exists() {
-                Some(unix_modified(&sidecar_path) as i64)
-            } else {
-                None
-            };
-            let now = now_secs();
-
-            let tx = conn.transaction().map_err(|e| format!("Failed to start transaction for {}: {}", path_str, e))?;
-            tx.execute(
-                "UPDATE image_versions
-                 SET rating = ?2, color_label = ?3, is_edited = ?4, tags_json = ?5, sidecar_modified_at = ?6, updated_at = ?7
-                 WHERE image_id = ?1 AND copy_id = ''",
-                params![
-                    image_id,
-                    rating,
-                    color_label_from_tags(tags.as_ref()),
-                    if is_edited { 1 } else { 0 },
-                    tags_json,
-                    sidecar_modified,
-                    now
-                ],
-            ).map_err(|e| format!("Failed to update image version for {}: {}", path_str, e))?;
-            let version_id: i64 = tx.query_row(
-                "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
-                params![image_id],
-                |row| row.get(0),
-            ).map_err(|e| format!("Failed to query version id for {}: {}", path_str, e))?;
-            let exif = read_catalog_exif(&path_buf);
-            upsert_image_metadata(&tx, image_id, &path_buf, &exif, now)
-                .map_err(|e| format!("Failed to upsert image metadata for {}: {}", path_str, e))?;
-            sync_image_tags(&tx, version_id, tags.as_ref())
-                .map_err(|e| format!("Failed to sync tags for {}: {}", path_str, e))?;
-            tx.commit().map_err(|e| format!("Failed to commit metadata transaction for {}: {}", path_str, e))?;
-
-            processed += 1;
+        if !path_buf.exists() {
+            failed += 1;
+            failure_reasons.push(format!("{path_str}: source image file does not exist"));
+            continue;
         }
+
+        let sidecar_path = parse_virtual_path(&path_str).1;
+        let (is_edited, rating, tags) = sidecar_metadata_with_settings(&path_buf, &sidecar_path, &settings);
+        let tags_json = tags.as_ref().and_then(|t| serde_json::to_string(t).ok());
+        let sidecar_modified = if sidecar_path.exists() {
+            Some(unix_modified(&sidecar_path) as i64)
+        } else {
+            None
+        };
+        let now = now_secs();
+
+        let tx = conn.transaction().map_err(|e| format!("Failed to start transaction for {}: {}", path_str, e))?;
+        tx.execute(
+            "UPDATE image_versions
+             SET rating = ?2, color_label = ?3, is_edited = ?4, tags_json = ?5, sidecar_modified_at = ?6, updated_at = ?7
+             WHERE image_id = ?1 AND copy_id = ''",
+            params![
+                image_id,
+                rating,
+                color_label_from_tags(tags.as_ref()),
+                if is_edited { 1 } else { 0 },
+                tags_json,
+                sidecar_modified,
+                now
+            ],
+        ).map_err(|e| format!("Failed to update image version for {}: {}", path_str, e))?;
+        let version_id: i64 = tx.query_row(
+            "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
+            params![image_id],
+            |row| row.get(0),
+        ).map_err(|e| format!("Failed to query version id for {}: {}", path_str, e))?;
+        let exif = read_catalog_exif(&path_buf);
+        upsert_image_metadata(&tx, image_id, &path_buf, &exif, now)
+            .map_err(|e| format!("Failed to upsert image metadata for {}: {}", path_str, e))?;
+        sync_image_tags(&tx, version_id, tags.as_ref())
+            .map_err(|e| format!("Failed to sync tags for {}: {}", path_str, e))?;
+        tx.commit().map_err(|e| format!("Failed to commit metadata transaction for {}: {}", path_str, e))?;
+
+        processed += 1;
     }
-    Ok(CatalogMetadataBatchReport { total, processed })
+    Ok(CatalogMetadataBatchReport {
+        total,
+        processed,
+        failed,
+        failure_reasons,
+    })
 }
 
 fn run_catalog_metadata_extraction_impl(
@@ -3647,7 +3902,12 @@ fn run_catalog_metadata_extraction_impl(
             None,
             None,
         )?;
-        return Ok(CatalogMetadataBatchReport { total: 0, processed: 0 });
+        return Ok(CatalogMetadataBatchReport {
+            total: 0,
+            processed: 0,
+            failed: 0,
+            failure_reasons: Vec::new(),
+        });
     }
 
     update_job(
@@ -3662,6 +3922,8 @@ fn run_catalog_metadata_extraction_impl(
     )?;
 
     let mut processed = 0usize;
+    let mut failed = 0usize;
+    let mut failure_reasons = Vec::new();
     let mut last_progress_update = std::time::Instant::now();
     let mut conn = open_connection(db_path)?;
 
@@ -3690,67 +3952,91 @@ fn run_catalog_metadata_extraction_impl(
             last_progress_update = std::time::Instant::now();
         }
 
-        if path_buf.exists() {
-            let sidecar_path = parse_virtual_path(&path_str).1;
-            let (is_edited, rating, tags) = sidecar_metadata_with_settings(&path_buf, &sidecar_path, &settings);
-            let tags_json = tags.as_ref().and_then(|t| serde_json::to_string(t).ok());
-            let sidecar_modified = if sidecar_path.exists() {
-                Some(unix_modified(&sidecar_path) as i64)
-            } else {
-                None
-            };
-            let now = now_secs();
-
-            let tx = conn.transaction().map_err(|e| format!("Failed to start transaction for {}: {}", path_str, e))?;
-            tx.execute(
-                "UPDATE image_versions
-                 SET rating = ?2, color_label = ?3, is_edited = ?4, tags_json = ?5, sidecar_modified_at = ?6, updated_at = ?7
-                 WHERE image_id = ?1 AND copy_id = ''",
-                params![
-                    image_id,
-                    rating,
-                    color_label_from_tags(tags.as_ref()),
-                    if is_edited { 1 } else { 0 },
-                    tags_json,
-                    sidecar_modified,
-                    now
-                ],
-            ).map_err(|e| format!("Failed to update image version for {}: {}", path_str, e))?;
-            let version_id: i64 = tx.query_row(
-                "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
-                params![image_id],
-                |row| row.get(0),
-            ).map_err(|e| format!("Failed to query version id for {}: {}", path_str, e))?;
-            let exif = read_catalog_exif(&path_buf);
-            upsert_image_metadata(&tx, image_id, &path_buf, &exif, now)
-                .map_err(|e| format!("Failed to upsert image metadata for {}: {}", path_str, e))?;
-            sync_image_tags(&tx, version_id, tags.as_ref())
-                .map_err(|e| format!("Failed to sync tags for {}: {}", path_str, e))?;
-            tx.commit().map_err(|e| format!("Failed to commit metadata transaction for {}: {}", path_str, e))?;
-
-            crate::file_management::emit_image_metadata_loaded(
-                app,
-                &path_str,
-                rating,
-                is_edited,
-                &tags,
-            );
-            processed += 1;
+        if !path_buf.exists() {
+            failed += 1;
+            failure_reasons.push(format!("{path_str}: source image file does not exist"));
+            continue;
         }
+
+        let sidecar_path = parse_virtual_path(&path_str).1;
+        let (is_edited, rating, tags) = sidecar_metadata_with_settings(&path_buf, &sidecar_path, &settings);
+        let tags_json = tags.as_ref().and_then(|t| serde_json::to_string(t).ok());
+        let sidecar_modified = if sidecar_path.exists() {
+            Some(unix_modified(&sidecar_path) as i64)
+        } else {
+            None
+        };
+        let now = now_secs();
+
+        let tx = conn.transaction().map_err(|e| format!("Failed to start transaction for {}: {}", path_str, e))?;
+        tx.execute(
+            "UPDATE image_versions
+             SET rating = ?2, color_label = ?3, is_edited = ?4, tags_json = ?5, sidecar_modified_at = ?6, updated_at = ?7
+             WHERE image_id = ?1 AND copy_id = ''",
+            params![
+                image_id,
+                rating,
+                color_label_from_tags(tags.as_ref()),
+                if is_edited { 1 } else { 0 },
+                tags_json,
+                sidecar_modified,
+                now
+            ],
+        ).map_err(|e| format!("Failed to update image version for {}: {}", path_str, e))?;
+        let version_id: i64 = tx.query_row(
+            "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
+            params![image_id],
+            |row| row.get(0),
+        ).map_err(|e| format!("Failed to query version id for {}: {}", path_str, e))?;
+        let exif = read_catalog_exif(&path_buf);
+        upsert_image_metadata(&tx, image_id, &path_buf, &exif, now)
+            .map_err(|e| format!("Failed to upsert image metadata for {}: {}", path_str, e))?;
+        sync_image_tags(&tx, version_id, tags.as_ref())
+            .map_err(|e| format!("Failed to sync tags for {}: {}", path_str, e))?;
+        tx.commit().map_err(|e| format!("Failed to commit metadata transaction for {}: {}", path_str, e))?;
+
+        crate::file_management::emit_image_metadata_loaded(
+            app,
+            &path_str,
+            rating,
+            is_edited,
+            &tags,
+        );
+        processed += 1;
     }
+
+    let summary_message = format!(
+        "Metadata extraction complete: {} processed, {} failed",
+        processed, failed
+    );
+    let job_state = if total > 0 && processed == 0 {
+        "failed"
+    } else {
+        "completed"
+    };
+    let error_summary = if !failure_reasons.is_empty() {
+        Some(failure_reasons.join("; "))
+    } else {
+        None
+    };
 
     update_job(
         db_path,
         job_id,
-        "completed",
-        "Metadata extraction complete",
-        total as i64,
+        job_state,
+        &summary_message,
+        processed as i64,
         total as i64,
         None,
-        None,
+        error_summary.as_deref(),
     )?;
 
-    Ok(CatalogMetadataBatchReport { total, processed })
+    Ok(CatalogMetadataBatchReport {
+        total,
+        processed,
+        failed,
+        failure_reasons,
+    })
 }
 
 #[tauri::command]
