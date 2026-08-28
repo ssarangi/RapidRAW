@@ -92,6 +92,8 @@ fn main() {
         Some("faces") if arguments.get(1).map(String::as_str) == Some("clusters") => face_clusters(&arguments),
         Some("faces") if arguments.get(1).map(String::as_str) == Some("detect") => run_face_detection_cli(&arguments),
         Some("faces") if arguments.get(1).map(String::as_str) == Some("recognize") => run_face_recognition_cli(&arguments),
+        Some("people") if arguments.get(1).map(String::as_str) == Some("list") => list_people(&arguments),
+        Some("people") if arguments.get(1).map(String::as_str) == Some("images") => list_person_images(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("status") => tag_status(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("top") => top_tags(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("export-suggestions") => export_tag_suggestions(&arguments),
@@ -106,7 +108,7 @@ fn main() {
         Some("models") if arguments.get(1).map(String::as_str) == Some("verify") => verify_installed_model(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("list") => list_derivatives(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("run") => run_restore_cli(&arguments),
-        _ => Err("Usage: rapidraw-cli library create --name <name> --database <catalog.db> | rapidraw-cli library open --database <catalog.db> | rapidraw-cli library add-root --database <catalog.db> --path <folder> [--label <name>] | rapidraw-cli library remove-root --database <catalog.db> --root <id> | rapidraw-cli library inspect|roots|metrics|scan --database <catalog.db> | rapidraw-cli library scan --database <catalog.db> --root <id> [--non-recursive] | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli faces detect|recognize --database <catalog.db> --face-models-dir <models/face> [--root <id>] | rapidraw-cli tags status|top|export-suggestions|run --database <catalog.db> | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions|decisions|analyze --database <catalog.db> | rapidraw-cli cull analyze --database <catalog.db> --root <id> [--similarity-threshold <n>] [--blur-threshold <n>] | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
+        _ => Err("Usage: rapidraw-cli library create --name <name> --database <catalog.db> | rapidraw-cli library open --database <catalog.db> | rapidraw-cli library add-root --database <catalog.db> --path <folder> [--label <name>] | rapidraw-cli library remove-root --database <catalog.db> --root <id> | rapidraw-cli library inspect|roots|metrics|scan --database <catalog.db> | rapidraw-cli library scan --database <catalog.db> --root <id> [--non-recursive] | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli faces detect|recognize --database <catalog.db> --face-models-dir <models/face> [--root <id>] | rapidraw-cli people list|images --database <catalog.db> | rapidraw-cli people images --database <catalog.db> --person <id> | rapidraw-cli tags status|top|export-suggestions|run --database <catalog.db> | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions|decisions|analyze --database <catalog.db> | rapidraw-cli cull analyze --database <catalog.db> --root <id> [--similarity-threshold <n>] [--blur-threshold <n>] | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -389,6 +391,63 @@ fn face_clusters(arguments: &[String]) -> Result<serde_json::Value, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     Ok(json!(clusters))
+}
+
+fn list_people(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let connection =
+        Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare(
+            "SELECT p.id, p.display_name, p.state, p.merged_into_person_id, COUNT(f.id)
+             FROM people p
+             LEFT JOIN faces f ON f.person_id = p.id AND f.review_state = 'confirmed'
+             GROUP BY p.id
+             ORDER BY p.display_name COLLATE NOCASE",
+        )
+        .map_err(|error| error.to_string())?;
+    let people = statement
+        .query_map([], |row| {
+            Ok(json!({
+                "id": row.get::<_, i64>(0)?,
+                "name": row.get::<_, String>(1)?,
+                "state": row.get::<_, String>(2)?,
+                "mergedIntoPersonId": row.get::<_, Option<i64>>(3)?,
+                "confirmedFaces": row.get::<_, i64>(4)?,
+            }))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(json!(people))
+}
+
+fn list_person_images(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let connection =
+        Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let person_id = numeric_argument(arguments, "--person")?;
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT i.id, r.absolute_path || '/' || i.relative_path, i.file_name, f.detector_confidence
+             FROM faces f
+             JOIN images i ON i.id = f.image_id
+             JOIN collection_roots r ON r.id = i.root_id
+             WHERE f.person_id = ?1 AND f.review_state = 'confirmed' AND i.status = 'present'
+             ORDER BY i.relative_path",
+        )
+        .map_err(|error| error.to_string())?;
+    let images = statement
+        .query_map([person_id], |row| {
+            Ok(json!({
+                "imageId": row.get::<_, i64>(0)?,
+                "path": row.get::<_, String>(1)?,
+                "fileName": row.get::<_, String>(2)?,
+                "faceConfidence": row.get::<_, f64>(3)?,
+            }))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(json!({ "personId": person_id, "images": images }))
 }
 
 fn run_face_detection_cli(arguments: &[String]) -> Result<serde_json::Value, String> {

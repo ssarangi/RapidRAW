@@ -32,6 +32,8 @@ rapidraw-cli tags run --database /data/archive/rapidraw.db --models-dir /data/mo
 rapidraw-cli tags run --database /data/archive/rapidraw.db --models-dir /data/models/visual --with-bioclip
 rapidraw-cli faces detect --database /data/archive/rapidraw.db --face-models-dir /data/models/face --root 1
 rapidraw-cli faces recognize --database /data/archive/rapidraw.db --face-models-dir /data/models/face --root 1
+rapidraw-cli people list --database /data/archive/rapidraw.db
+rapidraw-cli people images --database /data/archive/rapidraw.db --person 12
 rapidraw-cli cull analyze --database /data/archive/rapidraw.db --root 1
 ```
 
