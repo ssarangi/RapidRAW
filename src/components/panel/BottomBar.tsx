@@ -14,6 +14,7 @@ import {
   X,
   Pause,
   Play,
+  RotateCcw,
   Square,
 } from 'lucide-react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
@@ -340,6 +341,15 @@ export default function BottomBar({
   };
   const handlePauseBackgroundJob = async (jobId: string, resume: boolean) => {
     try { await invoke(resume ? Invokes.ResumeBackgroundJob : Invokes.PauseBackgroundJob, { jobId }); setBackgroundJobs((jobs) => jobs.map((job) => job.id === jobId ? { ...job, state: resume ? 'running' : 'paused', message: resume ? 'Resume requested' : 'Pause requested' } : job)); } catch (error) { console.error('Failed to update background job:', error); }
+  };
+  const handleRetryBackgroundJob = async (jobId: string) => {
+    try {
+      await invoke(Invokes.RetryBackgroundJob, { jobId });
+      const jobs = await invoke<BackgroundJob[]>(Invokes.ListBackgroundJobs);
+      setBackgroundJobs(jobs);
+    } catch (error) {
+      console.error('Failed to retry background job:', error);
+    }
   };
 
   useEffect(() => {
@@ -1099,6 +1109,11 @@ export default function BottomBar({
                               {['queued', 'running', 'paused'].includes(job.state) && (
                                 <button className="p-1 text-red-300 hover:bg-red-500/10 rounded" onClick={() => void handleCancelBackgroundJob(job.id)} data-tooltip="Cancel job">
                                   <Square size={13} />
+                                </button>
+                              )}
+                              {job.kind === 'catalog_scan' && ['failed', 'cancelled'].includes(job.state) && (
+                                <button className="p-1 text-accent hover:bg-bg-primary rounded" onClick={() => void handleRetryBackgroundJob(job.id)} data-tooltip="Retry catalog scan">
+                                  <RotateCcw size={13} />
                                 </button>
                               )}
                             </div>

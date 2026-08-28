@@ -135,6 +135,7 @@ export enum Invokes {
   CancelBackgroundJob = 'cancel_background_job',
   PauseBackgroundJob = 'pause_background_job',
   ResumeBackgroundJob = 'resume_background_job',
+  RetryBackgroundJob = 'retry_background_job',
   StartFaceDetection = 'start_face_detection',
   StartFaceRecognition = 'start_face_recognition',
   StartCatalogAiTagging = 'start_catalog_ai_tagging',

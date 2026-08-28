@@ -2482,6 +2482,7 @@ pub fn run() {
             library_db::cancel_background_job,
             library_db::pause_background_job,
             library_db::resume_background_job,
+            library_db::retry_background_job,
             tagging::start_background_indexing,
             tagging::start_catalog_ai_tagging,
             tagging::start_catalog_ram_plus_tagging,

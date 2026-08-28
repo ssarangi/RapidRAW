@@ -2950,6 +2950,41 @@ pub fn resume_background_job(
     )
 }
 
+/// Retries a terminal catalog scan as a new durable job. The original job is
+/// retained as audit history; model jobs are intentionally not retried here
+/// because their model directory/runtime configuration is not stored in a
+/// portable desktop-job payload yet.
+#[tauri::command]
+pub fn retry_background_job(
+    job_id: String,
+    app_handle: AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let db_path = active_library_path(&state)?;
+    let (kind, job_state, root_id, payload_json): (String, String, Option<i64>, String) =
+        open_connection(&db_path)?
+            .query_row(
+                "SELECT kind, state, root_id, payload_json FROM background_jobs WHERE id = ?1",
+                [&job_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(|error| error.to_string())?;
+    if !matches!(job_state.as_str(), "failed" | "cancelled") {
+        return Err("Only failed or cancelled jobs can be retried".to_string());
+    }
+    if kind != "catalog_scan" {
+        return Err(format!(
+            "Retry is not available for {kind}; run this operation again from its model workflow"
+        ));
+    }
+    let root_id = root_id.ok_or_else(|| "Catalog scan job has no collection root".to_string())?;
+    let recursive = serde_json::from_str::<serde_json::Value>(&payload_json)
+        .ok()
+        .and_then(|payload| payload.get("recursive").and_then(|value| value.as_bool()))
+        .unwrap_or(true);
+    start_catalog_scan(root_id, recursive, app_handle, state)
+}
+
 fn color_label_from_tags(tags: Option<&Vec<String>>) -> Option<String> {
     tags.and_then(|items| {
         items
