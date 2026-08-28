@@ -3373,7 +3373,7 @@ pub fn delete_smart_collection(
     Ok(())
 }
 
-pub(crate) fn record_cull_session(
+pub fn record_cull_session(
     db_path: &Path,
     scope_path: &str,
     settings_json: &str,

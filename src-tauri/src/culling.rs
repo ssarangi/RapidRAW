@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::{AppHandle, Emitter};
 
@@ -70,6 +71,16 @@ pub struct CullingSuggestions {
     pub similar_groups: Vec<CullGroup>,
     pub blurry_images: Vec<ImageAnalysisResult>,
     pub failed_paths: Vec<String>,
+}
+
+/// Result from the window-free technical culling pass. Subject detection is
+/// intentionally excluded here: callers must use a model-aware batch worker
+/// rather than silently presenting U-2-Net-dependent scores as available.
+#[derive(Serialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct HeadlessCullingReport {
+    pub analyses: Vec<ImageAnalysisResult>,
+    pub suggestions: CullingSuggestions,
 }
 
 #[derive(Serialize, Clone)]
@@ -433,6 +444,70 @@ pub(crate) fn build_culling_suggestions(
     suggestions
 }
 
+/// Runs the deterministic duplicate, sharpness, focus, and exposure pass
+/// without a Tauri application handle. This is used by `rapidraw-cli` and
+/// deliberately rejects subject analysis because loading U-2-Net remains a
+/// model-managed operation with its own explicit runtime contract.
+pub fn cull_images_headless<F>(
+    paths: Vec<String>,
+    settings: CullingSettings,
+    app_settings: crate::app_settings::AppSettings,
+    on_progress: F,
+) -> Result<HeadlessCullingReport, String>
+where
+    F: FnMut(usize, usize, Option<&str>) + Send,
+{
+    if settings.use_subject_detection {
+        return Err(
+            "Headless culling currently supports technical analysis only; run subject-aware culling from the desktop workflow"
+                .to_string(),
+        );
+    }
+    if paths.is_empty() {
+        return Ok(HeadlessCullingReport::default());
+    }
+
+    let total = paths.len();
+    let hasher = HasherConfig::new()
+        .hash_alg(HashAlg::DoubleGradient)
+        .hash_size(16, 16)
+        .to_hasher();
+    let completed = AtomicUsize::new(0);
+    let progress = Mutex::new(on_progress);
+    let results = paths
+        .par_iter()
+        .map(|path| {
+            let current = completed.fetch_add(1, Ordering::Relaxed) + 1;
+            if let Ok(mut callback) = progress.lock() {
+                callback(current, total, Some(path));
+            }
+            analyze_image(path, &hasher, &app_settings, None, current)
+                .map_err(|error| (path.clone(), error))
+        })
+        .collect::<Vec<_>>();
+
+    let mut analyses = Vec::new();
+    let mut failed_paths = Vec::new();
+    let mut successful = Vec::new();
+    for result in results {
+        match result {
+            Ok(analysis) => {
+                analyses.push(analysis.result.clone());
+                successful.push(analysis);
+            }
+            Err((path, error)) => {
+                eprintln!("Failed to analyze image {path}: {error}");
+                failed_paths.push(path);
+            }
+        }
+    }
+    analyses.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(HeadlessCullingReport {
+        suggestions: build_culling_suggestions(successful, failed_paths, &settings),
+        analyses,
+    })
+}
+
 #[tauri::command]
 pub async fn cull_images(
     paths: Vec<String>,
@@ -520,7 +595,7 @@ pub async fn cull_images(
 
 #[cfg(test)]
 mod tests {
-    use super::{CullingSettings, calculate_subject_composition_metrics};
+    use super::{CullingSettings, calculate_subject_composition_metrics, cull_images_headless};
     use image::{GrayImage, Luma};
 
     #[test]
@@ -552,5 +627,27 @@ mod tests {
         let (edge_score, edge_contact) = calculate_subject_composition_metrics(&edge).unwrap();
         assert!(edge_contact > centered_edge_contact);
         assert!(centered_score > edge_score);
+    }
+
+    #[test]
+    fn headless_culling_analyzes_regular_images_without_a_tauri_handle() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("test.png");
+        image::RgbImage::from_fn(24, 24, |x, y| {
+            image::Rgb([((x + y) * 4) as u8, (x * 5) as u8, (y * 5) as u8])
+        })
+        .save(&path)
+        .unwrap();
+
+        let report = cull_images_headless(
+            vec![path.to_string_lossy().into_owned()],
+            CullingSettings::default(),
+            crate::app_settings::AppSettings::default(),
+            |_, _, _| {},
+        )
+        .unwrap();
+
+        assert_eq!(report.analyses.len(), 1);
+        assert!(report.suggestions.failed_paths.is_empty());
     }
 }

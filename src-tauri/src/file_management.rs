@@ -57,6 +57,26 @@ fn resolve_thumbnail_cache_dir(app_handle: &AppHandle) -> std::result::Result<Pa
     Ok(thumb_cache_dir)
 }
 
+#[cfg(test)]
+mod auto_cull_candidate_tests {
+    use super::resolve_auto_cull_path_candidates;
+
+    #[test]
+    fn path_candidates_keep_raw_jpeg_siblings_together() {
+        let candidates = resolve_auto_cull_path_candidates(
+            vec![
+                "/photos/DSC_0001.JPG".to_string(),
+                "/photos/DSC_0001.ARW".to_string(),
+            ],
+            &crate::app_settings::AppSettings::default(),
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].representative_path, "/photos/DSC_0001.ARW");
+        assert_eq!(candidates[0].backing_paths.len(), 2);
+    }
+}
+
 fn emit_thumbnail_cache_setup_error(app_handle: &AppHandle, path: &str, reason: &str) {
     let _ = app_handle.emit(
         "thumbnail-generation-error",
@@ -394,9 +414,11 @@ pub(crate) fn assign_group_ids(
 /// `group_id` from `assign_group_ids`). `ImageFile`'s fields are private to
 /// this module, so this is the boundary auto_cull.rs reads through instead
 /// of needing field access itself.
-pub(crate) struct AutoCullCandidate {
-    pub(crate) representative_path: String,
-    pub(crate) backing_paths: Vec<String>,
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoCullCandidate {
+    pub representative_path: String,
+    pub backing_paths: Vec<String>,
 }
 
 pub(crate) fn resolve_auto_cull_candidates(images: &[ImageFile]) -> Vec<AutoCullCandidate> {
@@ -430,6 +452,43 @@ pub(crate) fn resolve_auto_cull_candidates(images: &[ImageFile]) -> Vec<AutoCull
     }
 
     candidates
+}
+
+/// Resolves catalog or command-line paths into the same logical captures the
+/// desktop culling workflow uses. RAW/JPEG siblings are kept together so a
+/// review decision can never split a capture across two destinations.
+pub fn resolve_auto_cull_path_candidates(
+    paths: Vec<String>,
+    settings: &crate::app_settings::AppSettings,
+) -> Vec<AutoCullCandidate> {
+    let mut images = paths
+        .into_iter()
+        .map(|path| {
+            let is_raw = Path::new(&path)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    crate::formats::RAW_EXTENSIONS
+                        .iter()
+                        .any(|(raw_extension, _)| extension.eq_ignore_ascii_case(raw_extension))
+                });
+            ImageFile {
+                path,
+                modified: 0,
+                is_edited: false,
+                rating: 0,
+                tags: None,
+                exif: None,
+                is_virtual_copy: false,
+                is_cloud_placeholder: false,
+                is_raw,
+                group_id: None,
+                catalog_image_id: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    assign_group_ids(&mut images, settings);
+    resolve_auto_cull_candidates(&images)
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

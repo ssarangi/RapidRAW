@@ -9,12 +9,15 @@ use rapidraw_lib::face_model_registry::{InstalledFaceModelPack, face_model_packs
 use rapidraw_lib::image_restoration::{
     RestorationRecipe, run_restoration_worker, validate_restoration_recipe,
 };
+use rapidraw_lib::resolve_auto_cull_path_candidates;
 use rapidraw_lib::scan_library_root_headless;
 use rapidraw_lib::tagging::run_catalog_ram_plus_tagging_headless;
 use rapidraw_lib::visual_model_registry::visual_model_packs;
+use rapidraw_lib::{CullingSettings, cull_images_headless};
 use rusqlite::Connection;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 fn database_argument(arguments: &[String]) -> Result<PathBuf, String> {
@@ -72,12 +75,13 @@ fn main() {
         Some("collections") if arguments.get(1).map(String::as_str) == Some("show") => show_collection(&arguments),
         Some("cull") if arguments.get(1).map(String::as_str) == Some("sessions") => cull_sessions(&arguments),
         Some("cull") if arguments.get(1).map(String::as_str) == Some("decisions") => cull_decisions(&arguments),
+        Some("cull") if arguments.get(1).map(String::as_str) == Some("analyze") => run_cull_analysis_cli(&arguments),
         Some("models") if arguments.get(1).map(String::as_str) == Some("list") => list_models(),
         Some("models") if arguments.get(1).map(String::as_str) == Some("info") => verify_model(&arguments),
         Some("models") if arguments.get(1).map(String::as_str) == Some("verify") => verify_installed_model(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("list") => list_derivatives(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("run") => run_restore_cli(&arguments),
-        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics|scan --database <catalog.db> | rapidraw-cli library scan --database <catalog.db> --root <id> [--non-recursive] | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli faces detect|recognize --database <catalog.db> --face-models-dir <models/face> [--root <id>] | rapidraw-cli tags status|top|export-suggestions|run --database <catalog.db> | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
+        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics|scan --database <catalog.db> | rapidraw-cli library scan --database <catalog.db> --root <id> [--non-recursive] | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli faces detect|recognize --database <catalog.db> --face-models-dir <models/face> [--root <id>] | rapidraw-cli tags status|top|export-suggestions|run --database <catalog.db> | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions|decisions|analyze --database <catalog.db> | rapidraw-cli cull analyze --database <catalog.db> --root <id> [--similarity-threshold <n>] [--blur-threshold <n>] | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -533,6 +537,187 @@ fn cull_decisions(arguments: &[String]) -> Result<serde_json::Value, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     Ok(json!(decisions))
+}
+
+fn run_cull_analysis_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let db_path = database_argument(arguments)?;
+    let root_id = numeric_argument(arguments, "--root")?;
+    let similarity_threshold = arguments
+        .windows(2)
+        .find(|pair| pair[0] == "--similarity-threshold")
+        .map(|pair| {
+            pair[1]
+                .parse::<u32>()
+                .map_err(|_| "--similarity-threshold must be an integer".to_string())
+        })
+        .transpose()?
+        .unwrap_or(CullingSettings::default().similarity_threshold);
+    let blur_threshold = arguments
+        .windows(2)
+        .find(|pair| pair[0] == "--blur-threshold")
+        .map(|pair| {
+            pair[1]
+                .parse::<f64>()
+                .map_err(|_| "--blur-threshold must be a number".to_string())
+        })
+        .transpose()?
+        .unwrap_or(CullingSettings::default().blur_threshold);
+    let settings = CullingSettings {
+        similarity_threshold,
+        blur_threshold,
+        group_similar: !arguments
+            .iter()
+            .any(|argument| argument == "--no-group-similar"),
+        filter_blurry: !arguments
+            .iter()
+            .any(|argument| argument == "--no-filter-blurry"),
+        ..CullingSettings::default()
+    };
+
+    let connection = Connection::open(&db_path).map_err(|error| error.to_string())?;
+    let root_path: String = connection
+        .query_row(
+            "SELECT absolute_path FROM collection_roots WHERE id = ?1",
+            [root_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let mut statement = connection
+        .prepare(
+            "SELECT ?1 || '/' || relative_path FROM images WHERE root_id = ?2 AND status = 'present' ORDER BY relative_path",
+        )
+        .map_err(|error| error.to_string())?;
+    let paths = statement
+        .query_map(rusqlite::params![root_path, root_id], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(statement);
+    drop(connection);
+
+    let candidates =
+        resolve_auto_cull_path_candidates(paths, &rapidraw_lib::AppSettings::default());
+    let representative_paths = candidates
+        .iter()
+        .map(|candidate| candidate.representative_path.clone())
+        .collect::<Vec<_>>();
+    let job_id = rapidraw_lib::create_background_job(
+        &db_path,
+        "cull_analysis",
+        json!({ "rootId": root_id, "settings": settings.clone() }),
+    )?;
+    rapidraw_lib::update_job(
+        &db_path,
+        &job_id,
+        "running",
+        "Starting technical culling analysis",
+        0,
+        representative_paths.len() as i64,
+        None,
+        None,
+    )?;
+    let report = match cull_images_headless(
+        representative_paths,
+        settings.clone(),
+        rapidraw_lib::AppSettings::default(),
+        |current, total, path| {
+            let _ = rapidraw_lib::update_job(
+                &db_path,
+                &job_id,
+                "running",
+                "Analyzing images",
+                current as i64,
+                total as i64,
+                path,
+                None,
+            );
+        },
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            let _ = rapidraw_lib::update_job(
+                &db_path,
+                &job_id,
+                "failed",
+                &error,
+                0,
+                0,
+                None,
+                Some(&error),
+            );
+            return Err(error);
+        }
+    };
+
+    let mut duplicate_of = HashMap::new();
+    for group in &report.suggestions.similar_groups {
+        for duplicate in &group.duplicates {
+            duplicate_of.insert(duplicate.path.clone(), group.representative.path.clone());
+        }
+    }
+    let blurry = report
+        .suggestions
+        .blurry_images
+        .iter()
+        .map(|image| image.path.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let decisions = report
+        .analyses
+        .iter()
+        .map(|analysis| {
+            let (keep, reason, factors) = if let Some(representative) = duplicate_of.get(&analysis.path) {
+                (
+                    false,
+                    format!("duplicate_of:{representative}"),
+                    json!([{ "id": "duplicate", "label": "Near duplicate", "impact": "reject", "detail": format!("Lower-ranked than {representative}") }]),
+                )
+            } else if blurry.contains(analysis.path.as_str()) {
+                (
+                    false,
+                    "blurry".to_string(),
+                    json!([{ "id": "sharpness", "label": "Low sharpness", "impact": "reject", "detail": format!("Laplacian sharpness {:.1}; threshold {:.1}", analysis.sharpness_metric, settings.blur_threshold) }]),
+                )
+            } else {
+                (
+                    true,
+                    "unique".to_string(),
+                    json!([{ "id": "technical_quality", "label": "Technical quality", "impact": "context", "detail": format!("Score {:.2}", analysis.quality_score) }]),
+                )
+            };
+            (
+                analysis.path.clone(),
+                keep,
+                reason,
+                analysis.quality_score,
+                factors.to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let session_id = rapidraw_lib::record_cull_session(
+        &db_path,
+        &root_path,
+        &serde_json::to_string(&settings).map_err(|error| error.to_string())?,
+        &decisions,
+    )?;
+    rapidraw_lib::update_job(
+        &db_path,
+        &job_id,
+        "completed",
+        "Technical culling analysis complete",
+        report.analyses.len() as i64,
+        candidates.len() as i64,
+        None,
+        None,
+    )?;
+    Ok(json!({
+        "jobId": job_id,
+        "sessionId": session_id,
+        "state": "completed",
+        "logicalCaptures": candidates,
+        "report": report,
+    }))
 }
 
 fn export_tag_suggestions(arguments: &[String]) -> Result<serde_json::Value, String> {
