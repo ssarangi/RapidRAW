@@ -12,7 +12,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Serialize, Clone)]
@@ -21,6 +21,59 @@ struct AutoCullProgress {
     current: usize,
     total: usize,
     stage: String,
+}
+
+#[derive(Clone)]
+struct AutoCullJobContext {
+    database_path: std::path::PathBuf,
+    job_id: String,
+    control: std::sync::Arc<crate::app_state::BackgroundJobControl>,
+    last_persisted_progress: std::sync::Arc<AtomicUsize>,
+    progress_write_lock: std::sync::Arc<std::sync::Mutex<()>>,
+}
+
+fn report_auto_cull_progress(
+    app_handle: &AppHandle,
+    job: Option<&AutoCullJobContext>,
+    progress: AutoCullProgress,
+) {
+    let _ = app_handle.emit("auto-cull-plan-progress", progress.clone());
+    if let Some(job) = job {
+        // Progress events may originate from Rayon workers. Keep those UI updates
+        // responsive, but serialize and throttle SQLite writes to avoid lock
+        // contention with catalog scans and metadata updates.
+        let previous = job.last_persisted_progress.load(Ordering::Relaxed);
+        let should_persist = progress.current == 0
+            || progress.current >= progress.total
+            || progress.current.saturating_sub(previous) >= 8;
+        if !should_persist {
+            return;
+        }
+        job.last_persisted_progress
+            .store(progress.current, Ordering::Relaxed);
+        let Ok(_guard) = job.progress_write_lock.lock() else {
+            return;
+        };
+        let _ = crate::library_db::update_job(
+            &job.database_path,
+            &job.job_id,
+            "running",
+            &progress.stage,
+            progress.current as i64,
+            progress.total as i64,
+            None,
+            None,
+        );
+    }
+}
+
+async fn wait_for_auto_cull_job(job: Option<&AutoCullJobContext>) -> Result<(), String> {
+    match job {
+        Some(job) if !job.control.wait_until_runnable().await => {
+            Err("Auto-cull analysis cancelled".to_string())
+        }
+        _ => Ok(()),
+    }
 }
 
 const CULL_FEATURE_SET_VERSION: &str = "culling-v3-geometry";
@@ -114,6 +167,7 @@ async fn collect_profile_subject_factors(
     completed_before: usize,
     app_handle: AppHandle,
     ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+    job: Option<AutoCullJobContext>,
 ) -> Result<HashMap<String, SubjectAnalysis>, String> {
     let subject_mode = subject_mode.to_string();
     if matches!(subject_mode.as_str(), "general" | "landscape") || paths.is_empty() {
@@ -127,14 +181,16 @@ async fn collect_profile_subject_factors(
         if subject_mode == "people" {
             let detector = crate::face_detection::load_local_face_detector(&app_handle)?;
             for (index, path) in paths.into_iter().enumerate() {
-                let _ = app_handle.emit(
-                    "auto-cull-plan-progress",
-                    AutoCullProgress {
-                        current: completed_before + index + 1,
-                        total: completed_before + total,
-                        stage: "Detecting people...".to_string(),
-                    },
-                );
+                if let Some(job) = job.as_ref() {
+                    if !tauri::async_runtime::block_on(job.control.wait_until_runnable()) {
+                        return Err("Auto-cull analysis cancelled".to_string());
+                    }
+                }
+                report_auto_cull_progress(&app_handle, job.as_ref(), AutoCullProgress {
+                    current: completed_before + index + 1,
+                    total: completed_before + total,
+                    stage: "Detecting people...".to_string(),
+                });
                 let result = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned());
                 let face_analysis = result.ok().and_then(|permit| {
                     let analysis = crate::face_detection::analyze_faces_for_culling(
@@ -202,18 +258,20 @@ async fn collect_profile_subject_factors(
             None
         };
         for (index, path) in paths.into_iter().enumerate() {
-            let _ = app_handle.emit(
-                "auto-cull-plan-progress",
-                AutoCullProgress {
-                    current: completed_before + index + 1,
-                    total: completed_before + total,
-                    stage: if subject_mode == "birds" {
-                        "Identifying birds and wildlife...".to_string()
-                    } else {
-                        "Identifying wildlife and animals...".to_string()
-                    },
+            if let Some(job) = job.as_ref() {
+                if !tauri::async_runtime::block_on(job.control.wait_until_runnable()) {
+                    return Err("Auto-cull analysis cancelled".to_string());
+                }
+            }
+            report_auto_cull_progress(&app_handle, job.as_ref(), AutoCullProgress {
+                current: completed_before + index + 1,
+                total: completed_before + total,
+                stage: if subject_mode == "birds" {
+                    "Identifying birds and wildlife...".to_string()
+                } else {
+                    "Identifying wildlife and animals...".to_string()
                 },
-            );
+            });
             let image =
                 crate::face_detection::load_image_for_face_ai(Path::new(&path), &app_handle);
             let tags = image.and_then(|image| {
@@ -300,6 +358,7 @@ fn collect_catalog_subject_factors(
     completed_before: usize,
     app_handle: &AppHandle,
     state: &tauri::State<'_, AppState>,
+    job: Option<&AutoCullJobContext>,
 ) -> Result<HashMap<String, SubjectAnalysis>, String> {
     if matches!(subject_mode, "general" | "landscape") || paths.is_empty() {
         return Ok(HashMap::new());
@@ -311,8 +370,14 @@ fn collect_catalog_subject_factors(
     let mut factors = HashMap::new();
 
     for (index, path) in paths.into_iter().enumerate() {
-        let _ = app_handle.emit(
-            "auto-cull-plan-progress",
+        if let Some(job) = job {
+            if !tauri::async_runtime::block_on(job.control.wait_until_runnable()) {
+                return Err("Auto-cull analysis cancelled".to_string());
+            }
+        }
+        report_auto_cull_progress(
+            app_handle,
+            job,
             AutoCullProgress {
                 current: completed_before + index + 1,
                 total: completed_before + total,
@@ -508,6 +573,97 @@ pub async fn plan_auto_cull(
     app_handle: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<AutoCullPlan, String> {
+    let job = crate::library_db::active_library_path(&state)
+        .ok()
+        .and_then(|database_path| {
+            let payload = serde_json::json!({
+                "folderPath": folder_path.clone(),
+                "includeSubfolders": include_subfolders,
+                "settings": settings.clone(),
+                "rejectedFolderName": rejected_folder_name.clone(),
+                "deleteInsteadOfMove": delete_instead_of_move,
+            });
+            let job_id =
+                crate::library_db::create_background_job(&database_path, "cull_analysis", payload)
+                    .ok()?;
+            let control = crate::app_state::BackgroundJobControl::new();
+            state
+                .background_job_controls
+                .lock()
+                .unwrap()
+                .insert(job_id.clone(), control.clone());
+            Some(AutoCullJobContext {
+                database_path,
+                job_id,
+                control,
+                last_persisted_progress: std::sync::Arc::new(AtomicUsize::new(0)),
+                progress_write_lock: std::sync::Arc::new(std::sync::Mutex::new(())),
+            })
+        });
+    let result = plan_auto_cull_inner(
+        folder_path,
+        include_subfolders,
+        settings,
+        rejected_folder_name,
+        delete_instead_of_move,
+        catalog_image_ids,
+        app_handle.clone(),
+        state,
+        job.clone(),
+    )
+    .await;
+    if let Some(job) = job {
+        let (job_state, message, current, total, error) = match &result {
+            Ok(plan) => (
+                "completed",
+                "Culling analysis ready for review".to_string(),
+                plan.total_count as i64,
+                plan.total_count as i64,
+                None,
+            ),
+            Err(error) if error == "Auto-cull analysis cancelled" => {
+                ("cancelled", error.clone(), 0, 0, None)
+            }
+            Err(error) => (
+                "failed",
+                "Culling analysis failed".to_string(),
+                0,
+                0,
+                Some(error),
+            ),
+        };
+        let _ = crate::library_db::update_job(
+            &job.database_path,
+            &job.job_id,
+            job_state,
+            &message,
+            current,
+            total,
+            None,
+            error.map(String::as_str),
+        );
+        app_handle
+            .state::<AppState>()
+            .background_job_controls
+            .lock()
+            .unwrap()
+            .remove(&job.job_id);
+    }
+    result
+}
+
+async fn plan_auto_cull_inner(
+    folder_path: String,
+    include_subfolders: bool,
+    settings: CullingSettings,
+    rejected_folder_name: String,
+    delete_instead_of_move: bool,
+    catalog_image_ids: Option<HashMap<String, i64>>,
+    app_handle: AppHandle,
+    state: tauri::State<'_, AppState>,
+    job: Option<AutoCullJobContext>,
+) -> Result<AutoCullPlan, String> {
+    wait_for_auto_cull_job(job.as_ref()).await?;
     let images = if include_subfolders {
         crate::file_management::list_images_recursive(folder_path.clone(), app_handle.clone())?
     } else {
@@ -537,14 +693,24 @@ pub async fn plan_auto_cull(
         );
     let progress_total = total_count * if has_profile_analysis { 2 } else { 1 };
     let _ = app_handle.emit("auto-cull-plan-start", total_count);
+    report_auto_cull_progress(
+        &app_handle,
+        job.as_ref(),
+        AutoCullProgress {
+            current: 0,
+            total: progress_total,
+            stage: "Preparing culling analysis...".to_string(),
+        },
+    );
 
     let use_catalog_subjects = should_reuse_catalog_subjects(&settings, catalog_image_ids.as_ref());
     let ai_models = if settings.use_subject_detection
         && settings.subject_mode != "landscape"
         && !use_catalog_subjects
     {
-        let _ = app_handle.emit(
-            "auto-cull-plan-progress",
+        report_auto_cull_progress(
+            &app_handle,
+            job.as_ref(),
             AutoCullProgress {
                 current: 0,
                 total: progress_total,
@@ -584,8 +750,9 @@ pub async fn plan_auto_cull(
         }
     }
     if !successful.is_empty() {
-        let _ = app_handle.emit(
-            "auto-cull-plan-progress",
+        report_auto_cull_progress(
+            &app_handle,
+            job.as_ref(),
             AutoCullProgress {
                 current: successful.len(),
                 total: progress_total,
@@ -595,13 +762,24 @@ pub async fn plan_auto_cull(
     }
 
     let completed = AtomicUsize::new(successful.len());
+    let cancellation_requested = AtomicBool::new(false);
     let analysis_results: Vec<Result<(AutoCullCandidate, ImageAnalysisData), (String, String)>> =
         candidates_to_analyze
             .into_par_iter()
             .map(|candidate| {
+                if let Some(job) = job.as_ref() {
+                    if !tauri::async_runtime::block_on(job.control.wait_until_runnable()) {
+                        cancellation_requested.store(true, Ordering::Relaxed);
+                        return Err((
+                            candidate.representative_path.clone(),
+                            "Auto-cull analysis cancelled".to_string(),
+                        ));
+                    }
+                }
                 let n = completed.fetch_add(1, Ordering::Relaxed) + 1;
-                let _ = app_handle.emit(
-                    "auto-cull-plan-progress",
+                report_auto_cull_progress(
+                    &app_handle,
+                    job.as_ref(),
                     AutoCullProgress {
                         current: n,
                         total: progress_total,
@@ -621,6 +799,10 @@ pub async fn plan_auto_cull(
                 }
             })
             .collect();
+
+    if cancellation_requested.load(Ordering::Relaxed) {
+        return Err("Auto-cull analysis cancelled".to_string());
+    }
 
     let mut failed_paths = Vec::new();
     for res in analysis_results {
@@ -644,6 +826,7 @@ pub async fn plan_auto_cull(
         .iter()
         .map(|(candidate, _)| candidate.representative_path.clone())
         .collect();
+    wait_for_auto_cull_job(job.as_ref()).await?;
     let subject_factors = if !settings.use_subject_detection {
         HashMap::new()
     } else if use_catalog_subjects {
@@ -656,6 +839,7 @@ pub async fn plan_auto_cull(
             total_count,
             &app_handle,
             &state,
+            job.as_ref(),
         )?
     } else {
         collect_profile_subject_factors(
@@ -664,6 +848,7 @@ pub async fn plan_auto_cull(
             total_count,
             app_handle.clone(),
             state.ai_job_semaphore.clone(),
+            job.clone(),
         )
         .await?
     };
@@ -700,8 +885,9 @@ pub async fn plan_auto_cull(
         }
     }
 
-    let _ = app_handle.emit(
-        "auto-cull-plan-progress",
+    report_auto_cull_progress(
+        &app_handle,
+        job.as_ref(),
         AutoCullProgress {
             current: progress_total,
             total: progress_total,
@@ -1179,11 +1365,7 @@ mod tests {
             },
         };
 
-        store_catalog_cull_cache(
-            &database_path,
-            &image_ids,
-            &[(candidate, analysis)],
-        );
+        store_catalog_cull_cache(&database_path, &image_ids, &[(candidate, analysis)]);
         let cached = load_catalog_cull_cache(&database_path, &image_ids);
         assert_eq!(cached.len(), 1);
         assert_eq!(cached[&path].result.quality_score, 0.8);

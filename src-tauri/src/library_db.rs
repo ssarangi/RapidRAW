@@ -3113,6 +3113,40 @@ pub fn retry_background_job(
             crate::image_restoration::start_image_restoration(image_id, recipe, app_handle, state)
                 .map(|_| ())
         }
+        "cull_analysis" => {
+            let folder_path = payload
+                .get("folderPath")
+                .and_then(|value| value.as_str())
+                .ok_or_else(|| "Culling analysis job has no folder path".to_string())?
+                .to_string();
+            let include_subfolders = payload
+                .get("includeSubfolders")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let settings =
+                serde_json::from_value(payload.get("settings").cloned().unwrap_or_default())
+                    .map_err(|error| format!("Invalid culling analysis settings: {error}"))?;
+            let rejected_folder_name = payload
+                .get("rejectedFolderName")
+                .and_then(|value| value.as_str())
+                .unwrap_or("Rejected")
+                .to_string();
+            let delete_instead_of_move = payload
+                .get("deleteInsteadOfMove")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            tauri::async_runtime::block_on(crate::auto_cull::plan_auto_cull(
+                folder_path,
+                include_subfolders,
+                settings,
+                rejected_folder_name,
+                delete_instead_of_move,
+                None,
+                app_handle,
+                state,
+            ))
+            .map(|_| ())
+        }
         _ => Err(format!("Retry is not available for {kind}")),
     }
 }
