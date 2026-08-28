@@ -22,6 +22,8 @@ pub enum VisualModelAvailability {
 pub struct VisualModelArtifact {
     pub file_name: String,
     pub source_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -74,13 +76,24 @@ struct ArtifactFingerprint {
 static VERIFIED_PACKS: OnceLock<Mutex<HashMap<PathBuf, Vec<ArtifactFingerprint>>>> =
     OnceLock::new();
 
-fn artifact(file_name: &str) -> VisualModelArtifact {
+fn visual_artifact(
+    file_name: &str,
+    source_url: &str,
+    expected_sha256: Option<&str>,
+) -> VisualModelArtifact {
     VisualModelArtifact {
         file_name: file_name.to_string(),
-        source_url: format!(
-            "https://huggingface.co/benjaminjonard/ram-plus-onnx/resolve/main/{file_name}"
-        ),
+        source_url: source_url.to_string(),
+        expected_sha256: expected_sha256.map(ToString::to_string),
     }
+}
+
+fn artifact(file_name: &str) -> VisualModelArtifact {
+    visual_artifact(
+        file_name,
+        &format!("https://huggingface.co/benjaminjonard/ram-plus-onnx/resolve/main/{file_name}"),
+        None,
+    )
 }
 
 pub fn visual_model_packs() -> Vec<VisualModelPack> {
@@ -103,22 +116,26 @@ pub fn visual_model_packs() -> Vec<VisualModelPack> {
             task: "Wildlife and species classification".to_string(),
             availability: VisualModelAvailability::DirectDownload,
             artifacts: vec![
-                VisualModelArtifact {
-                    file_name: "vision_encoder.onnx".to_string(),
-                    source_url: "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/vision_encoder.onnx".to_string(),
-                },
-                VisualModelArtifact {
-                    file_name: "vision_encoder.onnx.data".to_string(),
-                    source_url: "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/vision_encoder.onnx.data".to_string(),
-                },
-                VisualModelArtifact {
-                    file_name: "species_embeddings.bin".to_string(),
-                    source_url: "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/species_embeddings.bin".to_string(),
-                },
-                VisualModelArtifact {
-                    file_name: "species_labels.json".to_string(),
-                    source_url: "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/species_labels.json".to_string(),
-                },
+                visual_artifact(
+                    "vision_encoder.onnx",
+                    "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/vision_encoder.onnx",
+                    None,
+                ),
+                visual_artifact(
+                    "vision_encoder.onnx.data",
+                    "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/vision_encoder.onnx.data",
+                    None,
+                ),
+                visual_artifact(
+                    "species_embeddings.bin",
+                    "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/species_embeddings.bin",
+                    None,
+                ),
+                visual_artifact(
+                    "species_labels.json",
+                    "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/species_labels.json",
+                    None,
+                ),
             ],
             license_name: "MIT".to_string(),
             license_url: "https://huggingface.co/imageomics/bioclip".to_string(),
@@ -131,7 +148,7 @@ pub fn visual_model_packs() -> Vec<VisualModelPack> {
             task: "RAW sensor denoising".to_string(),
             availability: VisualModelAvailability::BundleRequired,
             artifacts: vec![
-                VisualModelArtifact { file_name: "rawnind_bayer.onnx".to_string(), source_url: String::new() },
+                visual_artifact("rawnind_bayer.onnx", "", None),
             ],
             license_name: "GPL-3.0".to_string(),
             license_url: "https://arxiv.org/abs/2501.08924".to_string(),
@@ -144,7 +161,7 @@ pub fn visual_model_packs() -> Vec<VisualModelPack> {
             task: "RGB image denoising".to_string(),
             availability: VisualModelAvailability::BundleRequired,
             artifacts: vec![
-                VisualModelArtifact { file_name: "nafnet_sidd.onnx".to_string(), source_url: String::new() },
+                visual_artifact("nafnet_sidd.onnx", "", None),
             ],
             license_name: "MIT".to_string(),
             license_url: "https://github.com/megvii-research/NAFNet".to_string(),
@@ -473,6 +490,25 @@ pub async fn download_visual_model_pack(
             .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
         file.sync_all()
             .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
+
+        if let Some(ref expected) = artifact.expected_sha256 {
+            let actual = sha256_file(&temporary)
+                .map_err(|error| fail_download_job(&job, &state, error, current, total))?;
+            if !actual.eq_ignore_ascii_case(expected) {
+                let _ = fs::remove_file(&temporary);
+                return Err(fail_download_job(
+                    &job,
+                    &state,
+                    format!(
+                        "Checksum mismatch for {}: expected {expected}, got {actual}",
+                        artifact.file_name
+                    ),
+                    current,
+                    total,
+                ));
+            }
+        }
+
         fs::rename(&temporary, &target)
             .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
     }
