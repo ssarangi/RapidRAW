@@ -216,8 +216,18 @@ pub(crate) fn installed_face_model_path(
     pack_id: &str,
     file_name: &str,
 ) -> Result<PathBuf, String> {
-    let path = pack_dir(app_handle, pack_id)?.join(file_name);
-    if path.exists() {
+    installed_face_model_path_in_dir(&face_models_dir(app_handle)?, pack_id, file_name)
+}
+
+/// Resolves a face-model artifact from an explicit face-model root. Headless
+/// callers use this without constructing a Tauri application handle.
+pub fn installed_face_model_path_in_dir(
+    face_models_dir: &Path,
+    pack_id: &str,
+    file_name: &str,
+) -> Result<PathBuf, String> {
+    let path = face_models_dir.join(pack_id).join(file_name);
+    if path.is_file() {
         Ok(path)
     } else {
         Err(format!("Face model {pack_id} is not installed"))

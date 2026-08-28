@@ -742,6 +742,51 @@ fn run_face_recognition(
     job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
     ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 ) -> Result<(), String> {
+    run_face_recognition_with_loader(
+        db_path,
+        root_id,
+        model_path,
+        job_id,
+        job_control,
+        ai_semaphore,
+        |path| load_image_for_face_ai(path, app_handle),
+    )
+}
+
+/// Runs SFace embedding extraction without a Tauri window. Face crops are
+/// already persisted as database thumbnails by detection, so recognition only
+/// needs an app-independent image loader.
+pub fn run_face_recognition_headless(
+    db_path: &Path,
+    root_id: Option<i64>,
+    model_path: &Path,
+    job_id: &str,
+    job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
+    ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+) -> Result<(), String> {
+    run_face_recognition_with_loader(
+        db_path,
+        root_id,
+        model_path,
+        job_id,
+        job_control,
+        ai_semaphore,
+        load_image_for_local_ai,
+    )
+}
+
+fn run_face_recognition_with_loader<F>(
+    db_path: &Path,
+    root_id: Option<i64>,
+    model_path: &Path,
+    job_id: &str,
+    job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
+    ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+    load_image: F,
+) -> Result<(), String>
+where
+    F: Fn(&Path) -> Result<DynamicImage, String>,
+{
     let conn = rusqlite::Connection::open(db_path).map_err(|error| error.to_string())?;
     let mut sql = "SELECT f.id, r.absolute_path, i.relative_path, f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present' AND f.model_pack_id = 'opencv-yunet-sface' AND f.review_state <> 'rejected' AND f.embedding_id IS NULL".to_string();
     if root_id.is_some() {
@@ -821,7 +866,7 @@ fn run_face_recognition(
         let path = Path::new(&root).join(&relative);
         let current = index as i64 + 1;
         let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("image");
-        let image = match load_image_for_face_ai(&path, app_handle) {
+        let image = match load_image(&path) {
             Ok(image) => image,
             Err(e) => {
                 let _ = update_job(
@@ -929,6 +974,57 @@ fn run_face_detection(
     job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
     ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 ) -> Result<(), String> {
+    run_face_detection_with_loader(
+        db_path,
+        root_id,
+        model_path,
+        job_id,
+        job_control,
+        ai_semaphore,
+        |path| load_image_for_face_ai(path, app_handle),
+        |image, x, y, width, height, face_id| {
+            let _ = save_face_crop_image(image, x, y, width, height, face_id, app_handle);
+        },
+    )
+}
+
+/// Runs YuNet detection without a Tauri window. Database face thumbnails are
+/// retained; filesystem face crops are UI cache data and are intentionally not
+/// written by a headless command.
+pub fn run_face_detection_headless(
+    db_path: &Path,
+    root_id: Option<i64>,
+    model_path: &Path,
+    job_id: &str,
+    job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
+    ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+) -> Result<(), String> {
+    run_face_detection_with_loader(
+        db_path,
+        root_id,
+        model_path,
+        job_id,
+        job_control,
+        ai_semaphore,
+        load_image_for_local_ai,
+        |_, _, _, _, _, _| {},
+    )
+}
+
+fn run_face_detection_with_loader<F, S>(
+    db_path: &Path,
+    root_id: Option<i64>,
+    model_path: &Path,
+    job_id: &str,
+    job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
+    ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+    load_image: F,
+    save_crop: S,
+) -> Result<(), String>
+where
+    F: Fn(&Path) -> Result<DynamicImage, String>,
+    S: Fn(&DynamicImage, f64, f64, f64, f64, i64),
+{
     let conn = rusqlite::Connection::open(db_path).map_err(|error| error.to_string())?;
     let mut sql = "SELECT i.id, r.absolute_path, i.relative_path, i.folder_id, i.file_name, i.is_raw FROM images i JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present'".to_string();
     if root_id.is_some() {
@@ -1021,7 +1117,7 @@ fn run_face_detection(
         let path = Path::new(&primary.root).join(&primary.relative);
         let current = index as i64 + 1;
         let file_name = primary.file_name.as_str();
-        let (detections, loaded_image) = match load_image_for_face_ai(&path, app_handle) {
+        let (detections, loaded_image) = match load_image(&path) {
             Ok(image) => {
                 let _permit =
                     tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
@@ -1101,14 +1197,13 @@ fn run_face_detection(
             ).map_err(|error| error.to_string())?;
             let face_id = conn.last_insert_rowid();
             if let Some(ref img) = loaded_image {
-                let _ = save_face_crop_image(
+                save_crop(
                     img,
                     detection.x as f64,
                     detection.y as f64,
                     detection.width as f64,
                     detection.height as f64,
                     face_id,
-                    app_handle,
                 );
             }
 
@@ -1129,14 +1224,13 @@ fn run_face_detection(
                 );
                 let comp_face_id = conn.last_insert_rowid();
                 if let Some(ref img) = loaded_image {
-                    let _ = save_face_crop_image(
+                    save_crop(
                         img,
                         detection.x as f64,
                         detection.y as f64,
                         detection.width as f64,
                         detection.height as f64,
                         comp_face_id,
-                        app_handle,
                     );
                 }
             }

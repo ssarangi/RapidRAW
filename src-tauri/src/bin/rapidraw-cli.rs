@@ -3,6 +3,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use rapidraw_lib::BackgroundJobControl;
+use rapidraw_lib::face_detection::{run_face_detection_headless, run_face_recognition_headless};
+use rapidraw_lib::face_model_registry::installed_face_model_path_in_dir;
 use rapidraw_lib::face_model_registry::{InstalledFaceModelPack, face_model_packs};
 use rapidraw_lib::image_restoration::{
     RestorationRecipe, run_restoration_worker, validate_restoration_recipe,
@@ -36,6 +38,18 @@ fn numeric_argument(arguments: &[String], flag: &str) -> Result<i64, String> {
         .map_err(|_| format!("{flag} must be an integer"))
 }
 
+fn optional_numeric_argument(arguments: &[String], flag: &str) -> Result<Option<i64>, String> {
+    arguments
+        .windows(2)
+        .find(|pair| pair[0] == flag)
+        .map(|pair| {
+            pair[1]
+                .parse::<i64>()
+                .map_err(|_| format!("{flag} must be an integer"))
+        })
+        .transpose()
+}
+
 fn main() {
     let arguments: Vec<String> = env::args().skip(1).collect();
     let result = match arguments.first().map(String::as_str) {
@@ -46,6 +60,8 @@ fn main() {
         Some("jobs") if arguments.get(1).map(String::as_str) == Some("show") => show_job(&arguments),
         Some("faces") if arguments.get(1).map(String::as_str) == Some("status") => face_status(&arguments),
         Some("faces") if arguments.get(1).map(String::as_str) == Some("clusters") => face_clusters(&arguments),
+        Some("faces") if arguments.get(1).map(String::as_str) == Some("detect") => run_face_detection_cli(&arguments),
+        Some("faces") if arguments.get(1).map(String::as_str) == Some("recognize") => run_face_recognition_cli(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("status") => tag_status(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("top") => top_tags(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("export-suggestions") => export_tag_suggestions(&arguments),
@@ -59,7 +75,7 @@ fn main() {
         Some("models") if arguments.get(1).map(String::as_str) == Some("verify") => verify_installed_model(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("list") => list_derivatives(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("run") => run_restore_cli(&arguments),
-        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top|export-suggestions|run --database <catalog.db> | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
+        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli faces detect|recognize --database <catalog.db> --face-models-dir <models/face> [--root <id>] | rapidraw-cli tags status|top|export-suggestions|run --database <catalog.db> | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -232,6 +248,76 @@ fn face_clusters(arguments: &[String]) -> Result<serde_json::Value, String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     Ok(json!(clusters))
+}
+
+fn run_face_detection_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let db_path = database_argument(arguments)?;
+    let face_models_dir = PathBuf::from(named_argument(arguments, "--face-models-dir")?);
+    let root_id = optional_numeric_argument(arguments, "--root")?;
+    let model_path = installed_face_model_path_in_dir(
+        &face_models_dir,
+        "opencv-yunet-sface",
+        "face_detection_yunet_2023mar.onnx",
+    )?;
+    let job_id = rapidraw_lib::create_background_job(
+        &db_path,
+        "face_detection",
+        json!({ "rootId": root_id, "modelPackId": "opencv-yunet-sface", "headless": true }),
+    )?;
+    let control = BackgroundJobControl::new();
+    if let Err(error) = run_face_detection_headless(
+        &db_path,
+        root_id,
+        &model_path,
+        &job_id,
+        &control,
+        Arc::new(tokio::sync::Semaphore::new(1)),
+    ) {
+        let state = if error == "Face detection cancelled" {
+            "cancelled"
+        } else {
+            "failed"
+        };
+        let _ =
+            rapidraw_lib::update_job(&db_path, &job_id, state, &error, 0, 0, None, Some(&error));
+        return Err(error);
+    }
+    Ok(json!({ "jobId": job_id, "state": "completed" }))
+}
+
+fn run_face_recognition_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let db_path = database_argument(arguments)?;
+    let face_models_dir = PathBuf::from(named_argument(arguments, "--face-models-dir")?);
+    let root_id = optional_numeric_argument(arguments, "--root")?;
+    let model_path = installed_face_model_path_in_dir(
+        &face_models_dir,
+        "opencv-yunet-sface",
+        "face_recognition_sface_2021dec.onnx",
+    )?;
+    let job_id = rapidraw_lib::create_background_job(
+        &db_path,
+        "face_recognition",
+        json!({ "rootId": root_id, "modelPackId": "opencv-yunet-sface", "headless": true }),
+    )?;
+    let control = BackgroundJobControl::new();
+    if let Err(error) = run_face_recognition_headless(
+        &db_path,
+        root_id,
+        &model_path,
+        &job_id,
+        &control,
+        Arc::new(tokio::sync::Semaphore::new(1)),
+    ) {
+        let state = if error == "Face recognition cancelled" {
+            "cancelled"
+        } else {
+            "failed"
+        };
+        let _ =
+            rapidraw_lib::update_job(&db_path, &job_id, state, &error, 0, 0, None, Some(&error));
+        return Err(error);
+    }
+    Ok(json!({ "jobId": job_id, "state": "completed" }))
 }
 
 fn tag_status(arguments: &[String]) -> Result<serde_json::Value, String> {

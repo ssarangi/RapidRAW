@@ -19,7 +19,7 @@ mod culling;
 mod denoising;
 mod exif_processing;
 mod export_processing;
-mod face_detection;
+pub mod face_detection;
 pub mod face_model_registry;
 mod file_management;
 mod focus_stacking;
