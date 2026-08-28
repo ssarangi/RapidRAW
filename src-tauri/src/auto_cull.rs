@@ -28,7 +28,7 @@ async fn collect_profile_subject_factors(
     completed_before: usize,
     app_handle: AppHandle,
     ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
-) -> Result<HashMap<String, Vec<CullDecisionFactor>>, String> {
+) -> Result<HashMap<String, SubjectAnalysis>, String> {
     let subject_mode = subject_mode.to_string();
     if matches!(subject_mode.as_str(), "general" | "landscape") || paths.is_empty() {
         return Ok(HashMap::new());
@@ -50,16 +50,16 @@ async fn collect_profile_subject_factors(
                     },
                 );
                 let result = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned());
-                let face_count = result.ok().and_then(|permit| {
-                    let count = crate::face_detection::count_faces_for_culling(
+                let face_analysis = result.ok().and_then(|permit| {
+                    let analysis = crate::face_detection::analyze_faces_for_culling(
                         &detector,
                         Path::new(&path),
                         &app_handle,
                     );
                     drop(permit);
-                    count.ok()
+                    analysis.ok()
                 });
-                let (label, detail) = match face_count {
+                let (label, detail) = match face_analysis.as_ref().map(|analysis| analysis.face_count) {
                     Some(0) => (
                         "People detection",
                         "No faces detected by YuNet.".to_string(),
@@ -74,14 +74,36 @@ async fn collect_profile_subject_factors(
                         "Face analysis was unavailable for this image.".to_string(),
                     ),
                 };
-                factors.insert(
-                    path,
-                    vec![CullDecisionFactor {
+                let mut image_factors = vec![CullDecisionFactor {
                         id: "people_detection".to_string(),
                         label: label.to_string(),
                         detail,
                         impact: "context".to_string(),
-                    }],
+                    }];
+                if let Some(pose) = face_analysis.as_ref().and_then(|analysis| analysis.best_pose) {
+                    image_factors.push(CullDecisionFactor {
+                        id: "face_pose".to_string(),
+                        label: "Face pose and framing".to_string(),
+                        detail: format!(
+                            "YuNet landmark estimate: {:.0}% frontal, {:.0} degree roll, face covers {:.0}% of frame. Blink and expression are not evaluated by this model.",
+                            pose.frontal_score * 100.0,
+                            pose.roll_degrees,
+                            pose.frame_fraction * 100.0,
+                        ),
+                        impact: "context".to_string(),
+                    });
+                }
+                let pose_adjustment = face_analysis
+                    .as_ref()
+                    .and_then(|analysis| analysis.best_pose)
+                    .map(|pose| ((pose.frontal_score as f64 - 0.5) * 0.08).clamp(-0.04, 0.04))
+                    .unwrap_or_default();
+                factors.insert(
+                    path,
+                    SubjectAnalysis {
+                        factors: image_factors,
+                        quality_adjustment: pose_adjustment,
+                    },
                 );
             }
             return Ok(factors);
@@ -171,7 +193,13 @@ async fn collect_profile_subject_factors(
                     impact: "context".to_string(),
                 }),
             }
-            factors.insert(path, image_factors);
+            factors.insert(
+                path,
+                SubjectAnalysis {
+                    factors: image_factors,
+                    quality_adjustment: 0.0,
+                },
+            );
         }
         Ok(factors)
     })
@@ -186,7 +214,7 @@ fn collect_catalog_subject_factors(
     completed_before: usize,
     app_handle: &AppHandle,
     state: &tauri::State<'_, AppState>,
-) -> Result<HashMap<String, Vec<CullDecisionFactor>>, String> {
+) -> Result<HashMap<String, SubjectAnalysis>, String> {
     if matches!(subject_mode, "general" | "landscape") || paths.is_empty() {
         return Ok(HashMap::new());
     }
@@ -209,6 +237,7 @@ fn collect_catalog_subject_factors(
             continue;
         };
         let mut image_factors = Vec::new();
+        let mut pose_adjustment = 0.0;
 
         if subject_mode == "people" {
             let face_count: i64 = conn
@@ -228,6 +257,42 @@ fn collect_catalog_subject_factors(
                 },
                 impact: "context".to_string(),
             });
+            let mut pose_statement = conn
+                .prepare(
+                    "SELECT landmarks_json, bbox_width, bbox_height FROM faces WHERE image_id = ?1 AND review_state != 'rejected'",
+                )
+                .map_err(|error| error.to_string())?;
+            let best_pose = pose_statement
+                .query_map([image_id], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, f64>(2)?,
+                    ))
+                })
+                .map_err(|error| error.to_string())?
+                .filter_map(Result::ok)
+                .filter_map(|(landmarks, width, height)| {
+                    crate::face_detection::estimate_stored_face_pose(&landmarks, width, height)
+                })
+                .max_by(|left, right| {
+                    (left.frontal_score * 0.8 + left.frame_fraction * 0.2)
+                        .total_cmp(&(right.frontal_score * 0.8 + right.frame_fraction * 0.2))
+                });
+            if let Some(pose) = best_pose {
+                pose_adjustment = ((pose.frontal_score as f64 - 0.5) * 0.08).clamp(-0.04, 0.04);
+                image_factors.push(CullDecisionFactor {
+                    id: "face_pose".to_string(),
+                    label: "Face pose and framing".to_string(),
+                    detail: format!(
+                        "Stored YuNet landmark estimate: {:.0}% frontal, {:.0} degree roll, face covers {:.0}% of frame. Blink and expression are not evaluated by this model.",
+                        pose.frontal_score * 100.0,
+                        pose.roll_degrees,
+                        pose.frame_fraction * 100.0,
+                    ),
+                    impact: "context".to_string(),
+                });
+            }
         } else {
             let mut tags_stmt = conn
                 .prepare(
@@ -272,7 +337,13 @@ fn collect_catalog_subject_factors(
                 }
             }
         }
-        factors.insert(path, image_factors);
+        factors.insert(
+            path,
+            SubjectAnalysis {
+                factors: image_factors,
+                quality_adjustment: pose_adjustment,
+            },
+        );
     }
 
     Ok(factors)
@@ -297,6 +368,12 @@ pub struct CullDecisionFactor {
     pub label: String,
     pub detail: String,
     pub impact: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SubjectAnalysis {
+    factors: Vec<CullDecisionFactor>,
+    quality_adjustment: f64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -470,6 +547,20 @@ pub async fn plan_auto_cull(
         .await?
     };
 
+    // Pose/framing is intentionally a bounded tie-breaker. It only applies
+    // to the people profile and cannot turn a technical reject into a keep.
+    let mut subject_adjustments: HashMap<String, f64> = HashMap::new();
+    for (_, analysis) in &mut successful {
+        if let Some(subject) = subject_factors.get(&analysis.result.path) {
+            if subject.quality_adjustment != 0.0 {
+                let baseline = analysis.result.quality_score;
+                let adjusted = (baseline + subject.quality_adjustment).clamp(0.0, 1.0);
+                subject_adjustments.insert(analysis.result.path.clone(), adjusted - baseline);
+                analysis.result.quality_score = adjusted;
+            }
+        }
+    }
+
     let personalization = crate::library_db::active_library_path(&state)
         .ok()
         .and_then(|db_path| {
@@ -596,6 +687,17 @@ pub async fn plan_auto_cull(
                     ),
                     impact: if keep { "context".to_string() } else { "supporting".to_string() },
                 });
+                if let Some(composition) = analysis.subject_composition_metric {
+                    decision_factors.push(CullDecisionFactor {
+                        id: "subject_geometry".to_string(),
+                        label: "Subject placement cue".to_string(),
+                        detail: format!(
+                            "U-2-Net mask placement score {composition:.2}; detected subject edge contact {:.0}%. This is a minor tie-breaker, not an aesthetic verdict.",
+                            analysis.subject_edge_contact_ratio.unwrap_or_default() * 100.0,
+                        ),
+                        impact: "context".to_string(),
+                    });
+                }
             }
             if let Some(adjustment) = personalization_adjustments.get(&candidate.representative_path) {
                 decision_factors.push(CullDecisionFactor {
@@ -605,8 +707,16 @@ pub async fn plan_auto_cull(
                     impact: "context".to_string(),
                 });
             }
-            if let Some(factors) = subject_factors.get(&candidate.representative_path) {
-                decision_factors.extend(factors.iter().cloned());
+            if let Some(adjustment) = subject_adjustments.get(&candidate.representative_path) {
+                decision_factors.push(CullDecisionFactor {
+                    id: "face_pose_adjustment".to_string(),
+                    label: "Face pose tie-breaker".to_string(),
+                    detail: format!("People-profile pose/framing adjusted the technical score by {adjustment:+.2}."),
+                    impact: "context".to_string(),
+                });
+            }
+            if let Some(subject) = subject_factors.get(&candidate.representative_path) {
+                decision_factors.extend(subject.factors.iter().cloned());
             }
 
             // Only relevant for the move path - deleted files go to the

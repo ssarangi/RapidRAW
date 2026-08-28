@@ -633,6 +633,9 @@ export interface ImageAnalysisResult {
   qualityScore: number;
   sharpnessMetric: number;
   centerFocusMetric: number;
+  subjectFocusMetric?: number | null;
+  subjectCompositionMetric?: number | null;
+  subjectEdgeContactRatio?: number | null;
   exposureMetric: number;
   width: number;
   height: number;

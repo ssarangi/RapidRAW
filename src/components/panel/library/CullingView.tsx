@@ -1106,6 +1106,7 @@ export default function CullingView(props: any) {
   const [cullError, setCullError] = useState<string | null>(null);
   const [isApplyingCull, setIsApplyingCull] = useState(false);
   const [decisionFeedbackReason, setDecisionFeedbackReason] = useState('');
+  const [isCompareMode, setIsCompareMode] = useState(false);
   const cullGridRef = useRef<HTMLDivElement>(null);
   const marqueeStart = useRef<{ x: number; y: number; additive: boolean; initialSelection: string[] } | null>(null);
   const marqueeMoved = useRef(false);
@@ -1466,6 +1467,7 @@ export default function CullingView(props: any) {
         deleteInsteadOfMove: false,
         catalogImageIds: Object.keys(catalogImageIds).length > 0 ? catalogImageIds : null,
       });
+      setIsCompareMode(false);
       setLocalCullPlan(plan);
     } catch (error) {
       setCullError(String(error));
@@ -1628,9 +1630,9 @@ export default function CullingView(props: any) {
             <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-2">Analyze a shoot, review the decisions, then keep full control of what changes.</Text>
             <button className="mt-5 inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm text-white hover:brightness-110" onClick={() => void chooseCullFolder()}><FolderOpen size={16} /> Select folder</button>
           </div>
-        ) : displayCount === 0 || localCullPlan ? (
+        ) : displayCount === 0 || (localCullPlan && !isCompareMode) ? (
           <div className="w-full h-full overflow-y-auto p-3">
-            <div className="mb-3 flex items-center justify-between"><Text variant={TextVariants.small} color={TextColors.secondary}>{cullImageList.length} images</Text><Text variant={TextVariants.small} color={TextColors.secondary}>Select frames to inspect or compare</Text></div>
+            <div className="mb-3 flex items-center justify-between gap-3"><Text variant={TextVariants.small} color={TextColors.secondary}>{cullImageList.length} images</Text><div className="flex items-center gap-2">{displayCount > 0 && <button className="rounded border border-border-color px-2 py-1 text-xs text-text-primary hover:bg-surface" onClick={() => setIsCompareMode(true)}>{displayCount === 1 ? 'Inspect selected' : `Compare ${displayCount} selected`}</button>}<Text variant={TextVariants.small} color={TextColors.secondary}>Select frames to inspect or compare</Text></div></div>
             <div ref={cullGridRef} className="relative grid select-none grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-3" onPointerDown={beginGridSelection} onPointerMove={extendGridSelection} onPointerUp={endGridSelection} onPointerCancel={endGridSelection} onClickCapture={(event) => { if (marqueeMoved.current) { event.preventDefault(); event.stopPropagation(); marqueeMoved.current = false; } }}>
               {marqueeBounds && <div className="pointer-events-none absolute z-20 border border-accent bg-accent/15" style={marqueeBounds} />}
               {cullImageList.map((image: ImageFile) => {
@@ -1643,9 +1645,11 @@ export default function CullingView(props: any) {
             </div>
           </div>
         ) : (
-          <div
-            className={clsx(
-              'grid gap-2 w-full h-full p-2',
+          <div className="flex h-full w-full flex-col gap-2 p-2">
+            {localCullPlan && <div className="flex shrink-0 items-center justify-between px-1"><Text variant={TextVariants.small} color={TextColors.secondary}>{displayCount === 1 ? 'Inspection view' : `Comparing ${displayCount} frames`}</Text><button className="rounded border border-border-color px-2 py-1 text-xs text-text-primary hover:bg-surface" onClick={() => setIsCompareMode(false)}>Back to review grid</button></div>}
+            <div
+              className={clsx(
+              'grid min-h-0 flex-1 gap-2',
               displayCount === 1 && 'grid-cols-1 grid-rows-1',
               displayCount === 2 && 'grid-cols-2 grid-rows-1',
               displayCount === 3 && 'grid-cols-2 grid-rows-2',
@@ -1653,7 +1657,7 @@ export default function CullingView(props: any) {
               displayCount === 5 && 'grid-cols-3 grid-rows-2',
               displayCount === 6 && 'grid-cols-3 grid-rows-2',
             )}
-          >
+            >
             {displayImages.map((img: ImageFile, index: number) => (
               <CullingPreview
                 key={img.path}
@@ -1674,6 +1678,7 @@ export default function CullingView(props: any) {
                 setShowInfoBar={setShowInfoBar}
               />
             ))}
+            </div>
           </div>
         )}
       </div>

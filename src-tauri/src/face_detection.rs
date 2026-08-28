@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use image::{DynamicImage, imageops::FilterType};
+use image::{imageops::FilterType, DynamicImage};
 use ndarray::Array4;
 use ort::session::Session;
 use ort::value::Tensor;
@@ -26,6 +26,60 @@ struct Detection {
     landmarks: [[f32; 2]; 5],
 }
 
+/// Geometry available from YuNet's five landmarks. This is deliberately a
+/// pose/framing estimate, not an eye-state or expression classifier.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FacePoseEstimate {
+    pub frontal_score: f32,
+    pub roll_degrees: f32,
+    pub frame_fraction: f32,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CullingFaceAnalysis {
+    pub face_count: usize,
+    pub best_pose: Option<FacePoseEstimate>,
+}
+
+fn estimate_face_pose(
+    landmarks: [[f32; 2]; 5],
+    bbox_width: f32,
+    bbox_height: f32,
+) -> Option<FacePoseEstimate> {
+    let right_eye = landmarks[0];
+    let left_eye = landmarks[1];
+    let nose = landmarks[2];
+    let eye_dx = left_eye[0] - right_eye[0];
+    let eye_dy = left_eye[1] - right_eye[1];
+    let eye_distance = (eye_dx.powi(2) + eye_dy.powi(2)).sqrt();
+    if !eye_distance.is_finite() || eye_distance <= f32::EPSILON {
+        return None;
+    }
+
+    let eye_midpoint_x = (left_eye[0] + right_eye[0]) * 0.5;
+    // A face is most frontal when the nose lies near the eye midpoint. This
+    // cannot measure 3D head pose, but it is a useful conservative ranking
+    // signal for otherwise near-identical people frames.
+    let normalized_nose_offset = ((nose[0] - eye_midpoint_x).abs() / eye_distance).min(1.0);
+    let frontal_score = (1.0 - normalized_nose_offset * 1.35).clamp(0.0, 1.0);
+    let roll_degrees = eye_dy.atan2(eye_dx).to_degrees().abs();
+    let frame_fraction = (bbox_width.max(0.0) * bbox_height.max(0.0)).clamp(0.0, 1.0);
+    Some(FacePoseEstimate {
+        frontal_score,
+        roll_degrees,
+        frame_fraction,
+    })
+}
+
+pub(crate) fn estimate_stored_face_pose(
+    landmarks_json: &str,
+    bbox_width: f64,
+    bbox_height: f64,
+) -> Option<FacePoseEstimate> {
+    let landmarks = serde_json::from_str::<[[f32; 2]; 5]>(landmarks_json).ok()?;
+    estimate_face_pose(landmarks, bbox_width as f32, bbox_height as f32)
+}
+
 fn intersection_over_union(a: &Detection, b: &Detection) -> f32 {
     let left = a.x.max(b.x);
     let top = a.y.max(b.y);
@@ -40,7 +94,8 @@ fn detect_yunet(image: &DynamicImage, session: &mut Session) -> Result<Vec<Detec
     if original_width == 0 || original_height == 0 {
         return Ok(Vec::new());
     }
-    let scale = (INPUT_SIZE as f32 / original_width as f32).min(INPUT_SIZE as f32 / original_height as f32);
+    let scale =
+        (INPUT_SIZE as f32 / original_width as f32).min(INPUT_SIZE as f32 / original_height as f32);
     let scaled_w = ((original_width as f32 * scale).round() as u32).clamp(1, INPUT_SIZE);
     let scaled_h = ((original_height as f32 * scale).round() as u32).clamp(1, INPUT_SIZE);
     let pad_x = (INPUT_SIZE - scaled_w) / 2;
@@ -64,7 +119,11 @@ fn detect_yunet(image: &DynamicImage, session: &mut Session) -> Result<Vec<Detec
     // Stride 8:  cls=0, obj=3, bbox=6, kps=9
     // Stride 16: cls=1, obj=4, bbox=7, kps=10
     // Stride 32: cls=2, obj=5, bbox=8, kps=11
-    let strides = [(8u32, 0, 3, 6, 9), (16u32, 1, 4, 7, 10), (32u32, 2, 5, 8, 11)];
+    let strides = [
+        (8u32, 0, 3, 6, 9),
+        (16u32, 1, 4, 7, 10),
+        (32u32, 2, 5, 8, 11),
+    ];
     let mut candidates = Vec::new();
 
     for (stride, cls_idx, obj_idx, bbox_idx, kps_idx) in strides {
@@ -131,7 +190,9 @@ fn detect_yunet(image: &DynamicImage, session: &mut Session) -> Result<Vec<Detec
 
             // Geometric landmark validation:
             // 0: right eye, 1: left eye, 2: nose tip, 3: right mouth, 4: left mouth
-            let eye_dist = ((landmarks[0][0] - landmarks[1][0]).powi(2) + (landmarks[0][1] - landmarks[1][1]).powi(2)).sqrt();
+            let eye_dist = ((landmarks[0][0] - landmarks[1][0]).powi(2)
+                + (landmarks[0][1] - landmarks[1][1]).powi(2))
+            .sqrt();
             if eye_dist < norm_w * 0.10 {
                 continue;
             }
@@ -167,7 +228,9 @@ pub(crate) struct LocalFaceDetector {
     session: std::sync::Mutex<Session>,
 }
 
-pub(crate) fn load_local_face_detector(app_handle: &AppHandle) -> Result<LocalFaceDetector, String> {
+pub(crate) fn load_local_face_detector(
+    app_handle: &AppHandle,
+) -> Result<LocalFaceDetector, String> {
     let model_path = crate::face_model_registry::installed_face_model_path(
         app_handle,
         "opencv-yunet-sface",
@@ -177,17 +240,35 @@ pub(crate) fn load_local_face_detector(app_handle: &AppHandle) -> Result<LocalFa
         .map_err(|error| error.to_string())?
         .commit_from_file(model_path)
         .map_err(|error| error.to_string())?;
-    Ok(LocalFaceDetector { session: std::sync::Mutex::new(session) })
+    Ok(LocalFaceDetector {
+        session: std::sync::Mutex::new(session),
+    })
 }
 
-pub(crate) fn count_faces_for_culling(
+pub(crate) fn analyze_faces_for_culling(
     detector: &LocalFaceDetector,
     path: &Path,
     app_handle: &AppHandle,
-) -> Result<usize, String> {
+) -> Result<CullingFaceAnalysis, String> {
     let image = load_image_for_face_ai(path, app_handle)?;
-    let mut session = detector.session.lock().map_err(|_| "Face detector session lock was poisoned".to_string())?;
-    Ok(detect_yunet(&image, &mut session)?.len())
+    let mut session = detector
+        .session
+        .lock()
+        .map_err(|_| "Face detector session lock was poisoned".to_string())?;
+    let detections = detect_yunet(&image, &mut session)?;
+    let best_pose = detections
+        .iter()
+        .filter_map(|detection| {
+            estimate_face_pose(detection.landmarks, detection.width, detection.height)
+        })
+        .max_by(|left, right| {
+            (left.frontal_score * 0.8 + left.frame_fraction * 0.2)
+                .total_cmp(&(right.frontal_score * 0.8 + right.frame_fraction * 0.2))
+        });
+    Ok(CullingFaceAnalysis {
+        face_count: detections.len(),
+        best_pose,
+    })
 }
 
 fn normalize_embedding(mut values: Vec<f32>) -> Result<Vec<f32>, String> {
@@ -465,7 +546,9 @@ pub fn load_image_for_face_ai(path: &Path, app_handle: &AppHandle) -> Result<Dyn
     if crate::formats::is_raw_file(path) {
         // 1. Comprehensive multi-IFD TIFF/RAF/ARW embedded JPEG extraction
         if let Ok(file_bytes) = std::fs::read(path) {
-            if let Some(img) = crate::image_loader::safe_embedded_preview_fallback(&file_bytes, &path_str) {
+            if let Some(img) =
+                crate::image_loader::safe_embedded_preview_fallback(&file_bytes, &path_str)
+            {
                 if img.width() >= 800 || img.height() >= 800 {
                     return Ok(img);
                 }
@@ -481,7 +564,10 @@ pub fn load_image_for_face_ai(path: &Path, app_handle: &AppHandle) -> Result<Dyn
             }
         }
         // 3. Extract rawler preview
-        if let Ok(img) = rawler::analyze::extract_preview_pixels(path, &rawler::decoders::RawDecodeParams::default()) {
+        if let Ok(img) = rawler::analyze::extract_preview_pixels(
+            path,
+            &rawler::decoders::RawDecodeParams::default(),
+        ) {
             return Ok(img);
         }
         // 4. Try embedded preview with lower res threshold
@@ -749,7 +835,7 @@ fn run_face_recognition(
                     None,
                 );
                 embedding
-            },
+            }
             Err(e) => {
                 let _ = update_job(
                     db_path,
@@ -864,14 +950,18 @@ fn run_face_detection(
     };
 
     // Group images by (folder_id, lower(file_stem)) to identify RAW+JPG pairs
-    let mut paired_groups: std::collections::BTreeMap<(i64, String), Vec<ScannedImageRecord>> = std::collections::BTreeMap::new();
+    let mut paired_groups: std::collections::BTreeMap<(i64, String), Vec<ScannedImageRecord>> =
+        std::collections::BTreeMap::new();
     for item in raw_images {
         let stem = Path::new(&item.file_name)
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or(&item.file_name)
             .to_lowercase();
-        paired_groups.entry((item.folder_id, stem)).or_default().push(item);
+        paired_groups
+            .entry((item.folder_id, stem))
+            .or_default()
+            .push(item);
     }
 
     // For each group, prioritize JPG (raster) over RAW as the primary scan target
@@ -915,14 +1005,15 @@ fn run_face_detection(
         let file_name = primary.file_name.as_str();
         let (detections, loaded_image) = match load_image_for_face_ai(&path, app_handle) {
             Ok(image) => {
-                let _permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
+                let _permit =
+                    tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
                 let res = detect_yunet(&image, &mut session);
                 drop(_permit);
                 match res {
                     Ok(detections) => (detections, Some(image)),
                     Err(e) => return Err(e),
                 }
-            },
+            }
             Err(e) => {
                 let _ = update_job(
                     db_path,
@@ -940,7 +1031,10 @@ fn run_face_detection(
         let face_count = detections.len();
         let detection_msg = match face_count {
             0 => format!("{file_name}: No faces detected"),
-            1 => format!("{file_name}: 1 face detected ({:.0}% confidence)", detections[0].confidence * 100.0),
+            1 => format!(
+                "{file_name}: 1 face detected ({:.0}% confidence)",
+                detections[0].confidence * 100.0
+            ),
             n => format!("{file_name}: {n} faces detected"),
         };
         let _ = update_job(
@@ -962,7 +1056,15 @@ fn run_face_detection(
 
         for detection in detections {
             let thumb_bytes = if let Some(ref img) = loaded_image {
-                extract_square_face_crop_jpeg(img, detection.x as f64, detection.y as f64, detection.width as f64, detection.height as f64, 256).ok()
+                extract_square_face_crop_jpeg(
+                    img,
+                    detection.x as f64,
+                    detection.y as f64,
+                    detection.width as f64,
+                    detection.height as f64,
+                    256,
+                )
+                .ok()
             } else {
                 None
             };
@@ -981,7 +1083,15 @@ fn run_face_detection(
             ).map_err(|error| error.to_string())?;
             let face_id = conn.last_insert_rowid();
             if let Some(ref img) = loaded_image {
-                let _ = save_face_crop_image(img, detection.x as f64, detection.y as f64, detection.width as f64, detection.height as f64, face_id, app_handle);
+                let _ = save_face_crop_image(
+                    img,
+                    detection.x as f64,
+                    detection.y as f64,
+                    detection.width as f64,
+                    detection.height as f64,
+                    face_id,
+                    app_handle,
+                );
             }
 
             // Mirror face detection to companion RAW images in the same pair
@@ -1001,7 +1111,15 @@ fn run_face_detection(
                 );
                 let comp_face_id = conn.last_insert_rowid();
                 if let Some(ref img) = loaded_image {
-                    let _ = save_face_crop_image(img, detection.x as f64, detection.y as f64, detection.width as f64, detection.height as f64, comp_face_id, app_handle);
+                    let _ = save_face_crop_image(
+                        img,
+                        detection.x as f64,
+                        detection.y as f64,
+                        detection.width as f64,
+                        detection.height as f64,
+                        comp_face_id,
+                        app_handle,
+                    );
                 }
             }
         }
@@ -1070,22 +1188,73 @@ mod tests {
     }
 
     #[test]
+    fn face_pose_estimate_rewards_centered_nose_and_small_roll() {
+        let frontal = estimate_face_pose(
+            [
+                [0.40, 0.40],
+                [0.60, 0.40],
+                [0.50, 0.52],
+                [0.43, 0.63],
+                [0.57, 0.63],
+            ],
+            0.30,
+            0.30,
+        )
+        .unwrap();
+        let turned = estimate_face_pose(
+            [
+                [0.40, 0.40],
+                [0.60, 0.40],
+                [0.57, 0.52],
+                [0.43, 0.63],
+                [0.57, 0.63],
+            ],
+            0.30,
+            0.30,
+        )
+        .unwrap();
+        assert!(frontal.frontal_score > turned.frontal_score);
+        assert!(frontal.roll_degrees < 0.01);
+    }
+
+    #[test]
+    fn stored_face_pose_rejects_invalid_landmarks() {
+        assert!(estimate_stored_face_pose("not-json", 0.2, 0.2).is_none());
+    }
+
+    #[test]
     fn test_yunet_detection() {
-        let model_path = Path::new("/home/ssarangi/.local/share/io.github.CyberTimon.RapidRAW/models/face/opencv-yunet-sface/face_detection_yunet_2023mar.onnx");
+        let model_path = Path::new(
+            "/home/ssarangi/.local/share/io.github.CyberTimon.RapidRAW/models/face/opencv-yunet-sface/face_detection_yunet_2023mar.onnx",
+        );
         if !model_path.exists() {
             return;
         }
         let _ = ort::init().commit();
-        let mut session = Session::builder().unwrap().commit_from_file(model_path).unwrap();
-        
+        let mut session = Session::builder()
+            .unwrap()
+            .commit_from_file(model_path)
+            .unwrap();
+
         let test_img_path = "/home/ssarangi/Pictures/Shadow & Simba & Sachit & Soumya/DSCF8273.JPG";
         if let Ok(img) = image::open(test_img_path) {
             let detections = detect_yunet(&img, &mut session).unwrap();
             println!("test_yunet_detection found {} faces:", detections.len());
             for (i, det) in detections.iter().enumerate() {
-                println!("  Face {i}: conf={:.2}%, bbox=({:.3}, {:.3}, {:.3}, {:.3})", det.confidence * 100.0, det.x, det.y, det.width, det.height);
+                println!(
+                    "  Face {i}: conf={:.2}%, bbox=({:.3}, {:.3}, {:.3}, {:.3})",
+                    det.confidence * 100.0,
+                    det.x,
+                    det.y,
+                    det.width,
+                    det.height
+                );
             }
-            assert_eq!(detections.len(), 1, "Expected exactly 1 face detected in test photo");
+            assert_eq!(
+                detections.len(),
+                1,
+                "Expected exactly 1 face detected in test photo"
+            );
         }
     }
 }

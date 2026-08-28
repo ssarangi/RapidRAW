@@ -1,14 +1,14 @@
-use crate::ai_processing::{AiModels, get_or_init_ai_models, run_u2netp_model};
+use crate::ai_processing::{get_or_init_ai_models, run_u2netp_model, AiModels};
 use crate::app_settings::load_settings;
 use crate::app_state::AppState;
-use image::{GenericImageView, GrayImage, imageops};
+use image::{imageops, GenericImageView, GrayImage};
 use image_hasher::{HashAlg, HasherConfig};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
 use crate::image_loader;
@@ -50,6 +50,8 @@ pub struct ImageAnalysisResult {
     pub sharpness_metric: f64,
     pub center_focus_metric: f64,
     pub subject_focus_metric: Option<f64>,
+    pub subject_composition_metric: Option<f64>,
+    pub subject_edge_contact_ratio: Option<f64>,
     pub exposure_metric: f64,
     pub width: u32,
     pub height: u32,
@@ -82,9 +84,13 @@ pub(crate) struct ImageAnalysisData {
     pub(crate) result: ImageAnalysisResult,
 }
 
-const WEIGHT_SHARPNESS: f64 = 0.40;
-const WEIGHT_CENTER_FOCUS: f64 = 0.35;
-const WEIGHT_EXPOSURE: f64 = 0.25;
+const WEIGHT_SHARPNESS: f64 = 0.38;
+const WEIGHT_CENTER_FOCUS: f64 = 0.32;
+const WEIGHT_EXPOSURE: f64 = 0.22;
+// This intentionally remains a minor cue. Rule-of-thirds placement is not a
+// universal aesthetic rule, so it may only break ties between technically
+// comparable frames with a confident foreground mask.
+const WEIGHT_SUBJECT_COMPOSITION: f64 = 0.08;
 
 // U-2-Netp outputs a min-max normalized 0-255 saliency mask; treat anything
 // above this as "subject" when computing subject-aware sharpness.
@@ -174,6 +180,57 @@ fn calculate_masked_laplacian_variance(image: &GrayImage, mask: &GrayImage) -> O
     )
 }
 
+/// Returns a conservative composition cue derived from the existing saliency
+/// mask. It rewards a compact subject near a thirds intersection and reports
+/// how much of the detected subject touches the image edge. It is not an
+/// aesthetic classifier and callers should retain the raw measurements.
+fn calculate_subject_composition_metrics(mask: &GrayImage) -> Option<(f64, f64)> {
+    let (width, height) = mask.dimensions();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let edge_margin_x = ((width as f32 * 0.04).round() as u32).max(1);
+    let edge_margin_y = ((height as f32 * 0.04).round() as u32).max(1);
+    let mut pixels = 0usize;
+    let mut edge_pixels = 0usize;
+    let mut sum_x = 0f64;
+    let mut sum_y = 0f64;
+    for y in 0..height {
+        for x in 0..width {
+            if mask.get_pixel(x, y)[0] < SUBJECT_MASK_THRESHOLD {
+                continue;
+            }
+            pixels += 1;
+            sum_x += x as f64;
+            sum_y += y as f64;
+            if x < edge_margin_x
+                || x >= width.saturating_sub(edge_margin_x)
+                || y < edge_margin_y
+                || y >= height.saturating_sub(edge_margin_y)
+            {
+                edge_pixels += 1;
+            }
+        }
+    }
+    if pixels < MIN_SUBJECT_PIXELS {
+        return None;
+    }
+    let center_x = sum_x / pixels as f64 / width as f64;
+    let center_y = sum_y / pixels as f64 / height as f64;
+    let nearest_thirds_distance = [1.0 / 3.0, 2.0 / 3.0]
+        .into_iter()
+        .flat_map(|third_x| {
+            [1.0 / 3.0, 2.0 / 3.0].into_iter().map(move |third_y| {
+                ((center_x - third_x).powi(2) + (center_y - third_y).powi(2)).sqrt()
+            })
+        })
+        .fold(f64::INFINITY, f64::min);
+    let thirds_score = (1.0 - nearest_thirds_distance / 0.5).clamp(0.0, 1.0);
+    let edge_contact_ratio = edge_pixels as f64 / pixels as f64;
+    let score = (thirds_score * 0.7 + (1.0 - edge_contact_ratio) * 0.3).clamp(0.0, 1.0);
+    Some((score, edge_contact_ratio))
+}
+
 fn calculate_exposure_metric(image: &GrayImage) -> f64 {
     let histogram = imageproc::stats::histogram(image);
     let total_pixels = (image.width() * image.height()) as f64;
@@ -243,21 +300,32 @@ pub(crate) fn analyze_image(
     // same thumbnail and measure sharpness only where the subject actually
     // is, instead of assuming it's centered. Falls back to the center-crop
     // metric when detection is off, fails, or the mask is too small/empty.
-    let subject_focus_metric = ai_models.and_then(|models| {
+    let subject_metrics = ai_models.and_then(|models| {
         let session = models
             .u2netp_pool
             .get(pool_slot % models.u2netp_pool.len().max(1))?;
         let mask = run_u2netp_model(&thumbnail, session).ok()?;
-        calculate_masked_laplacian_variance(&gray_thumbnail, &mask)
+        let focus = calculate_masked_laplacian_variance(&gray_thumbnail, &mask)?;
+        let (composition, edge_contact) = calculate_subject_composition_metrics(&mask)?;
+        Some((focus, composition, edge_contact))
     });
+    let subject_focus_metric = subject_metrics.map(|metrics| metrics.0);
+    let subject_composition_metric = subject_metrics.map(|metrics| metrics.1);
+    let subject_edge_contact_ratio = subject_metrics.map(|metrics| metrics.2);
 
     let normalized_sharpness = ((sharpness_metric + 1.0).log10() / 3.5).min(1.0);
     let focus_metric_for_score = subject_focus_metric.unwrap_or(center_focus_metric);
     let normalized_focus = ((focus_metric_for_score + 1.0).log10() / 3.5).min(1.0);
 
-    let quality_score = (normalized_sharpness * WEIGHT_SHARPNESS)
+    let baseline_quality_score = (normalized_sharpness * WEIGHT_SHARPNESS)
         + (normalized_focus * WEIGHT_CENTER_FOCUS)
         + (exposure_metric * WEIGHT_EXPOSURE);
+    let quality_score = match subject_composition_metric {
+        Some(composition) => baseline_quality_score + composition * WEIGHT_SUBJECT_COMPOSITION,
+        // Do not penalize a legitimate image merely because saliency could
+        // not identify a compact foreground subject (common for landscapes).
+        None => baseline_quality_score / (1.0 - WEIGHT_SUBJECT_COMPOSITION),
+    };
 
     let hash = hasher.hash_image(&thumbnail);
 
@@ -269,6 +337,8 @@ pub(crate) fn analyze_image(
             sharpness_metric,
             center_focus_metric,
             subject_focus_metric,
+            subject_composition_metric,
+            subject_edge_contact_ratio,
             exposure_metric,
             width,
             height,
@@ -449,7 +519,8 @@ pub async fn cull_images(
 
 #[cfg(test)]
 mod tests {
-    use super::CullingSettings;
+    use super::{calculate_subject_composition_metrics, CullingSettings};
+    use image::{GrayImage, Luma};
 
     #[test]
     fn subject_mode_defaults_for_older_culling_requests() {
@@ -459,5 +530,26 @@ mod tests {
         .expect("older settings remain compatible");
 
         assert_eq!(settings.subject_mode, "general");
+    }
+
+    #[test]
+    fn subject_geometry_penalizes_edge_contact() {
+        let mut centered = GrayImage::new(90, 90);
+        let mut edge = GrayImage::new(90, 90);
+        for y in 25..45 {
+            for x in 25..45 {
+                centered.put_pixel(x, y, Luma([255]));
+            }
+        }
+        for y in 25..45 {
+            for x in 0..20 {
+                edge.put_pixel(x, y, Luma([255]));
+            }
+        }
+        let (centered_score, centered_edge_contact) =
+            calculate_subject_composition_metrics(&centered).unwrap();
+        let (edge_score, edge_contact) = calculate_subject_composition_metrics(&edge).unwrap();
+        assert!(edge_contact > centered_edge_contact);
+        assert!(centered_score > edge_score);
     }
 }
