@@ -190,7 +190,12 @@ fn insightface_pack(
         detector_landmarks: 5,
         embedding_dimensions: Some(512),
         availability: ModelAvailability::ConversionRequired,
-        artifacts: vec![artifact(file_name, ModelArtifactFormat::Zip, source_url, None)],
+        artifacts: vec![artifact(
+            file_name,
+            ModelArtifactFormat::Zip,
+            source_url,
+            None,
+        )],
         license_name: "InsightFace public pretrained model license".to_string(),
         license_url: "https://github.com/deepinsight/insightface/tree/master/model_zoo".to_string(),
         license_acknowledgement_required: true,
@@ -273,16 +278,30 @@ fn is_complete_install(
         return false;
     };
     manifest.pack_id == pack.id
-        && pack
-            .artifacts
-            .iter()
-            .all(|artifact| pack_dir.join(&artifact.file_name).is_file())
-        && manifest.artifacts.iter().all(|artifact| {
+        && manifest.artifacts.len() == pack.artifacts.len()
+        && pack.artifacts.iter().all(|artifact| {
+            let matching_manifest_artifacts = manifest
+                .artifacts
+                .iter()
+                .filter(|installed| installed.file_name == artifact.file_name)
+                .collect::<Vec<_>>();
+            let Some(installed) = matching_manifest_artifacts.first() else {
+                return false;
+            };
+            if matching_manifest_artifacts.len() != 1 {
+                return false;
+            }
+
             let path = pack_dir.join(&artifact.file_name);
-            path.is_file()
-                && sha256_file(&path)
-                    .map(|actual| actual.eq_ignore_ascii_case(&artifact.sha256))
-                    .unwrap_or(false)
+            let Ok(actual) = sha256_file(&path) else {
+                return false;
+            };
+            actual.eq_ignore_ascii_case(&installed.sha256)
+                && artifact
+                    .sha256
+                    .as_deref()
+                    .map(|expected| actual.eq_ignore_ascii_case(expected))
+                    .unwrap_or(true)
         })
 }
 
@@ -327,15 +346,15 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
-fn verify_expected_hash(path: &Path, expected: Option<&str>) -> Result<(), String> {
+fn verify_expected_hash(bytes: &[u8], expected: Option<&str>) -> Result<(), String> {
     let Some(expected) = expected else {
         return Ok(());
     };
-    let actual = sha256_file(path)?;
+    let actual = hex::encode(Sha256::digest(bytes));
     if actual.eq_ignore_ascii_case(expected) {
         Ok(())
     } else {
-        Err(format!("Hash mismatch for {}", path.display()))
+        Err(format!("Hash mismatch: expected {expected}, got {actual}"))
     }
 }
 
@@ -562,8 +581,8 @@ pub async fn download_face_model_pack(
         match artifact.format {
             ModelArtifactFormat::Onnx => {
                 let target = destination.join(&artifact.file_name);
+                verify_expected_hash(&bytes, artifact.sha256.as_deref())?;
                 write_atomically(&target, &bytes)?;
-                verify_expected_hash(&target, artifact.sha256.as_deref())?;
                 installed_paths.push(target);
             }
             ModelArtifactFormat::Zip => {
@@ -719,7 +738,7 @@ mod tests {
     }
 
     #[test]
-    fn complete_install_requires_the_expected_model_artifacts() {
+    fn complete_install_requires_manifest_and_pinned_artifact_digests() {
         let directory = tempdir().unwrap();
         let pack = face_model_packs()
             .into_iter()
@@ -764,8 +783,19 @@ mod tests {
                 .collect(),
             ..manifest
         };
-        assert!(is_complete_install(
+        // A local manifest matching local files cannot override a registry pin.
+        assert!(!is_complete_install(
             &pack,
+            directory.path(),
+            Some(&manifest)
+        ));
+
+        let mut unpinned_pack = pack.clone();
+        for artifact in &mut unpinned_pack.artifacts {
+            artifact.sha256 = None;
+        }
+        assert!(is_complete_install(
+            &unpinned_pack,
             directory.path(),
             Some(&manifest)
         ));
@@ -779,6 +809,14 @@ mod tests {
             directory.path(),
             Some(&manifest)
         ));
+    }
+
+    #[test]
+    fn expected_hash_is_checked_before_an_artifact_is_written() {
+        let bytes = b"trusted model bytes";
+        let digest = hex::encode(Sha256::digest(bytes));
+        assert!(verify_expected_hash(bytes, Some(&digest)).is_ok());
+        assert!(verify_expected_hash(bytes, Some(&"0".repeat(64))).is_err());
     }
 
     #[test]
