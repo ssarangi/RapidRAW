@@ -226,7 +226,15 @@ pub fn installed_face_model_path_in_dir(
     pack_id: &str,
     file_name: &str,
 ) -> Result<PathBuf, String> {
-    let path = face_models_dir.join(pack_id).join(file_name);
+    let pack = find_pack(pack_id)?;
+    let directory = face_models_dir.join(pack_id);
+    let manifest = read_installed_manifest(&directory)?;
+    if !is_complete_install(&pack, &directory, manifest.as_ref()) {
+        return Err(format!(
+            "Face model {pack_id} is not installed or has been modified"
+        ));
+    }
+    let path = directory.join(file_name);
     if path.is_file() {
         Ok(path)
     } else {
@@ -262,10 +270,13 @@ fn is_complete_install(
             .artifacts
             .iter()
             .all(|artifact| pack_dir.join(&artifact.file_name).is_file())
-        && manifest
-            .artifacts
-            .iter()
-            .all(|artifact| pack_dir.join(&artifact.file_name).is_file())
+        && manifest.artifacts.iter().all(|artifact| {
+            let path = pack_dir.join(&artifact.file_name);
+            path.is_file()
+                && sha256_file(&path)
+                    .map(|actual| actual.eq_ignore_ascii_case(&artifact.sha256))
+                    .unwrap_or(false)
+        })
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -702,7 +713,36 @@ mod tests {
         for artifact in &pack.artifacts {
             fs::write(directory.path().join(&artifact.file_name), b"onnx").unwrap();
         }
+        assert!(!is_complete_install(
+            &pack,
+            directory.path(),
+            Some(&manifest)
+        ));
+        let manifest = InstalledFaceModelPack {
+            artifacts: pack
+                .artifacts
+                .iter()
+                .map(|artifact| {
+                    let path = directory.path().join(&artifact.file_name);
+                    InstalledFaceModelArtifact {
+                        file_name: artifact.file_name.clone(),
+                        sha256: sha256_file(&path).unwrap(),
+                    }
+                })
+                .collect(),
+            ..manifest
+        };
         assert!(is_complete_install(
+            &pack,
+            directory.path(),
+            Some(&manifest)
+        ));
+        fs::write(
+            directory.path().join(&pack.artifacts[0].file_name),
+            b"modified",
+        )
+        .unwrap();
+        assert!(!is_complete_install(
             &pack,
             directory.path(),
             Some(&manifest)
