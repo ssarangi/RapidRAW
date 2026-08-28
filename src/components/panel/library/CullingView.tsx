@@ -1878,21 +1878,6 @@ export default function CullingView(props: any) {
                         </button>
                       ))}
                     </div>
-                    {/* Fine-tuning slider */}
-                    <div className="flex items-center gap-3 pt-1 max-w-sm">
-                      <input
-                        type="range"
-                        min="30"
-                        max="200"
-                        step="5"
-                        value={cullSettings.blurThreshold}
-                        onChange={(e) => setCullSettings((s) => ({ ...s, blurThreshold: Number(e.target.value), filterBlurry: true }))}
-                        className="slider-input flex-1 accent-cyan-400 h-1.5 bg-surface rounded-lg cursor-pointer"
-                      />
-                      <span className="text-xs font-mono text-text-secondary w-12 text-right">
-                        {cullSettings.blurThreshold.toFixed(0)}
-                      </span>
-                    </div>
                     <p className="text-xs text-text-secondary italic">
                       {cullSettings.blurThreshold <= 75
                         ? 'Lenient: Only marks heavily blurred photos for review - recommended for fast motion or action.'
@@ -1912,9 +1897,9 @@ export default function CullingView(props: any) {
                     <div className="flex flex-wrap gap-2">
                       {([
                         { label: 'Identical', value: 12 },
-                        { label: 'Similar', value: 24 },
-                        { label: 'Similarish', value: 34 },
-                        { label: 'Loose', value: 46 },
+                        { label: 'Similar', value: 28 },
+                        { label: 'Similarish', value: 38 },
+                        { label: 'Loose', value: 48 },
                       ] as const).map((opt) => (
                         <button
                           key={opt.label}
@@ -1930,27 +1915,12 @@ export default function CullingView(props: any) {
                         </button>
                       ))}
                     </div>
-                    {/* Fine-tuning slider */}
-                    <div className="flex items-center gap-3 pt-1 max-w-sm">
-                      <input
-                        type="range"
-                        min="5"
-                        max="60"
-                        step="2"
-                        value={cullSettings.similarityThreshold}
-                        onChange={(e) => setCullSettings((s) => ({ ...s, similarityThreshold: Number(e.target.value), groupSimilar: true }))}
-                        className="slider-input flex-1 accent-cyan-400 h-1.5 bg-surface rounded-lg cursor-pointer"
-                      />
-                      <span className="text-xs font-mono text-text-secondary w-12 text-right">
-                        {cullSettings.similarityThreshold}
-                      </span>
-                    </div>
                     <p className="text-xs text-text-secondary italic">
                       {cullSettings.similarityThreshold <= 15
                         ? 'Identical: Groups only burst sequences with near-identical camera framing and subject pose.'
-                        : cullSettings.similarityThreshold <= 26
+                        : cullSettings.similarityThreshold <= 30
                         ? 'Similar: More Selected images - Changes in subject will create a new Duplicate set.'
-                        : cullSettings.similarityThreshold <= 38
+                        : cullSettings.similarityThreshold <= 40
                         ? 'Similarish: Groups moderate variations in expressions and pose together.'
                         : 'Loose: Broadly groups all photos taken in the same scene/angle into duplicate sets.'}
                     </p>
