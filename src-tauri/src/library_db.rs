@@ -1509,7 +1509,7 @@ mod tests {
 
         let control = crate::app_state::BackgroundJobControl::new();
         let mut progress_calls = 0;
-        let generated = run_catalog_thumbnail_generation_headless(
+        let report = run_catalog_thumbnail_generation_headless(
             db_path,
             Some(1),
             thumb_dir.clone(),
@@ -1520,7 +1520,8 @@ mod tests {
             },
         ).unwrap();
 
-        assert_eq!(generated, 1);
+        assert_eq!(report.total, 1);
+        assert_eq!(report.generated, 1);
         assert!(progress_calls >= 1);
         assert!(thumb_dir.exists());
     }
@@ -1558,6 +1559,104 @@ mod tests {
     }
 
     #[test]
+    fn thumbnail_generation_headless_supports_pause_and_resume() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("catalog.db");
+        let photos_dir = directory.path().join("photos");
+        let thumb_dir = directory.path().join("thumbs");
+        fs::create_dir_all(&photos_dir).unwrap();
+
+        let img_path = photos_dir.join("photo.jpg");
+        let sample = image::RgbImage::new(100, 100);
+        sample.save(&img_path).unwrap();
+
+        let connection = open_connection(&db_path).unwrap();
+        migrate(&connection).unwrap();
+        connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
+        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
+        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
+        drop(connection);
+
+        let control = crate::app_state::BackgroundJobControl::new();
+        control.set_paused(true);
+
+        let control_clone = control.clone();
+        let db_path_clone = db_path.clone();
+        let thumb_dir_clone = thumb_dir.clone();
+        let handle = std::thread::spawn(move || {
+            run_catalog_thumbnail_generation_headless(
+                db_path_clone,
+                Some(1),
+                thumb_dir_clone,
+                false,
+                control_clone,
+                |_cur, _tot, _path| {},
+            )
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!handle.is_finished());
+
+        control.set_paused(false);
+        let result = handle.join().unwrap().unwrap();
+        assert_eq!(result.total, 1);
+        assert_eq!(result.generated, 1);
+    }
+
+    #[test]
+    fn thumbnail_generation_headless_handles_raw_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("catalog.db");
+        let photos_dir = directory.path().join("photos");
+        let thumb_dir = directory.path().join("thumbs");
+        fs::create_dir_all(&photos_dir).unwrap();
+
+        // Create a raw file accompanied by a companion JPEG for raw pipeline fallback
+        let raw_path = photos_dir.join("photo.arw");
+        let companion_path = photos_dir.join("photo.jpg");
+        let sample = image::RgbImage::new(120, 80);
+        sample.save(&companion_path).unwrap();
+        fs::write(&raw_path, b"RAW_SAMPLE_BYTES").unwrap();
+
+        let connection = open_connection(&db_path).unwrap();
+        migrate(&connection).unwrap();
+        connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
+        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
+        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.arw', 'photo.arw', 0, 0, 0, 'present')", []).unwrap();
+        drop(connection);
+
+        let control = crate::app_state::BackgroundJobControl::new();
+        let report = run_catalog_thumbnail_generation_headless(
+            db_path,
+            Some(1),
+            thumb_dir.clone(),
+            false,
+            control,
+            |_cur, _tot, _path| {},
+        ).unwrap();
+
+        assert_eq!(report.total, 1);
+        assert_eq!(report.generated, 1);
+    }
+
+    #[test]
+    fn thumbnail_generation_failure_preserves_job_progress() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrate(&connection).unwrap();
+        connection.execute(
+            "INSERT INTO background_jobs(id, kind, state, payload_json, current, total, current_item, message, created_at, updated_at) VALUES('thumb-progress-job', 'thumbnail_generation', 'running', '{\"rootId\": 1}', 42, 100, '/photos/img42.arw', 'Generating thumbnails', 0, 0)",
+            [],
+        ).unwrap();
+
+        let (current, total, current_item) = read_job_progress(&connection, "thumb-progress-job").unwrap();
+        assert_eq!(current, 42);
+        assert_eq!(total, 100);
+        assert_eq!(current_item.as_deref(), Some("/photos/img42.arw"));
+    }
+
+    #[test]
     fn metadata_extraction_headless_runs_and_completes_batch() {
         let directory = tempfile::tempdir().unwrap();
         let db_path = directory.path().join("catalog.db");
@@ -1579,7 +1678,7 @@ mod tests {
 
         let control = crate::app_state::BackgroundJobControl::new();
         let mut progress_calls = 0;
-        let processed = run_catalog_metadata_extraction_headless(
+        let report = run_catalog_metadata_extraction_headless(
             db_path,
             Some(1),
             crate::app_settings::AppSettings::default(),
@@ -1589,7 +1688,8 @@ mod tests {
             },
         ).unwrap();
 
-        assert_eq!(processed, 1);
+        assert_eq!(report.total, 1);
+        assert_eq!(report.processed, 1);
         assert!(progress_calls >= 1);
     }
 
@@ -1621,6 +1721,98 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "Metadata extraction cancelled");
+    }
+
+    #[test]
+    fn metadata_extraction_headless_supports_pause_and_resume() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("catalog.db");
+        let photos_dir = directory.path().join("photos");
+        fs::create_dir_all(&photos_dir).unwrap();
+
+        let img_path = photos_dir.join("photo.jpg");
+        let sample = image::RgbImage::new(100, 100);
+        sample.save(&img_path).unwrap();
+
+        let connection = open_connection(&db_path).unwrap();
+        migrate(&connection).unwrap();
+        connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
+        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
+        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
+        connection.execute("INSERT INTO image_versions(id, image_id, copy_id, display_name, sidecar_path, rating, is_edited, created_at, updated_at) VALUES(1, 1, '', 'photo.jpg', '', 0, 0, 0, 0)", []).unwrap();
+        drop(connection);
+
+        let control = crate::app_state::BackgroundJobControl::new();
+        control.set_paused(true);
+
+        let control_clone = control.clone();
+        let db_path_clone = db_path.clone();
+        let handle = std::thread::spawn(move || {
+            run_catalog_metadata_extraction_headless(
+                db_path_clone,
+                Some(1),
+                crate::app_settings::AppSettings::default(),
+                control_clone,
+                |_cur, _tot, _path| {},
+            )
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!handle.is_finished());
+
+        control.set_paused(false);
+        let result = handle.join().unwrap().unwrap();
+        assert_eq!(result.total, 1);
+        assert_eq!(result.processed, 1);
+    }
+
+    #[test]
+    fn metadata_extraction_transaction_failure_stops_and_records_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("catalog.db");
+        let photos_dir = directory.path().join("photos");
+        fs::create_dir_all(&photos_dir).unwrap();
+
+        let img_path = photos_dir.join("photo.jpg");
+        let sample = image::RgbImage::new(100, 100);
+        sample.save(&img_path).unwrap();
+
+        let connection = open_connection(&db_path).unwrap();
+        migrate(&connection).unwrap();
+        connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
+        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
+        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        // Insert image but omit image_versions row to cause query_row failure during transaction
+        connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
+        drop(connection);
+
+        let control = crate::app_state::BackgroundJobControl::new();
+        let result = run_catalog_metadata_extraction_headless(
+            db_path,
+            Some(1),
+            crate::app_settings::AppSettings::default(),
+            control,
+            |_cur, _tot, _path| {},
+        );
+
+        assert!(result.is_err(), "Expected transaction to fail when version row is missing");
+        assert!(result.unwrap_err().contains("Failed to query version id"));
+    }
+
+    #[test]
+    fn metadata_extraction_failure_preserves_job_progress() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrate(&connection).unwrap();
+        connection.execute(
+            "INSERT INTO background_jobs(id, kind, state, payload_json, current, total, current_item, message, created_at, updated_at) VALUES('meta-progress-job', 'metadata_extraction', 'running', '{\"rootId\": 1}', 85, 200, '/photos/img85.jpg', 'Extracting metadata', 0, 0)",
+            [],
+        ).unwrap();
+
+        let (current, total, current_item) = read_job_progress(&connection, "meta-progress-job").unwrap();
+        assert_eq!(current, 85);
+        assert_eq!(total, 200);
+        assert_eq!(current_item.as_deref(), Some("/photos/img85.jpg"));
     }
 
     #[test]
@@ -3071,6 +3263,20 @@ pub fn list_catalog_thumbnail_candidates(
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogThumbnailBatchReport {
+    pub total: usize,
+    pub generated: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogMetadataBatchReport {
+    pub total: usize,
+    pub processed: usize,
+}
+
 pub fn run_catalog_thumbnail_generation_headless<F>(
     db_path: PathBuf,
     root_id: Option<i64>,
@@ -3078,7 +3284,7 @@ pub fn run_catalog_thumbnail_generation_headless<F>(
     force_regenerate: bool,
     job_control: Arc<crate::app_state::BackgroundJobControl>,
     mut on_progress: F,
-) -> Result<usize, String>
+) -> Result<CatalogThumbnailBatchReport, String>
 where
     F: FnMut(usize, usize, Option<&str>),
 {
@@ -3104,7 +3310,26 @@ where
             if let Some(cache_hash) = cache_hash {
                 let cache_path = thumb_cache_dir.join(format!("{cache_hash}.jpg"));
                 if force_regenerate || !cache_path.exists() {
-                    if let Ok(img) = image::open(&source_path) {
+                    let image_result = if crate::formats::is_raw_file(&source_path) {
+                        crate::face_detection::load_image_for_local_ai(&source_path)
+                            .or_else(|_| {
+                                fs::read(&source_path)
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|bytes| {
+                                        crate::raw_processing::develop_raw_image(
+                                            &bytes,
+                                            true,
+                                            0.0,
+                                            "sRGB".to_string(),
+                                            None,
+                                        )
+                                        .map_err(|e| e.to_string())
+                                    })
+                            })
+                    } else {
+                        image::open(&source_path).map_err(|e| e.to_string())
+                    };
+                    if let Ok(img) = image_result {
                         let target_width = 720;
                         if let Ok(thumb_data) = crate::file_management::encode_thumbnail(&img, target_width) {
                             let _ = fs::write(&cache_path, &thumb_data);
@@ -3117,7 +3342,7 @@ where
             }
         }
     }
-    Ok(generated)
+    Ok(CatalogThumbnailBatchReport { total, generated })
 }
 
 fn run_catalog_thumbnail_generation_impl(
@@ -3127,7 +3352,7 @@ fn run_catalog_thumbnail_generation_impl(
     force_regenerate: bool,
     job_id: &str,
     job_control: &Arc<crate::app_state::BackgroundJobControl>,
-) -> Result<usize, String> {
+) -> Result<CatalogThumbnailBatchReport, String> {
     let settings = load_settings(app.clone()).unwrap_or_default();
     let thumb_cache_dir = crate::file_management::get_thumb_cache_dir(app)?;
     let candidates = list_catalog_thumbnail_candidates(db_path, root_id)?;
@@ -3144,7 +3369,7 @@ fn run_catalog_thumbnail_generation_impl(
             None,
             None,
         )?;
-        return Ok(0);
+        return Ok(CatalogThumbnailBatchReport { total: 0, generated: 0 });
     }
 
     update_job(
@@ -3222,7 +3447,7 @@ fn run_catalog_thumbnail_generation_impl(
         None,
     )?;
 
-    Ok(generated)
+    Ok(CatalogThumbnailBatchReport { total, generated })
 }
 
 #[tauri::command]
@@ -3262,14 +3487,18 @@ pub fn start_catalog_thumbnail_generation(
             } else {
                 "failed"
             };
+            let (current, total, current_item) = open_connection(&db_path)
+                .ok()
+                .and_then(|conn| read_job_progress(&conn, &worker_job_id).ok())
+                .unwrap_or((0, 0, None));
             let _ = update_job(
                 &db_path,
                 &worker_job_id,
                 job_state,
                 &error,
-                0,
-                0,
-                None,
+                current,
+                total,
+                current_item.as_deref(),
                 Some(&error),
             );
         }
@@ -3335,7 +3564,7 @@ pub fn run_catalog_metadata_extraction_headless<F>(
     settings: crate::app_settings::AppSettings,
     job_control: Arc<crate::app_state::BackgroundJobControl>,
     mut on_progress: F,
-) -> Result<usize, String>
+) -> Result<CatalogMetadataBatchReport, String>
 where
     F: FnMut(usize, usize, Option<&str>),
 {
@@ -3363,36 +3592,37 @@ where
             };
             let now = now_secs();
 
-            if let Ok(tx) = conn.transaction() {
-                let _ = tx.execute(
-                    "UPDATE image_versions
-                     SET rating = ?2, color_label = ?3, is_edited = ?4, tags_json = ?5, sidecar_modified_at = ?6, updated_at = ?7
-                     WHERE image_id = ?1 AND copy_id = ''",
-                    params![
-                        image_id,
-                        rating,
-                        color_label_from_tags(tags.as_ref()),
-                        if is_edited { 1 } else { 0 },
-                        tags_json,
-                        sidecar_modified,
-                        now
-                    ],
-                );
-                if let Ok(version_id) = tx.query_row(
-                    "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
-                    params![image_id],
-                    |row| row.get::<_, i64>(0),
-                ) {
-                    let exif = read_catalog_exif(&path_buf);
-                    let _ = upsert_image_metadata(&tx, image_id, &path_buf, &exif, now);
-                    let _ = sync_image_tags(&tx, version_id, tags.as_ref());
-                }
-                let _ = tx.commit();
-            }
+            let tx = conn.transaction().map_err(|e| format!("Failed to start transaction for {}: {}", path_str, e))?;
+            tx.execute(
+                "UPDATE image_versions
+                 SET rating = ?2, color_label = ?3, is_edited = ?4, tags_json = ?5, sidecar_modified_at = ?6, updated_at = ?7
+                 WHERE image_id = ?1 AND copy_id = ''",
+                params![
+                    image_id,
+                    rating,
+                    color_label_from_tags(tags.as_ref()),
+                    if is_edited { 1 } else { 0 },
+                    tags_json,
+                    sidecar_modified,
+                    now
+                ],
+            ).map_err(|e| format!("Failed to update image version for {}: {}", path_str, e))?;
+            let version_id: i64 = tx.query_row(
+                "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
+                params![image_id],
+                |row| row.get(0),
+            ).map_err(|e| format!("Failed to query version id for {}: {}", path_str, e))?;
+            let exif = read_catalog_exif(&path_buf);
+            upsert_image_metadata(&tx, image_id, &path_buf, &exif, now)
+                .map_err(|e| format!("Failed to upsert image metadata for {}: {}", path_str, e))?;
+            sync_image_tags(&tx, version_id, tags.as_ref())
+                .map_err(|e| format!("Failed to sync tags for {}: {}", path_str, e))?;
+            tx.commit().map_err(|e| format!("Failed to commit metadata transaction for {}: {}", path_str, e))?;
+
             processed += 1;
         }
     }
-    Ok(processed)
+    Ok(CatalogMetadataBatchReport { total, processed })
 }
 
 fn run_catalog_metadata_extraction_impl(
@@ -3401,7 +3631,7 @@ fn run_catalog_metadata_extraction_impl(
     root_id: Option<i64>,
     job_id: &str,
     job_control: &Arc<crate::app_state::BackgroundJobControl>,
-) -> Result<usize, String> {
+) -> Result<CatalogMetadataBatchReport, String> {
     let settings = load_settings(app.clone()).unwrap_or_default();
     let candidates = list_catalog_metadata_candidates(db_path, root_id)?;
     let total = candidates.len();
@@ -3417,7 +3647,7 @@ fn run_catalog_metadata_extraction_impl(
             None,
             None,
         )?;
-        return Ok(0);
+        return Ok(CatalogMetadataBatchReport { total: 0, processed: 0 });
     }
 
     update_job(
@@ -3471,32 +3701,32 @@ fn run_catalog_metadata_extraction_impl(
             };
             let now = now_secs();
 
-            if let Ok(tx) = conn.transaction() {
-                let _ = tx.execute(
-                    "UPDATE image_versions
-                     SET rating = ?2, color_label = ?3, is_edited = ?4, tags_json = ?5, sidecar_modified_at = ?6, updated_at = ?7
-                     WHERE image_id = ?1 AND copy_id = ''",
-                    params![
-                        image_id,
-                        rating,
-                        color_label_from_tags(tags.as_ref()),
-                        if is_edited { 1 } else { 0 },
-                        tags_json,
-                        sidecar_modified,
-                        now
-                    ],
-                );
-                if let Ok(version_id) = tx.query_row(
-                    "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
-                    params![image_id],
-                    |row| row.get::<_, i64>(0),
-                ) {
-                    let exif = read_catalog_exif(&path_buf);
-                    let _ = upsert_image_metadata(&tx, image_id, &path_buf, &exif, now);
-                    let _ = sync_image_tags(&tx, version_id, tags.as_ref());
-                }
-                let _ = tx.commit();
-            }
+            let tx = conn.transaction().map_err(|e| format!("Failed to start transaction for {}: {}", path_str, e))?;
+            tx.execute(
+                "UPDATE image_versions
+                 SET rating = ?2, color_label = ?3, is_edited = ?4, tags_json = ?5, sidecar_modified_at = ?6, updated_at = ?7
+                 WHERE image_id = ?1 AND copy_id = ''",
+                params![
+                    image_id,
+                    rating,
+                    color_label_from_tags(tags.as_ref()),
+                    if is_edited { 1 } else { 0 },
+                    tags_json,
+                    sidecar_modified,
+                    now
+                ],
+            ).map_err(|e| format!("Failed to update image version for {}: {}", path_str, e))?;
+            let version_id: i64 = tx.query_row(
+                "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
+                params![image_id],
+                |row| row.get(0),
+            ).map_err(|e| format!("Failed to query version id for {}: {}", path_str, e))?;
+            let exif = read_catalog_exif(&path_buf);
+            upsert_image_metadata(&tx, image_id, &path_buf, &exif, now)
+                .map_err(|e| format!("Failed to upsert image metadata for {}: {}", path_str, e))?;
+            sync_image_tags(&tx, version_id, tags.as_ref())
+                .map_err(|e| format!("Failed to sync tags for {}: {}", path_str, e))?;
+            tx.commit().map_err(|e| format!("Failed to commit metadata transaction for {}: {}", path_str, e))?;
 
             crate::file_management::emit_image_metadata_loaded(
                 app,
@@ -3520,7 +3750,7 @@ fn run_catalog_metadata_extraction_impl(
         None,
     )?;
 
-    Ok(processed)
+    Ok(CatalogMetadataBatchReport { total, processed })
 }
 
 #[tauri::command]
@@ -3557,14 +3787,18 @@ pub fn start_catalog_metadata_extraction(
             } else {
                 "failed"
             };
+            let (current, total, current_item) = open_connection(&db_path)
+                .ok()
+                .and_then(|conn| read_job_progress(&conn, &worker_job_id).ok())
+                .unwrap_or((0, 0, None));
             let _ = update_job(
                 &db_path,
                 &worker_job_id,
                 job_state,
                 &error,
-                0,
-                0,
-                None,
+                current,
+                total,
+                current_item.as_deref(),
                 Some(&error),
             );
         }
@@ -3593,7 +3827,7 @@ fn read_background_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<BackgroundJo
     })
 }
 
-fn read_job_progress(
+pub fn read_job_progress(
     conn: &Connection,
     job_id: &str,
 ) -> Result<(i64, i64, Option<String>), String> {

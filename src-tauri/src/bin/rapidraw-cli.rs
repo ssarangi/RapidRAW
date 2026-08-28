@@ -321,14 +321,14 @@ fn run_catalog_thumbnails_cli(arguments: &[String]) -> Result<serde_json::Value,
         },
     );
     match result {
-        Ok(generated) => {
+        Ok(stats) => {
             rapidraw_lib::update_job(
                 &db_path,
                 &job_id,
                 "completed",
                 "Thumbnail generation complete",
-                generated as i64,
-                generated as i64,
+                stats.total as i64,
+                stats.total as i64,
                 None,
                 None,
             )?;
@@ -336,7 +336,8 @@ fn run_catalog_thumbnails_cli(arguments: &[String]) -> Result<serde_json::Value,
                 "jobId": job_id,
                 "state": "completed",
                 "rootId": root_id,
-                "generated": generated,
+                "total": stats.total,
+                "generated": stats.generated,
             }))
         }
         Err(error) => {
@@ -345,14 +346,18 @@ fn run_catalog_thumbnails_cli(arguments: &[String]) -> Result<serde_json::Value,
             } else {
                 "failed"
             };
+            let (current, total, current_item) = Connection::open(&db_path)
+                .ok()
+                .and_then(|conn| rapidraw_lib::read_job_progress(&conn, &job_id).ok())
+                .unwrap_or((0, 0, None));
             let _ = rapidraw_lib::update_job(
                 &db_path,
                 &job_id,
                 state,
                 &error,
-                0,
-                0,
-                None,
+                current,
+                total,
+                current_item.as_deref(),
                 Some(&error),
             );
             Err(error)
@@ -390,14 +395,14 @@ fn run_catalog_metadata_cli(arguments: &[String]) -> Result<serde_json::Value, S
         },
     );
     match result {
-        Ok(processed) => {
+        Ok(stats) => {
             rapidraw_lib::update_job(
                 &db_path,
                 &job_id,
                 "completed",
                 "Metadata extraction complete",
-                processed as i64,
-                processed as i64,
+                stats.total as i64,
+                stats.total as i64,
                 None,
                 None,
             )?;
@@ -405,7 +410,8 @@ fn run_catalog_metadata_cli(arguments: &[String]) -> Result<serde_json::Value, S
                 "jobId": job_id,
                 "state": "completed",
                 "rootId": root_id,
-                "processed": processed,
+                "total": stats.total,
+                "processed": stats.processed,
             }))
         }
         Err(error) => {
@@ -414,14 +420,18 @@ fn run_catalog_metadata_cli(arguments: &[String]) -> Result<serde_json::Value, S
             } else {
                 "failed"
             };
+            let (current, total, current_item) = Connection::open(&db_path)
+                .ok()
+                .and_then(|conn| rapidraw_lib::read_job_progress(&conn, &job_id).ok())
+                .unwrap_or((0, 0, None));
             let _ = rapidraw_lib::update_job(
                 &db_path,
                 &job_id,
                 state,
                 &error,
-                0,
-                0,
-                None,
+                current,
+                total,
+                current_item.as_deref(),
                 Some(&error),
             );
             Err(error)
