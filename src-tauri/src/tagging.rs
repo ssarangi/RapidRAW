@@ -317,8 +317,12 @@ fn store_bioclip_suggestion(
     image_id: i64,
     image: &DynamicImage,
     bioclip_models: &Result<BioClipModels, String>,
+    model_revision: Option<&str>,
     ai_semaphore: &Arc<tokio::sync::Semaphore>,
 ) {
+    let Some(model_revision) = model_revision else {
+        return;
+    };
     let Ok(bioclip) = bioclip_models else {
         return;
     };
@@ -346,9 +350,10 @@ fn store_bioclip_suggestion(
     );
     let _ = conn.execute(
         "INSERT INTO species_classifications(image_id, model_id, model_revision, scientific_name, common_name, taxon_rank, confidence, review_state, created_at, updated_at)
-         VALUES(?1, 'bioclip-v1', 'v1', ?2, ?3, ?4, ?5, 'suggested', ?6, ?6)",
+         VALUES(?1, 'bioclip-v1', ?2, ?3, ?4, ?5, ?6, 'suggested', ?7, ?7)",
         rusqlite::params![
             image_id,
+            model_revision,
             taxon.scientific_name,
             taxon.common_name,
             taxon.taxon_rank,
@@ -415,6 +420,13 @@ pub fn run_catalog_ram_plus_tagging_headless(
     let bioclip_models = include_bioclip
         .then(|| load_bioclip_models_in_dir(visual_models_dir))
         .unwrap_or_else(|| Err("BioCLIP disabled for this job".to_string()));
+    let bioclip_revision = bioclip_models.as_ref().ok().and_then(|_| {
+        crate::visual_model_registry::visual_model_pack_revision_in_dir(
+            visual_models_dir,
+            "bioclip-v1",
+        )
+        .ok()
+    });
 
     for (index, (image_id, path, modified)) in candidates.into_iter().enumerate() {
         if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
@@ -475,6 +487,7 @@ pub fn run_catalog_ram_plus_tagging_headless(
                                 image_id,
                                 &image,
                                 &bioclip_models,
+                                bioclip_revision.as_deref(),
                                 &ai_semaphore,
                             );
                         }
@@ -668,6 +681,13 @@ pub fn start_catalog_ram_plus_tagging(
         let ai_semaphore = worker_state.state::<AppState>().ai_job_semaphore.clone();
         // BioCLIP is optional, but loading it must not block the Tauri command/UI thread.
         let bioclip_models = load_bioclip_models(&species_app_handle);
+        let bioclip_revision = bioclip_models.as_ref().ok().and_then(|_| {
+            crate::visual_model_registry::visual_model_pack_revision_in_dir(
+                &visual_models_dir,
+                "bioclip-v1",
+            )
+            .ok()
+        });
         for (index, (image_id, path, modified)) in candidates.into_iter().enumerate() {
             if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
                 let _ = crate::library_db::update_job(
@@ -756,7 +776,9 @@ pub fn start_catalog_ram_plus_tagging(
                                     || lower.contains("animal")
                             });
                             if has_bird_or_wildlife {
-                                if let Ok(bioclip) = &bioclip_models {
+                                if let (Ok(bioclip), Some(bioclip_revision)) =
+                                    (&bioclip_models, bioclip_revision.as_deref())
+                                {
                                     let _permit = tauri::async_runtime::block_on(
                                         ai_semaphore.clone().acquire_owned(),
                                     )
@@ -781,9 +803,10 @@ pub fn start_catalog_ram_plus_tagging(
                                                 );
                                                 let _ = conn.execute(
                                                     "INSERT INTO species_classifications(image_id, model_id, model_revision, scientific_name, common_name, taxon_rank, confidence, review_state, created_at, updated_at)
-                                                     VALUES(?1, 'bioclip-v1', 'v1', ?2, ?3, ?4, ?5, 'suggested', ?6, ?6)",
+                                                     VALUES(?1, 'bioclip-v1', ?2, ?3, ?4, ?5, ?6, 'suggested', ?7, ?7)",
                                                     rusqlite::params![
                                                         image_id,
+                                                        bioclip_revision,
                                                         taxon.scientific_name,
                                                         taxon.common_name,
                                                         taxon.taxon_rank,
