@@ -1,6 +1,9 @@
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use std::time::UNIX_EPOCH;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -60,6 +63,16 @@ struct InstalledVisualModelArtifact {
     file_name: String,
     sha256: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ArtifactFingerprint {
+    file_name: String,
+    bytes: u64,
+    modified_nanos: u128,
+}
+
+static VERIFIED_PACKS: OnceLock<Mutex<HashMap<PathBuf, Vec<ArtifactFingerprint>>>> =
+    OnceLock::new();
 
 fn artifact(file_name: &str) -> VisualModelArtifact {
     VisualModelArtifact {
@@ -194,7 +207,20 @@ fn is_complete_install(
     if manifest.pack_id != pack.id || manifest.artifacts.len() != pack.artifacts.len() {
         return false;
     }
-    pack.artifacts.iter().all(|artifact| {
+    let fingerprint = match pack_fingerprint(pack, directory) {
+        Ok(fingerprint) => fingerprint,
+        Err(_) => return false,
+    };
+    let cache = VERIFIED_PACKS.get_or_init(|| Mutex::new(HashMap::new()));
+    if cache
+        .lock()
+        .unwrap()
+        .get(directory)
+        .is_some_and(|previous| previous == &fingerprint)
+    {
+        return true;
+    }
+    let verified = pack.artifacts.iter().all(|artifact| {
         let Some(recorded) = manifest
             .artifacts
             .iter()
@@ -207,7 +233,55 @@ fn is_complete_install(
             && sha256_file(&path)
                 .map(|actual| actual.eq_ignore_ascii_case(&recorded.sha256))
                 .unwrap_or(false)
-    })
+    });
+    if verified {
+        cache
+            .lock()
+            .unwrap()
+            .insert(directory.to_path_buf(), fingerprint);
+    }
+    verified
+}
+
+fn pack_fingerprint(
+    pack: &VisualModelPack,
+    directory: &Path,
+) -> Result<Vec<ArtifactFingerprint>, String> {
+    let mut fingerprints = pack
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            let metadata = fs::metadata(directory.join(&artifact.file_name))
+                .map_err(|error| error.to_string())?;
+            if !metadata.is_file() {
+                return Err(format!("{} is not a regular file", artifact.file_name));
+            }
+            let modified_nanos = metadata
+                .modified()
+                .map_err(|error| error.to_string())?
+                .duration_since(UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos();
+            Ok(ArtifactFingerprint {
+                file_name: artifact.file_name.clone(),
+                bytes: metadata.len(),
+                modified_nanos,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let manifest = fs::metadata(manifest_path(directory)).map_err(|error| error.to_string())?;
+    let modified_nanos = manifest
+        .modified()
+        .map_err(|error| error.to_string())?
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    fingerprints.push(ArtifactFingerprint {
+        file_name: "manifest.json".to_string(),
+        bytes: manifest.len(),
+        modified_nanos,
+    });
+    Ok(fingerprints)
 }
 
 fn fail_download_job(
@@ -638,6 +712,11 @@ mod tests {
             artifacts,
             source_path: None,
         };
+        fs::write(
+            manifest_path(directory.path()),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
         assert!(is_complete_install(
             &pack,
             directory.path(),
@@ -646,6 +725,47 @@ mod tests {
         fs::write(
             directory.path().join(&pack.artifacts[0].file_name),
             b"modified",
+        )
+        .unwrap();
+        assert!(!is_complete_install(
+            &pack,
+            directory.path(),
+            Some(&manifest)
+        ));
+    }
+
+    #[test]
+    fn validated_pack_is_rechecked_when_an_artifact_changes() {
+        let pack = visual_model_packs().remove(0);
+        let directory = tempfile::tempdir().unwrap();
+        let mut artifacts = Vec::new();
+        for artifact in &pack.artifacts {
+            let path = directory.path().join(&artifact.file_name);
+            fs::write(&path, artifact.file_name.as_bytes()).unwrap();
+            artifacts.push(InstalledVisualModelArtifact {
+                file_name: artifact.file_name.clone(),
+                sha256: sha256_file(&path).unwrap(),
+            });
+        }
+        let manifest = InstalledVisualModelPack {
+            pack_id: pack.id.clone(),
+            installed_at: 0,
+            artifacts,
+            source_path: None,
+        };
+        fs::write(
+            manifest_path(directory.path()),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        assert!(is_complete_install(
+            &pack,
+            directory.path(),
+            Some(&manifest)
+        ));
+        fs::write(
+            directory.path().join(&pack.artifacts[0].file_name),
+            b"different bytes with a different length",
         )
         .unwrap();
         assert!(!is_complete_install(
