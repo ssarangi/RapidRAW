@@ -145,6 +145,7 @@ export enum Invokes {
   ConfirmFaceCluster = 'confirm_face_cluster',
   ListSuggestedAiTags = 'list_suggested_ai_tags',
   ReviewAiTag = 'review_ai_tag',
+  ReviewAiTags = 'review_ai_tags',
   GenerateAllCommunityPreviews = 'generate_all_community_previews',
   SaveCommunityPreset = 'save_community_preset',
   SaveTempFile = 'save_temp_file',

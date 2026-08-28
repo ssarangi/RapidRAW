@@ -4517,6 +4517,33 @@ pub fn review_ai_tag(
 }
 
 #[tauri::command]
+pub fn review_ai_tags(
+    ids: Vec<i64>,
+    review_state: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<usize, String> {
+    if !matches!(review_state.as_str(), "accepted" | "rejected") {
+        return Err("Invalid AI tag review state".to_string());
+    }
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let mut conn = open_connection(&active_library_path(&state)?)?;
+    let transaction = conn.transaction().map_err(|error| error.to_string())?;
+    let mut changed = 0;
+    for id in ids {
+        changed += transaction
+            .execute(
+                "UPDATE image_ai_tags SET review_state = ?1, updated_at = strftime('%s','now') WHERE rowid = ?2 AND review_state = 'suggested'",
+                params![review_state, id],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(changed)
+}
+
+#[tauri::command]
 pub fn review_catalog_face(
     face_id: i64,
     person_id: Option<i64>,
@@ -4962,6 +4989,31 @@ pub fn review_species(
         return Err("review_state must be 'accepted' or 'rejected'".to_string());
     }
     review_species_headless(&active_library_path(&state)?, id, &review_state)
+}
+
+#[tauri::command]
+pub fn review_species_batch(
+    ids: Vec<i64>,
+    review_state: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<usize, String> {
+    if !matches!(review_state.as_str(), "accepted" | "rejected") {
+        return Err("review_state must be 'accepted' or 'rejected'".to_string());
+    }
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let mut conn = open_connection(&active_library_path(&state)?)?;
+    let transaction = conn.transaction().map_err(|error| error.to_string())?;
+    let mut changed = 0;
+    for id in ids {
+        changed += transaction.execute(
+            "UPDATE species_classifications SET review_state = ?1, updated_at = ?2 WHERE id = ?3 AND review_state = 'suggested'",
+            params![review_state, now_secs(), id],
+        ).map_err(|error| error.to_string())?;
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(changed)
 }
 
 /// Reviews a BioCLIP species suggestion without requiring a running Tauri application.
