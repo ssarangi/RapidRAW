@@ -994,6 +994,60 @@ mod tests {
     }
 
     #[test]
+    fn headless_catalog_scan_indexes_a_local_image_without_an_app_handle() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("photos");
+        fs::create_dir_all(&root).unwrap();
+        image::RgbImage::from_pixel(10, 6, image::Rgb([16, 32, 48]))
+            .save(root.join("sample.png"))
+            .unwrap();
+        let db_path = directory.path().join("catalog.db");
+        let connection = Connection::open(&db_path).unwrap();
+        migrate(&connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO libraries(id, name, created_at, updated_at) VALUES('library', 'Test', 0, 0)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'library', ?1)",
+                [root.to_string_lossy().to_string()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let scan = scan_library_root_headless(
+            1,
+            true,
+            db_path.clone(),
+            crate::app_settings::AppSettings::default(),
+            crate::app_state::BackgroundJobControl::new(),
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(scan.scanned, 1);
+        let connection = Connection::open(&db_path).unwrap();
+        let image_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM images WHERE status = 'present'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let dimensions: (Option<i64>, Option<i64>) = connection
+            .query_row(
+                "SELECT width, height FROM image_metadata LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(image_count, 1);
+        assert_eq!(dimensions, (Some(10), Some(6)));
+    }
+
+    #[test]
     fn face_schema_enforces_normalized_bounding_boxes() {
         let connection = Connection::open_in_memory().unwrap();
         migrate(&connection).unwrap();
@@ -1680,6 +1734,14 @@ fn sidecar_metadata(
     app_handle: &AppHandle,
 ) -> (bool, u8, Option<Vec<String>>) {
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
+    sidecar_metadata_with_settings(image_path, sidecar_path, &settings)
+}
+
+fn sidecar_metadata_with_settings(
+    image_path: &Path,
+    sidecar_path: &Path,
+    settings: &crate::app_settings::AppSettings,
+) -> (bool, u8, Option<Vec<String>>) {
     let metadata = crate::exif_processing::load_sidecar(sidecar_path);
     let is_raw = is_raw_file(image_path);
     let tm_override = crate::image_processing::resolve_tonemapper_override(&settings, is_raw);
@@ -2005,7 +2067,7 @@ fn wait_for_catalog_scan_control(
         });
     }
 
-    let is_runnable = tokio::runtime::Handle::current().block_on(job_control.wait_until_runnable());
+    let is_runnable = tauri::async_runtime::block_on(job_control.wait_until_runnable());
     if !is_runnable {
         return Err("Catalog scan cancelled".to_string());
     }
@@ -2016,7 +2078,7 @@ fn wait_for_catalog_scan_control(
 fn scan_library_root_impl<F>(
     root_id: i64,
     recursive: bool,
-    app_handle: &AppHandle,
+    settings: &crate::app_settings::AppSettings,
     db_path: PathBuf,
     job_control: Arc<crate::app_state::BackgroundJobControl>,
     mut on_progress: F,
@@ -2151,7 +2213,8 @@ where
             .map_err(|e| e.to_string())?;
 
         let sidecar_path = parse_virtual_path(&path.to_string_lossy()).1;
-        let (is_edited, rating, tags) = sidecar_metadata(&path, &sidecar_path, &app_handle);
+        let (is_edited, rating, tags) =
+            sidecar_metadata_with_settings(&path, &sidecar_path, settings);
         let tags_json = tags.as_ref().and_then(|t| serde_json::to_string(t).ok());
         let sidecar_modified = if sidecar_path.exists() {
             Some(unix_modified(&sidecar_path) as i64)
@@ -2271,6 +2334,29 @@ where
     })
 }
 
+/// Performs a catalog scan without a Tauri window. The caller owns durable job
+/// state and may persist or print each progress update.
+pub fn scan_library_root_headless<F>(
+    root_id: i64,
+    recursive: bool,
+    db_path: PathBuf,
+    settings: crate::app_settings::AppSettings,
+    job_control: Arc<crate::app_state::BackgroundJobControl>,
+    on_progress: F,
+) -> Result<ScanResult, String>
+where
+    F: FnMut(CatalogScanProgress),
+{
+    scan_library_root_impl(
+        root_id,
+        recursive,
+        &settings,
+        db_path,
+        job_control,
+        on_progress,
+    )
+}
+
 #[tauri::command]
 pub fn scan_library_root(
     root_id: i64,
@@ -2279,17 +2365,12 @@ pub fn scan_library_root(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<ScanResult, String> {
     let db_path = active_library_path(&state)?;
+    let settings = load_settings(app_handle).unwrap_or_default();
     let state_control = state.catalog_scan_state.clone();
     state_control.begin(root_id)?;
     let job_control = crate::app_state::BackgroundJobControl::new();
-    let result = scan_library_root_impl(
-        root_id,
-        recursive,
-        &app_handle,
-        db_path,
-        job_control,
-        |_| {},
-    );
+    let result =
+        scan_library_root_impl(root_id, recursive, &settings, db_path, job_control, |_| {});
     state_control.finish(root_id);
     result
 }
@@ -2302,6 +2383,7 @@ pub fn start_catalog_scan(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<(), String> {
     let db_path = active_library_path(&state)?;
+    let settings = load_settings(app_handle.clone()).unwrap_or_default();
     let state_control = state.catalog_scan_state.clone();
     let root_path = open_connection(&db_path)?
         .query_row(
@@ -2352,7 +2434,7 @@ pub fn start_catalog_scan(
         let result = scan_library_root_impl(
             root_id,
             recursive,
-            &app_for_task,
+            &settings,
             db_path.clone(),
             job_control,
             |progress| {

@@ -31,6 +31,7 @@ mod image_processing;
 pub mod image_restoration;
 pub use app_state::BackgroundJobControl;
 pub use library_db::create_background_job;
+pub use library_db::scan_library_root_headless;
 pub use library_db::update_job;
 mod inpainting;
 mod launch_request;

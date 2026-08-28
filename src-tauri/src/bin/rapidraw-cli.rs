@@ -9,6 +9,7 @@ use rapidraw_lib::face_model_registry::{InstalledFaceModelPack, face_model_packs
 use rapidraw_lib::image_restoration::{
     RestorationRecipe, run_restoration_worker, validate_restoration_recipe,
 };
+use rapidraw_lib::scan_library_root_headless;
 use rapidraw_lib::tagging::run_catalog_ram_plus_tagging_headless;
 use rapidraw_lib::visual_model_registry::visual_model_packs;
 use rusqlite::Connection;
@@ -56,6 +57,7 @@ fn main() {
         Some("library") if arguments.get(1).map(String::as_str) == Some("inspect") => inspect(&arguments),
         Some("library") if arguments.get(1).map(String::as_str) == Some("roots") => list_roots(&arguments),
         Some("library") if arguments.get(1).map(String::as_str) == Some("metrics") => metrics(&arguments),
+        Some("library") if arguments.get(1).map(String::as_str) == Some("scan") => run_catalog_scan_cli(&arguments),
         Some("jobs") if arguments.get(1).map(String::as_str) == Some("list") => list_jobs(&arguments),
         Some("jobs") if arguments.get(1).map(String::as_str) == Some("show") => show_job(&arguments),
         Some("faces") if arguments.get(1).map(String::as_str) == Some("status") => face_status(&arguments),
@@ -75,7 +77,7 @@ fn main() {
         Some("models") if arguments.get(1).map(String::as_str) == Some("verify") => verify_installed_model(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("list") => list_derivatives(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("run") => run_restore_cli(&arguments),
-        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli faces detect|recognize --database <catalog.db> --face-models-dir <models/face> [--root <id>] | rapidraw-cli tags status|top|export-suggestions|run --database <catalog.db> | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
+        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics|scan --database <catalog.db> | rapidraw-cli library scan --database <catalog.db> --root <id> [--non-recursive] | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli faces detect|recognize --database <catalog.db> --face-models-dir <models/face> [--root <id>] | rapidraw-cli tags status|top|export-suggestions|run --database <catalog.db> | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -127,6 +129,86 @@ fn metrics(arguments: &[String]) -> Result<serde_json::Value, String> {
     Ok(
         json!({ "images": count("SELECT COUNT(*) FROM images WHERE status = 'present'")?, "missing": count("SELECT COUNT(*) FROM images WHERE status = 'missing'")?, "aiSuggested": count("SELECT COUNT(*) FROM image_ai_tags WHERE review_state = 'suggested'")?, "aiAccepted": count("SELECT COUNT(*) FROM image_ai_tags WHERE review_state = 'accepted'")?, "ramPlusAnalyzed": count("SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.model_revision = 'onnx-v1' AND s.image_modified_at = i.modified_at AND s.state = 'completed')")?, "ramPlusPending": count("SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND NOT EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.model_revision = 'onnx-v1' AND s.image_modified_at = i.modified_at AND s.state = 'completed')")?, "ramPlusFailed": count("SELECT COUNT(*) FROM images i WHERE i.status = 'present' AND EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.model_revision = 'onnx-v1' AND s.image_modified_at = i.modified_at AND s.state = 'failed')")?, "cullSessions": count("SELECT COUNT(*) FROM cull_sessions")?, "cullOverrides": count("SELECT COUNT(*) FROM cull_decision_events")? }),
     )
+}
+
+fn run_catalog_scan_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let db_path = database_argument(arguments)?;
+    let root_id = numeric_argument(arguments, "--root")?;
+    let recursive = !arguments
+        .iter()
+        .any(|argument| argument == "--non-recursive");
+    let job_id = rapidraw_lib::create_background_job(
+        &db_path,
+        "catalog_scan",
+        json!({ "rootId": root_id, "recursive": recursive, "headless": true }),
+    )?;
+    let control = BackgroundJobControl::new();
+    let progress_db_path = db_path.clone();
+    let progress_job_id = job_id.clone();
+    let result = scan_library_root_headless(
+        root_id,
+        recursive,
+        db_path.clone(),
+        rapidraw_lib::AppSettings::default(),
+        control,
+        move |progress| {
+            let state = if progress.message == "Indexing paused" {
+                "paused"
+            } else {
+                "running"
+            };
+            let _ = rapidraw_lib::update_job(
+                &progress_db_path,
+                &progress_job_id,
+                state,
+                &progress.message,
+                progress.current as i64,
+                progress.total as i64,
+                progress.current_path.as_deref(),
+                None,
+            );
+        },
+    );
+    match result {
+        Ok(scan) => {
+            rapidraw_lib::update_job(
+                &db_path,
+                &job_id,
+                "completed",
+                "Catalog scan complete",
+                scan.scanned as i64,
+                scan.scanned as i64,
+                None,
+                None,
+            )?;
+            Ok(json!({
+                "jobId": job_id,
+                "state": "completed",
+                "rootId": scan.root_id,
+                "scanned": scan.scanned,
+                "updated": scan.inserted_or_updated,
+                "missingMarked": scan.missing_marked,
+            }))
+        }
+        Err(error) => {
+            let state = if error == "Catalog scan cancelled" {
+                "cancelled"
+            } else {
+                "failed"
+            };
+            let _ = rapidraw_lib::update_job(
+                &db_path,
+                &job_id,
+                state,
+                &error,
+                0,
+                0,
+                None,
+                Some(&error),
+            );
+            Err(error)
+        }
+    }
 }
 
 fn list_jobs(arguments: &[String]) -> Result<serde_json::Value, String> {
