@@ -883,6 +883,39 @@ fn sha256_file(path: &std::path::Path) -> Result<String, String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+fn verify_visual_runtime(directory: &std::path::Path, model_id: &str) -> Result<(), String> {
+    let model_name = match model_id {
+        "ram-plus-onnx" => "model.onnx",
+        "bioclip-v1" => "vision_encoder.onnx",
+        "rawnind-utnet2-bayer" => "rawnind_bayer.onnx",
+        "nafnet-sidd-rgb" => "nafnet_sidd.onnx",
+        _ => return Err("No runtime adapter is available in this build".to_string()),
+    };
+    let model_path = directory.join(model_name);
+    ort::session::Session::builder()
+        .and_then(|builder| builder.commit_from_file(&model_path))
+        .map_err(|error| format!("ONNX session could not be created: {error}"))?;
+
+    if model_id == "bioclip-v1" {
+        let labels = directory.join("species_labels.json");
+        let embeddings = directory.join("species_embeddings.bin");
+        let labels_json = fs::read_to_string(labels)
+            .map_err(|error| format!("BioCLIP taxonomy cannot be read: {error}"))?;
+        let taxonomy = serde_json::from_str::<serde_json::Value>(&labels_json)
+            .map_err(|error| format!("BioCLIP taxonomy is invalid JSON: {error}"))?;
+        if taxonomy.as_array().is_none_or(Vec::is_empty) {
+            return Err("BioCLIP taxonomy has no labels".to_string());
+        }
+        let embedding_bytes = fs::metadata(embeddings)
+            .map_err(|error| format!("BioCLIP embeddings cannot be read: {error}"))?
+            .len();
+        if embedding_bytes == 0 || embedding_bytes % 4 != 0 {
+            return Err("BioCLIP embeddings are not a packed f32 array".to_string());
+        }
+    }
+    Ok(())
+}
+
 fn verify_installed_model(arguments: &[String]) -> Result<serde_json::Value, String> {
     let model_id = named_argument(arguments, "--id")?;
     if let Some(pack) = visual_model_packs()
@@ -918,16 +951,18 @@ fn verify_installed_model(arguments: &[String]) -> Result<serde_json::Value, Str
             && artifacts
                 .iter()
                 .all(|artifact| artifact["exists"].as_bool() == Some(true));
-        let runtime_supported = matches!(
-            pack.id.as_str(),
-            "ram-plus-onnx" | "bioclip-v1" | "rawnind-utnet2-bayer" | "nafnet-sidd-rgb"
-        );
+        let runtime_check = if installed {
+            verify_visual_runtime(&directory, &pack.id)
+        } else {
+            Err("Pack is not installed".to_string())
+        };
         return Ok(json!({
             "id": pack.id,
             "type": "visual",
             "installed": installed,
-            "runnable": installed && runtime_supported,
-            "integrity": "manifest-and-artifact-presence",
+            "runnable": runtime_check.is_ok(),
+            "integrity": "manifest-artifact-and-runtime-session",
+            "runtimeValidationError": runtime_check.err(),
             "manifestPackId": manifest_pack_id,
             "artifacts": artifacts,
         }));
@@ -1072,12 +1107,18 @@ fn run_restore_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::exit_code_for_error;
+    use super::{exit_code_for_error, verify_visual_runtime};
+    use std::path::Path;
 
     #[test]
     fn cli_errors_use_stable_automation_exit_codes() {
         assert_eq!(exit_code_for_error("--database <path> is required"), 2);
         assert_eq!(exit_code_for_error("Catalog scan cancelled"), 3);
         assert_eq!(exit_code_for_error("database is locked"), 1);
+    }
+
+    #[test]
+    fn visual_runtime_verification_never_claims_unknown_models_are_runnable() {
+        assert!(verify_visual_runtime(Path::new("/tmp"), "unknown-model").is_err());
     }
 }
