@@ -104,10 +104,17 @@ fn artifact(
 }
 
 /// All face-model candidates are defined in one place. Direct-download packs
-/// are the first runtime targets. Conversion-required packs remain visible so
-/// an evaluator can compare them once a reproducible ONNX artifact is pinned.
+/// are the first runtime targets with pinned immutable revisions. Conversion-required
+/// packs remain visible so an evaluator can compare them once a reproducible ONNX artifact is pinned.
 pub fn face_model_packs() -> Vec<FaceModelPack> {
     vec![
+        // Pack: YuNet + SFace
+        // Upstream Repository: https://github.com/opencv/opencv_zoo
+        // Immutable Revision: 47534e27c9851bb1128ccc0102f1145e27f23f98 (commit on main)
+        // Date Verified: 2026-08-28
+        // Verified SHA-256:
+        //   - face_detection_yunet_2023mar.onnx: 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4
+        //   - face_recognition_sface_2021dec.onnx: 0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79
         FaceModelPack {
             id: "opencv-yunet-sface".to_string(),
             display_name: "YuNet + SFace".to_string(),
@@ -121,13 +128,13 @@ pub fn face_model_packs() -> Vec<FaceModelPack> {
                 artifact(
                     "face_detection_yunet_2023mar.onnx",
                     ModelArtifactFormat::Onnx,
-                    "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+                    "https://github.com/opencv/opencv_zoo/raw/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
                     Some("8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"),
                 ),
                 artifact(
                     "face_recognition_sface_2021dec.onnx",
                     ModelArtifactFormat::Onnx,
-                    "https://github.com/opencv/opencv_zoo/raw/main/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+                    "https://github.com/opencv/opencv_zoo/raw/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
                     Some("0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79"),
                 ),
             ],
@@ -704,6 +711,67 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn direct_download_face_packs_use_immutable_urls() {
+        for pack in face_model_packs()
+            .iter()
+            .filter(|pack| pack.availability == ModelAvailability::DirectDownload)
+        {
+            for artifact in &pack.artifacts {
+                assert!(
+                    artifact.source_url.starts_with("https://"),
+                    "{} artifact {} must be HTTPS",
+                    pack.id,
+                    artifact.file_name
+                );
+                assert!(
+                    !artifact.source_url.contains("/raw/main/")
+                        && !artifact.source_url.contains("/raw/master/")
+                        && !artifact.source_url.contains("/resolve/main/")
+                        && !artifact.source_url.contains("/resolve/master/"),
+                    "{} artifact {} must use an immutable commit revision in URL: {}",
+                    pack.id,
+                    artifact.file_name,
+                    artifact.source_url
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_install_validation_rejects_mismatched_registry_pin_even_if_manifest_matches_disk() {
+        let directory = tempdir().unwrap();
+        let pack = face_model_packs()
+            .into_iter()
+            .find(|pack| pack.id == "opencv-yunet-sface")
+            .unwrap();
+
+        for artifact in &pack.artifacts {
+            fs::write(directory.path().join(&artifact.file_name), b"forged_bytes").unwrap();
+        }
+
+        let manifest = InstalledFaceModelPack {
+            pack_id: pack.id.clone(),
+            installed_at: 1,
+            artifacts: pack
+                .artifacts
+                .iter()
+                .map(|artifact| {
+                    let path = directory.path().join(&artifact.file_name);
+                    InstalledFaceModelArtifact {
+                        file_name: artifact.file_name.clone(),
+                        sha256: sha256_file(&path).unwrap(),
+                    }
+                })
+                .collect(),
+        };
+
+        assert!(
+            !is_complete_install(&pack, directory.path(), Some(&manifest)),
+            "Forged disk bytes matching manifest must be rejected when registry pin differs"
+        );
     }
 
     #[test]

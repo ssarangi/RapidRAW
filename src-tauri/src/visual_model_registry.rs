@@ -91,13 +91,23 @@ fn visual_artifact(
 fn ram_plus_artifact(file_name: &str, sha256: &str) -> VisualModelArtifact {
     visual_artifact(
         file_name,
-        &format!("https://huggingface.co/benjaminjonard/ram-plus-onnx/resolve/main/{file_name}"),
+        &format!(
+            "https://huggingface.co/benjaminjonard/ram-plus-onnx/resolve/e22cfb689ba3a3e02f23925e1f581e3e07166c75/{file_name}"
+        ),
         Some(sha256),
     )
 }
 
 pub fn visual_model_packs() -> Vec<VisualModelPack> {
     vec![
+        // Pack: RAM++ (Recognize Anything Model Plus)
+        // Upstream Repository: https://huggingface.co/benjaminjonard/ram-plus-onnx
+        // Immutable Revision: e22cfb689ba3a3e02f23925e1f581e3e07166c75
+        // Date Verified: 2026-08-28
+        // Verified SHA-256:
+        //   - model.onnx: 40ac94a3eb0c5fddfe26b1d6a047fb7afe529b3b7afe569facac8590a3d88773
+        //   - tags.txt: 1a6c943dd251993770e7cf6fed23a38b7ac068f4c8fbc7a0db85cbe0fe5221b3
+        //   - thresholds.txt: 81250c4b6a6eb5dc553a084b34d8354b4f2951de5c799a64d3f638d88fe8cf7b
         VisualModelPack {
             id: "ram-plus-onnx".to_string(),
             display_name: "RAM++".to_string(),
@@ -122,6 +132,15 @@ pub fn visual_model_packs() -> Vec<VisualModelPack> {
             license_url: "https://huggingface.co/benjaminjonard/ram-plus-onnx".to_string(),
             model_source_url: "https://github.com/xinyu1205/recognize-anything".to_string(),
         },
+        // Pack: BioCLIP (Imageomics ViT-B/16 with Tree-of-Life taxonomy)
+        // Upstream Repository: https://github.com/ssarangi/RapidRAW / https://huggingface.co/imageomics/bioclip
+        // Immutable Release Tag: v0.1.0-models
+        // Date Verified: 2026-08-28
+        // Verified SHA-256:
+        //   - vision_encoder.onnx: 3ed2c2ad149851297481727463c3085c030bafcf278c070bd9617d810beed5a4
+        //   - vision_encoder.onnx.data: c0cdb287d84c0e66dcf58f5f4c1e8ba75b5f42bf2b701addfff60b0879ed5bf1
+        //   - species_embeddings.bin: 5c4383ca3cd4cfb33ba3166d935a521a2034ae20f0c2045bdab5561331bf81cd
+        //   - species_labels.json: 57fa63a8bf67c0fbcb9329400939d7352da576283684361fece1fde04c8b9eda
         VisualModelPack {
             id: "bioclip-v1".to_string(),
             display_name: "BioCLIP".to_string(),
@@ -761,6 +780,33 @@ mod tests {
                     "SHA-256 for {} in pack {} must be valid hex",
                     artifact.file_name,
                     pack.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn direct_download_visual_packs_use_immutable_urls() {
+        for pack in visual_model_packs()
+            .iter()
+            .filter(|pack| pack.availability == VisualModelAvailability::DirectDownload)
+        {
+            for artifact in &pack.artifacts {
+                assert!(
+                    artifact.source_url.starts_with("https://"),
+                    "{} artifact {} must be HTTPS",
+                    pack.id,
+                    artifact.file_name
+                );
+                assert!(
+                    !artifact.source_url.contains("/raw/main/")
+                        && !artifact.source_url.contains("/raw/master/")
+                        && !artifact.source_url.contains("/resolve/main/")
+                        && !artifact.source_url.contains("/resolve/master/"),
+                    "{} artifact {} must use an immutable commit revision in URL: {}",
+                    pack.id,
+                    artifact.file_name,
+                    artifact.source_url
                 );
             }
         }
