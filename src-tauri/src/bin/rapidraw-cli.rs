@@ -39,6 +39,7 @@ fn main() {
         Some("library") if arguments.get(1).map(String::as_str) == Some("roots") => list_roots(&arguments),
         Some("library") if arguments.get(1).map(String::as_str) == Some("metrics") => metrics(&arguments),
         Some("jobs") if arguments.get(1).map(String::as_str) == Some("list") => list_jobs(&arguments),
+        Some("jobs") if arguments.get(1).map(String::as_str) == Some("show") => show_job(&arguments),
         Some("faces") if arguments.get(1).map(String::as_str) == Some("status") => face_status(&arguments),
         Some("faces") if arguments.get(1).map(String::as_str) == Some("clusters") => face_clusters(&arguments),
         Some("tags") if arguments.get(1).map(String::as_str) == Some("status") => tag_status(&arguments),
@@ -52,7 +53,7 @@ fn main() {
         Some("models") if arguments.get(1).map(String::as_str) == Some("info") => verify_model(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("list") => list_derivatives(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("run") => run_restore_cli(&arguments),
-        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top|export-suggestions --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
+        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top|export-suggestions --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -125,6 +126,60 @@ fn list_jobs(arguments: &[String]) -> Result<serde_json::Value, String> {
         statement.query_map([], |row| Ok(json!({ "id": row.get::<_, String>(0)?, "kind": row.get::<_, String>(1)?, "state": row.get::<_, String>(2)?, "current": row.get::<_, i64>(3)?, "total": row.get::<_, i64>(4)?, "message": row.get::<_, String>(5)? }))).map_err(|error| error.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?
     };
     Ok(json!(jobs))
+}
+
+fn show_job(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let connection =
+        Connection::open(database_argument(arguments)?).map_err(|error| error.to_string())?;
+    let job_id = named_argument(arguments, "--id")?;
+    let job = connection
+        .query_row(
+            "SELECT id, kind, state, root_id, payload_json, current, total, current_item, message, error, created_at, updated_at, completed_at FROM background_jobs WHERE id = ?1",
+            [&job_id],
+            |row| {
+                let payload_json: String = row.get(4)?;
+                let payload = serde_json::from_str::<serde_json::Value>(&payload_json)
+                    .unwrap_or_else(|_| json!({ "invalidPayload": true, "raw": payload_json }));
+                Ok(json!({
+                    "id": row.get::<_, String>(0)?,
+                    "kind": row.get::<_, String>(1)?,
+                    "state": row.get::<_, String>(2)?,
+                    "rootId": row.get::<_, Option<i64>>(3)?,
+                    "payload": payload,
+                    "current": row.get::<_, i64>(5)?,
+                    "total": row.get::<_, i64>(6)?,
+                    "currentItem": row.get::<_, Option<String>>(7)?,
+                    "message": row.get::<_, String>(8)?,
+                    "error": row.get::<_, Option<String>>(9)?,
+                    "createdAt": row.get::<_, i64>(10)?,
+                    "updatedAt": row.get::<_, i64>(11)?,
+                    "completedAt": row.get::<_, Option<i64>>(12)?,
+                }))
+            },
+        )
+        .map_err(|error| format!("Could not load job {job_id}: {error}"))?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, state, message, current, total, created_at FROM background_job_events WHERE job_id = ?1 ORDER BY id DESC LIMIT 200",
+        )
+        .map_err(|error| error.to_string())?;
+    let events = statement
+        .query_map([&job_id], |row| {
+            Ok(json!({
+                "id": row.get::<_, i64>(0)?,
+                "state": row.get::<_, String>(1)?,
+                "message": row.get::<_, String>(2)?,
+                "current": row.get::<_, i64>(3)?,
+                "total": row.get::<_, i64>(4)?,
+                "createdAt": row.get::<_, i64>(5)?,
+            }))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let mut job = job;
+    job["events"] = json!(events);
+    Ok(job)
 }
 
 fn face_status(arguments: &[String]) -> Result<serde_json::Value, String> {
