@@ -21,10 +21,11 @@ import {
   Filter,
   FolderOpen,
   Play,
+  Database,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
-import { AutoCullPlan, AutoCullResult, CullingSettings, CullSessionDecision, CullSessionSummary, Invokes, ImageFile } from '../../ui/AppProperties';
+import { AutoCullPlan, AutoCullResult, CatalogRoot, CullingSettings, CullSessionDecision, CullSessionSummary, Invokes, ImageFile } from '../../ui/AppProperties';
 import { Thumbnail } from './LibraryItems';
 import Text from '../../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
@@ -1417,6 +1418,34 @@ export default function CullingView(props: any) {
     }
   };
 
+  const selectLibraryRoot = async (root: CatalogRoot) => {
+    const folderKey = `LibraryFolder:${root.id}:.`;
+    setCullFolderPath(folderKey);
+    useUIStore.getState().setUI({ cullWorkspaceFolderPath: folderKey });
+    setLocalCullPlan(null);
+    setCullDecisions({});
+    setCullError(null);
+    try {
+      const files = await invoke<ImageFile[]>(Invokes.ListCatalogImages, {
+        rootId: root.id,
+        recursive: includeSubfolders,
+        folderPath: '.',
+      });
+      const ratings = Object.fromEntries(files.map((file) => [file.path, file.rating || 0]));
+      useLibraryStore.getState().setLibrary({
+        currentFolderPath: folderKey,
+        rootPaths: [root.absolutePath],
+        imageList: files,
+        imageRatings: ratings,
+        multiSelectedPaths: [],
+        libraryActivePath: null,
+        libraryScrollTop: 0,
+      });
+    } catch (err) {
+      console.error('Failed to load library images for culling:', err);
+    }
+  };
+
   const chooseCullFolder = async () => {
     const path = await open({ directory: true, multiple: false, title: 'Choose a folder to cull' });
     if (typeof path !== 'string') return;
@@ -1425,6 +1454,24 @@ export default function CullingView(props: any) {
     setLocalCullPlan(null);
     setCullDecisions({});
     setCullError(null);
+    try {
+      const files = await invoke<ImageFile[]>(
+        includeSubfolders ? Invokes.ListImagesRecursive : Invokes.ListImagesInDir,
+        { path },
+      );
+      const ratings = Object.fromEntries(files.map((file) => [file.path, file.rating || 0]));
+      useLibraryStore.getState().setLibrary({
+        currentFolderPath: path,
+        rootPaths: [path],
+        imageList: files,
+        imageRatings: ratings,
+        multiSelectedPaths: [],
+        libraryActivePath: null,
+        libraryScrollTop: 0,
+      });
+    } catch (err) {
+      console.error('Failed to load folder images for culling:', err);
+    }
   };
 
   const startCullFromRail = async () => {
@@ -1624,11 +1671,95 @@ export default function CullingView(props: any) {
         {isCatalog && <button className="absolute z-40 top-3 right-3 h-9 w-9 flex items-center justify-center rounded-md bg-bg-secondary/90 border border-border-color text-text-primary hover:bg-surface" onClick={() => setShowHistory((current) => !current)} data-tooltip="Culling history"><History size={16} /></button>}
         {isCatalog && showHistory && <CullHistoryPanel onClose={() => setShowHistory(false)} />}
         {imageList.length === 0 ? (
-          <div className="m-auto flex max-w-sm flex-col items-center px-8 text-center">
-            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-md border border-border-color bg-bg-secondary text-text-secondary"><FolderOpen size={22} /></div>
-            <Text variant={TextVariants.heading}>Choose a folder to cull</Text>
-            <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-2">Analyze a shoot, review the decisions, then keep full control of what changes.</Text>
-            <button className="mt-5 inline-flex items-center gap-2 rounded-md bg-accent px-4 py-2 text-sm text-white hover:brightness-110" onClick={() => void chooseCullFolder()}><FolderOpen size={16} /> Select folder</button>
+          <div className="m-auto flex w-full max-w-2xl flex-col items-center px-6 py-10">
+            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-md border border-border-color bg-bg-secondary text-text-secondary">
+              <FolderOpen size={22} />
+            </div>
+            <Text variant={TextVariants.heading} className="text-xl font-semibold">Choose photos to cull</Text>
+            <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-2 text-center max-w-md">
+              RapidRAW analyzes duplicate groupings, focus sharpness, and subject detection so you can quickly review and organize your shoot.
+            </Text>
+
+            <div className="mt-8 grid w-full grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Option 1: Library Folders */}
+              <div className="flex flex-col rounded-lg border border-border-color bg-bg-secondary/60 p-5 shadow-xs transition-colors hover:border-accent/40">
+                <div className="flex items-center gap-3">
+                  <div className="flex h-9 w-9 items-center justify-center rounded-md bg-accent/10 text-accent">
+                    <Database size={18} />
+                  </div>
+                  <div>
+                    <Text variant={TextVariants.small} weight={TextWeights.semibold} className="text-sm">
+                      Library Folders
+                    </Text>
+                    <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="text-xs">
+                      Cull from your indexed catalog roots
+                    </Text>
+                  </div>
+                </div>
+
+                <div className="mt-4 flex-1 space-y-2 max-h-48 overflow-y-auto pr-1">
+                  {catalogRoots.length > 0 ? (
+                    catalogRoots.map((root) => (
+                      <button
+                        key={root.id}
+                        onClick={() => void selectLibraryRoot(root)}
+                        className="group flex w-full items-center justify-between gap-2 rounded-md border border-border-color bg-bg-primary px-3 py-2 text-left text-xs transition-colors hover:border-accent/60 hover:bg-surface"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="font-medium text-text-primary truncate">
+                            {root.label || root.absolutePath.split(/[\\/]/).pop() || root.absolutePath}
+                          </div>
+                          <div className="text-[11px] text-text-secondary truncate font-mono mt-0.5">
+                            {root.absolutePath}
+                          </div>
+                        </div>
+                        <div className="shrink-0 flex items-center gap-2">
+                          <span className="rounded bg-surface px-1.5 py-0.5 text-[10px] text-text-secondary tabular-nums border border-border-color">
+                            {root.imageCount} photos
+                          </span>
+                          <FolderOpen size={13} className="text-text-secondary group-hover:text-text-primary transition-colors" />
+                        </div>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="rounded-md border border-dashed border-border-color p-4 text-center text-xs text-text-secondary">
+                      No library folders configured yet.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Option 2: External / Non-Library Folder */}
+              <div className="flex flex-col justify-between rounded-lg border border-border-color bg-bg-secondary/60 p-5 shadow-xs transition-colors hover:border-accent/40">
+                <div>
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-md bg-accent/10 text-accent">
+                      <FolderOpen size={18} />
+                    </div>
+                    <div>
+                      <Text variant={TextVariants.small} weight={TextWeights.semibold} className="text-sm">
+                        External Folder
+                      </Text>
+                      <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="text-xs">
+                        Cull from any folder on disk
+                      </Text>
+                    </div>
+                  </div>
+                  <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-4 text-xs">
+                    Choose any local, SD card, or external drive directory without needing to add it to your catalog library first.
+                  </Text>
+                </div>
+
+                <div className="mt-6">
+                  <button
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-md bg-accent px-4 py-2.5 text-sm font-medium text-button-text hover:brightness-110 transition-colors shadow-xs"
+                    onClick={() => void chooseCullFolder()}
+                  >
+                    <FolderOpen size={16} /> Browse non-library folder...
+                  </button>
+                </div>
+              </div>
+            </div>
           </div>
         ) : displayCount === 0 || (localCullPlan && !isCompareMode) ? (
           <div className="w-full h-full overflow-y-auto p-3">
@@ -1713,7 +1844,7 @@ export default function CullingView(props: any) {
             </div>
             {isPlanningCull && cullProgress && <div className="mt-3"><div className="flex items-center justify-between gap-2 text-xs text-text-secondary"><span className="truncate">{cullProgress.stage}</span><span className="tabular-nums">{cullProgress.current}/{cullProgress.total}</span></div><div className="mt-1 h-1.5 overflow-hidden rounded-full bg-surface"><div className="h-full bg-accent transition-[width] duration-200" style={{ width: `${cullProgress.total > 0 ? Math.min(100, (cullProgress.current / cullProgress.total) * 100) : 0}%` }} /></div></div>}
             {cullError && <Text as="div" variant={TextVariants.small} className="mt-2 text-red-300">{cullError}</Text>}
-            <button disabled={isPlanningCull} className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm text-white hover:brightness-110 disabled:opacity-60" onClick={() => void startCullFromRail()}>{isPlanningCull ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} fill="currentColor" />}{isPlanningCull ? 'Analyzing...' : localCullPlan ? 'Run again' : 'Start culling'}</button>
+            <button disabled={isPlanningCull} className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-button-text hover:brightness-110 disabled:opacity-60" onClick={() => void startCullFromRail()}>{isPlanningCull ? <Loader2 size={15} className="animate-spin" /> : <Play size={15} fill="currentColor" />}{isPlanningCull ? 'Analyzing...' : localCullPlan ? 'Run again' : 'Start culling'}</button>
             {localCullPlan && <><Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-2">{localCullPlan.rejectCount} frames marked for review out of {localCullPlan.totalCount}.</Text><div className="mt-2 grid grid-cols-2 gap-2"><button className="rounded border border-border-color px-2 py-1.5 text-xs text-text-primary hover:bg-surface" onClick={selectAllCullCandidates}>Select all</button><button className="rounded border border-border-color px-2 py-1.5 text-xs text-text-secondary hover:bg-surface" onClick={onClearSelection}>Clear selection</button></div>{multiSelectedPaths.filter((path: string) => localCullPlan.items.some((item) => item.representativePath === path)).length > 0 && <div className="mt-2 grid grid-cols-2 gap-2"><button className="rounded border border-green-400/40 px-2 py-1.5 text-xs text-green-300 hover:bg-green-400/10" onClick={() => void updateSelectedCullDecisions(true)}>Keep selected</button><button className="rounded border border-red-400/40 px-2 py-1.5 text-xs text-red-300 hover:bg-red-400/10" onClick={() => void updateSelectedCullDecisions(false)}>Reject selected</button></div>}<button disabled={isApplyingCull || localCullPlan.rejectCount === 0} className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-md border border-red-500/50 px-3 py-2 text-sm text-red-200 hover:bg-red-500/10 disabled:opacity-50" onClick={() => void applyCullFromRail()}>{isApplyingCull ? <Loader2 size={15} className="animate-spin" /> : null}{isApplyingCull ? 'Moving rejected frames...' : `Move ${localCullPlan.rejectCount} rejected frames`}</button></>}
           </> : <button className="flex w-full items-center justify-center gap-2 rounded-md border border-border-color bg-bg-primary px-3 py-2 text-sm text-text-primary hover:bg-surface" onClick={() => void chooseCullFolder()}><FolderOpen size={16} /> Choose folder</button>}
         </div>
@@ -1733,7 +1864,7 @@ export default function CullingView(props: any) {
                 <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-1">Duplicate groups, focus quality, and subject-aware focus are always reviewable before any files move.</Text>
               </div>
             </div>
-            <button className="mt-auto inline-flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm text-white hover:brightness-110" onClick={() => void chooseCullFolder()}><Play size={15} fill="currentColor" /> Select a folder</button>
+            <button className="mt-auto inline-flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-button-text hover:brightness-110" onClick={() => void chooseCullFolder()}><Play size={15} fill="currentColor" /> Select a folder</button>
           </div>
         ) : (isCatalog || localCullPlan) && <div className="shrink-0 border-b border-border-color p-3"><div className="flex items-center gap-2 mb-2"><Filter size={14} className="text-text-secondary" /><Text variant={TextVariants.small} weight={TextWeights.semibold}>Quick filters</Text></div><div className="space-y-1">{(['selected', 'highlights', 'duplicates', 'blurry', 'all'] as const).map((filter) => <button key={filter} className={clsx('w-full flex items-center justify-between rounded px-2 py-1.5 text-left text-sm', reviewFilter === filter ? 'bg-surface text-text-primary' : 'text-text-secondary hover:bg-surface')} onClick={() => setReviewFilter(filter)}><span className="flex items-center gap-2"><span className={filter === 'selected' ? 'h-2 w-2 rounded-full bg-green-400' : filter === 'highlights' ? 'h-2 w-2 rounded-full bg-cyan-400' : filter === 'duplicates' ? 'h-2 w-2 rounded-full bg-amber-400' : filter === 'blurry' ? 'h-2 w-2 rounded-full bg-red-400' : 'h-2 w-2 rounded-full bg-text-secondary'} />{filter === 'selected' ? 'Selected' : filter === 'highlights' ? 'Highlights' : filter === 'duplicates' ? 'Duplicates' : filter === 'blurry' ? 'Blurry' : 'All'}</span><span className="tabular-nums text-xs">{cullFilterCounts[filter]}</span></button>)}</div></div>}
         {activePath && cullDecisions[activePath] && (
