@@ -1,13 +1,16 @@
 use std::env;
+use std::fs;
 use std::path::PathBuf;
 
 use rapidraw_lib::BackgroundJobControl;
+use rapidraw_lib::face_model_registry::{InstalledFaceModelPack, face_model_packs};
 use rapidraw_lib::image_restoration::{
     RestorationRecipe, run_restoration_worker, validate_restoration_recipe,
 };
 use rapidraw_lib::visual_model_registry::visual_model_packs;
 use rusqlite::Connection;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 fn database_argument(arguments: &[String]) -> Result<PathBuf, String> {
@@ -51,9 +54,10 @@ fn main() {
         Some("cull") if arguments.get(1).map(String::as_str) == Some("decisions") => cull_decisions(&arguments),
         Some("models") if arguments.get(1).map(String::as_str) == Some("list") => list_models(),
         Some("models") if arguments.get(1).map(String::as_str) == Some("info") => verify_model(&arguments),
+        Some("models") if arguments.get(1).map(String::as_str) == Some("verify") => verify_installed_model(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("list") => list_derivatives(&arguments),
         Some("restore") if arguments.get(1).map(String::as_str) == Some("run") => run_restore_cli(&arguments),
-        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top|export-suggestions --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
+        _ => Err("Usage: rapidraw-cli library inspect|roots|metrics --database <catalog.db> | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli tags status|top|export-suggestions --database <catalog.db> | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions --database <catalog.db> | rapidraw-cli cull decisions --database <catalog.db> --session <id> | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>]".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -409,6 +413,119 @@ fn verify_model(arguments: &[String]) -> Result<serde_json::Value, String> {
         })),
         (None, None) => Err(format!("Unknown model: {model_id}")),
     }
+}
+
+fn sha256_file(path: &std::path::Path) -> Result<String, String> {
+    let bytes = fs::read(path).map_err(|error| error.to_string())?;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn verify_installed_model(arguments: &[String]) -> Result<serde_json::Value, String> {
+    let model_id = named_argument(arguments, "--id")?;
+    if let Some(pack) = visual_model_packs()
+        .into_iter()
+        .find(|pack| pack.id == model_id)
+    {
+        let models_dir = PathBuf::from(named_argument(arguments, "--models-dir")?);
+        let directory = models_dir.join(&pack.id);
+        let manifest_path = directory.join("manifest.json");
+        let manifest_pack_id = fs::read_to_string(&manifest_path)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
+            .and_then(|manifest| {
+                manifest
+                    .get("packId")
+                    .and_then(|id| id.as_str())
+                    .map(str::to_string)
+            });
+        let artifacts = pack
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                let path = directory.join(&artifact.file_name);
+                let metadata = path.metadata().ok();
+                json!({
+                    "fileName": artifact.file_name,
+                    "exists": metadata.as_ref().is_some_and(|metadata| metadata.is_file()),
+                    "bytes": metadata.map(|metadata| metadata.len()),
+                })
+            })
+            .collect::<Vec<_>>();
+        let installed = manifest_pack_id.as_deref() == Some(pack.id.as_str())
+            && artifacts
+                .iter()
+                .all(|artifact| artifact["exists"].as_bool() == Some(true));
+        let runtime_supported = matches!(
+            pack.id.as_str(),
+            "ram-plus-onnx" | "bioclip-v1" | "rawnind-utnet2-bayer" | "nafnet-sidd-rgb"
+        );
+        return Ok(json!({
+            "id": pack.id,
+            "type": "visual",
+            "installed": installed,
+            "runnable": installed && runtime_supported,
+            "integrity": "manifest-and-artifact-presence",
+            "manifestPackId": manifest_pack_id,
+            "artifacts": artifacts,
+        }));
+    }
+
+    if let Some(pack) = face_model_packs()
+        .into_iter()
+        .find(|pack| pack.id == model_id)
+    {
+        let models_dir = PathBuf::from(named_argument(arguments, "--face-models-dir")?);
+        let directory = models_dir.join(&pack.id);
+        let manifest_path = directory.join("rapidraw-face-model.json");
+        let manifest = fs::read(&manifest_path)
+            .ok()
+            .and_then(|contents| serde_json::from_slice::<InstalledFaceModelPack>(&contents).ok());
+        let artifacts = manifest
+            .as_ref()
+            .map(|manifest| {
+                manifest
+                    .artifacts
+                    .iter()
+                    .map(|artifact| {
+                        let path = directory.join(&artifact.file_name);
+                        let actual_sha256 = path.is_file().then(|| sha256_file(&path)).transpose();
+                        let matches = actual_sha256
+                            .as_ref()
+                            .ok()
+                            .and_then(|actual| actual.as_ref())
+                            .is_some_and(|actual| actual == &artifact.sha256);
+                        json!({
+                            "fileName": artifact.file_name,
+                            "exists": path.is_file(),
+                            "expectedSha256": artifact.sha256,
+                            "actualSha256": actual_sha256.ok().flatten(),
+                            "matches": matches,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let installed = manifest
+            .as_ref()
+            .is_some_and(|manifest| manifest.pack_id == pack.id)
+            && !artifacts.is_empty()
+            && artifacts
+                .iter()
+                .all(|artifact| artifact["matches"].as_bool() == Some(true));
+        return Ok(json!({
+            "id": pack.id,
+            "type": "face",
+            "installed": installed,
+            "runnable": installed && pack.id == "opencv-yunet-sface",
+            "integrity": "manifest-and-sha256",
+            "manifestPresent": manifest.is_some(),
+            "artifacts": artifacts,
+        }));
+    }
+
+    Err(format!("Unknown model: {model_id}"))
 }
 
 fn list_derivatives(arguments: &[String]) -> Result<serde_json::Value, String> {
