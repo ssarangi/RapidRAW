@@ -1003,6 +1003,7 @@ mod tests {
         let library = create_library_headless("Archive", &db_path).unwrap();
         assert_eq!(library.name, "Archive");
         assert_eq!(library.db_path, db_path.to_string_lossy());
+        assert_eq!(open_library_headless(&db_path).unwrap().id, library.id);
 
         let root = add_library_root_headless(
             &db_path,
@@ -1408,6 +1409,22 @@ pub fn create_library_headless(name: &str, db_path: &Path) -> Result<LibraryInfo
         params![Uuid::new_v4().to_string(), trimmed_name, now],
     )
     .map_err(|error| error.to_string())?;
+    library_info(&conn, db_path)
+}
+
+/// Opens an existing catalog without a Tauri window, applying schema
+/// migrations and making interrupted jobs visibly retryable just as the
+/// desktop open flow does.
+pub fn open_library_headless(db_path: &Path) -> Result<LibraryInfo, String> {
+    if !db_path.exists() {
+        return Err(format!(
+            "Library database does not exist: {}",
+            db_path.display()
+        ));
+    }
+    let conn = open_connection(db_path)?;
+    migrate(&conn)?;
+    recover_interrupted_jobs(&conn)?;
     library_info(&conn, db_path)
 }
 

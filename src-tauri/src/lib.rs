@@ -37,7 +37,8 @@ pub use library_db::record_cull_session;
 pub use library_db::scan_library_root_headless;
 pub use library_db::update_job;
 pub use library_db::{
-    add_library_root_headless, create_library_headless, remove_library_root_headless,
+    add_library_root_headless, create_library_headless, open_library_headless,
+    remove_library_root_headless,
 };
 mod inpainting;
 mod launch_request;
