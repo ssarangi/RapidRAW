@@ -64,9 +64,15 @@ const Switch = ({
           onChange={(e: any) => !disabled && onChange(e.target.checked)}
           type="checkbox"
         />
-        <div className={clsx('w-full h-full bg-card-active/50 rounded-full shadow-inner', trackClassName)}></div>
+        <div
+          className={clsx(
+            'w-full h-full rounded-full border transition-colors shadow-inner',
+            checked ? 'bg-accent/25 border-accent' : 'bg-surface/80 border-border-color',
+            trackClassName,
+          )}
+        />
         <motion.div
-          className={clsx('absolute top-0.5 left-0.5 w-4 h-4 rounded-full transition-colors', {
+          className={clsx('absolute top-0.5 left-0.5 w-4 h-4 rounded-full shadow-xs transition-colors', {
             'bg-accent': checked,
             'bg-text-secondary/80': !checked,
           })}

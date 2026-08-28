@@ -1998,7 +1998,7 @@ export default function CullingView(props: any) {
                   <label className="text-sm font-medium text-text-primary pt-1">
                     Enable / Disable AI features
                   </label>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-1">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 pt-1">
                     <Switch
                       label="Closed Eyes"
                       checked={cullSettings.useSubjectDetection}
