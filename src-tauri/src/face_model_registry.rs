@@ -249,6 +249,25 @@ fn read_installed_manifest(pack_dir: &Path) -> Result<Option<InstalledFaceModelP
         .map_err(|error| error.to_string())
 }
 
+fn is_complete_install(
+    pack: &FaceModelPack,
+    pack_dir: &Path,
+    manifest: Option<&InstalledFaceModelPack>,
+) -> bool {
+    let Some(manifest) = manifest else {
+        return false;
+    };
+    manifest.pack_id == pack.id
+        && pack
+            .artifacts
+            .iter()
+            .all(|artifact| pack_dir.join(&artifact.file_name).is_file())
+        && manifest
+            .artifacts
+            .iter()
+            .all(|artifact| pack_dir.join(&artifact.file_name).is_file())
+}
+
 fn sha256_file(path: &Path) -> Result<String, String> {
     let mut file = fs::File::open(path).map_err(|error| error.to_string())?;
     let mut hasher = Sha256::new();
@@ -360,7 +379,7 @@ pub fn list_face_model_pack_statuses(
             let manifest = read_installed_manifest(&path)?;
             Ok(FaceModelPackStatus {
                 install_path: path.to_string_lossy().into_owned(),
-                installed: manifest.is_some(),
+                installed: is_complete_install(&pack, &path, manifest.as_ref()),
                 installed_artifacts: manifest.map(|item| item.artifacts).unwrap_or_default(),
                 pack,
             })
@@ -650,6 +669,40 @@ mod tests {
         let restored = read_installed_manifest(directory.path()).unwrap().unwrap();
         assert_eq!(restored.pack_id, manifest.pack_id);
         assert_eq!(restored.artifacts[0].file_name, "model.onnx");
+    }
+
+    #[test]
+    fn complete_install_requires_the_expected_model_artifacts() {
+        let directory = tempdir().unwrap();
+        let pack = face_model_packs()
+            .into_iter()
+            .find(|pack| pack.id == "opencv-yunet-sface")
+            .unwrap();
+        let manifest = InstalledFaceModelPack {
+            pack_id: pack.id.clone(),
+            installed_at: 1,
+            artifacts: pack
+                .artifacts
+                .iter()
+                .map(|artifact| InstalledFaceModelArtifact {
+                    file_name: artifact.file_name.clone(),
+                    sha256: "test".to_string(),
+                })
+                .collect(),
+        };
+        assert!(!is_complete_install(
+            &pack,
+            directory.path(),
+            Some(&manifest)
+        ));
+        for artifact in &pack.artifacts {
+            fs::write(directory.path().join(&artifact.file_name), b"onnx").unwrap();
+        }
+        assert!(is_complete_install(
+            &pack,
+            directory.path(),
+            Some(&manifest)
+        ));
     }
 
     #[test]
