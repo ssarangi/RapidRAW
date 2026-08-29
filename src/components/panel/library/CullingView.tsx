@@ -1371,6 +1371,20 @@ export default function CullingView(props: any) {
     return reason.includes('blur') || reason.includes('focus') || reason.includes('sharp');
   }, []);
 
+  const renderStars = useCallback((count: number) => {
+    return (
+      <div className="flex items-center gap-0.5">
+        {[1, 2, 3, 4, 5].map((star) => (
+          <StarIcon
+            key={star}
+            size={11}
+            className={star <= count ? 'fill-amber-400 text-amber-400' : 'text-text-secondary/25'}
+          />
+        ))}
+      </div>
+    );
+  }, []);
+
   const cullImageList = useMemo(() => imageList.filter((image: ImageFile) => {
     const decision = cullDecisions[image.path];
     if (reviewFilter === 'all') return true;
