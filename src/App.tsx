@@ -68,6 +68,7 @@ import {
   Invokes,
   ImageFile,
   LibraryViewMode,
+  LibraryDisplayMode,
   Panel,
   PanelRegion,
   Theme,
@@ -784,6 +785,7 @@ function App() {
   const hasMainContent = hasRoots || (activeView === 'editor' && !!selectedImage);
 
   const shouldHideFolderTree = useCompactAndroidPanels;
+  const isCullingMode = activeView === 'library' && appSettings?.libraryDisplayMode === LibraryDisplayMode.Cull;
   const isWgpuActive =
     activeView === 'editor' &&
     appSettings?.useWgpuRenderer !== false &&
@@ -996,7 +998,7 @@ function App() {
                   </div>
                 )}
               </div>
-              {!useCompactAndroidPanels && hasMainContent && (
+              {!useCompactAndroidPanels && hasMainContent && !isCullingMode && (
                 <SidePanelArea
                   side="right"
                   width={effectiveRightWidth}
