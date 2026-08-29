@@ -189,6 +189,7 @@ function App() {
       activePanel: state.activePanel,
       activeLayoutDragItem: state.activeLayoutDragItem,
       isSettingsOpen: state.isSettingsOpen,
+      libraryDisplayMode: state.libraryDisplayMode,
       setUI: state.setUI,
       setPanel: state.setPanel,
       setLayoutDragItem: state.setLayoutDragItem,
@@ -785,7 +786,7 @@ function App() {
   const hasMainContent = hasRoots || (activeView === 'editor' && !!selectedImage);
 
   const shouldHideFolderTree = useCompactAndroidPanels;
-  const isCullingMode = activeView === 'library' && appSettings?.libraryDisplayMode === LibraryDisplayMode.Cull;
+  const isCullingMode = activeView === 'library' && libraryDisplayMode === LibraryDisplayMode.Cull;
   const isWgpuActive =
     activeView === 'editor' &&
     appSettings?.useWgpuRenderer !== false &&

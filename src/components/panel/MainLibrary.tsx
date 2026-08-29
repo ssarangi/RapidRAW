@@ -181,15 +181,10 @@ export default function MainLibrary(props: MainLibraryProps) {
   const isSettingsOpen = useUIStore((state) => state.isSettingsOpen);
   const [isStandaloneCull, setIsStandaloneCull] = useState(false);
 
-  const libraryDisplayMode = props.appSettings?.libraryDisplayMode || LibraryDisplayMode.Grid;
+  const libraryDisplayMode = useUIStore((state) => state.libraryDisplayMode);
 
   const setLibraryDisplayMode = (mode: LibraryDisplayMode) => {
-    if (props.appSettings) {
-      props.onSettingsChange({
-        ...props.appSettings,
-        libraryDisplayMode: mode,
-      });
-    }
+    useUIStore.getState().setUI({ libraryDisplayMode: mode });
   };
 
   const { searchCriteria, filterCriteria, catalogRoots } = useLibraryStore(

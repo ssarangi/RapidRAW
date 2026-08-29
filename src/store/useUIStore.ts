@@ -8,6 +8,7 @@ import {
   WorkspaceState,
   AutoCullPlan,
   AutoCullResult,
+  LibraryDisplayMode,
 } from '../components/ui/AppProperties';
 
 export type SwitcherPlacement = 'bottom' | 'right' | 'left' | 'top';
@@ -283,6 +284,7 @@ interface UIState {
   cullWorkspaceFolderPath: string | null;
   cullWorkspaceProgress: { current: number; total: number; stage: string } | null;
   collageModalState: CollageModalState;
+  libraryDisplayMode: LibraryDisplayMode;
 
   setUI: (updater: Partial<UIState> | ((state: UIState) => Partial<UIState>)) => void;
   setPanel: (panel: Panel | null) => void;
@@ -295,6 +297,7 @@ interface UIState {
 
 export const useUIStore = create<UIState>((set, get) => ({
   activeView: 'library',
+  libraryDisplayMode: LibraryDisplayMode.Grid,
   isFullScreen: false,
   isWindowFullScreen: false,
   isInstantTransition: false,

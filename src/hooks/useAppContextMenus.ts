@@ -838,9 +838,10 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
             icon: Wand2,
             label: t('contextMenus.folders.autoCull'),
             onClick: () => {
-              const { appSettings, handleSettingsChange } = useSettingsStore.getState();
-              if (appSettings) void handleSettingsChange({ ...appSettings, libraryDisplayMode: LibraryDisplayMode.Cull });
-              useUIStore.getState().setUI({ cullWorkspaceFolderPath: path });
+              useUIStore.getState().setUI({
+                libraryDisplayMode: LibraryDisplayMode.Cull,
+                cullWorkspaceFolderPath: path,
+              });
             },
           },
         ]);
@@ -924,8 +925,10 @@ export function useAppContextMenus(props: UseAppContextMenusProps) {
           icon: Wand2,
           label: t('contextMenus.folders.autoCull'),
           onClick: () => {
-            if (appSettings) void handleSettingsChange({ ...appSettings, libraryDisplayMode: LibraryDisplayMode.Cull });
-            setUI({ cullWorkspaceFolderPath: targetPath });
+            setUI({
+              libraryDisplayMode: LibraryDisplayMode.Cull,
+              cullWorkspaceFolderPath: targetPath,
+            });
           },
         },
         { type: OPTION_SEPARATOR },

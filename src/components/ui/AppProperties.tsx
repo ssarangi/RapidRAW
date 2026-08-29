@@ -302,7 +302,6 @@ export interface AppSettings {
   fontFamily?: string;
   folderTreeSort?: FolderTreeSort;
   taggingShortcuts?: string[];
-  libraryDisplayMode?: LibraryDisplayMode;
   grouping?: GroupingMode;
   requireMatchingExif?: boolean;
   groupEditedFiles?: boolean;
