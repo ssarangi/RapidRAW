@@ -7,8 +7,7 @@ import { useLibraryStore } from '../store/useLibraryStore';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
 import { useProcessStore } from '../store/useProcessStore';
-import { useSettingsStore } from '../store/useSettingsStore';
-import { CatalogRoot, Invokes, LibraryViewMode, ImageFile } from '../components/ui/AppProperties';
+import { CatalogRoot, Invokes, LibraryViewMode, ImageFile, LibraryDisplayMode } from '../components/ui/AppProperties';
 import { INITIAL_ADJUSTMENTS, normalizeLoadedAdjustments } from '../utils/adjustments';
 import { globalImageCache } from '../utils/ImageLRUCache';
 import { debouncedSave, debouncedSetHistory } from './useEditorActions';
@@ -56,7 +55,11 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
       libraryActivePath: null,
       expandedFolders: new Set(),
     });
-    useUIStore.getState().setUI({ isLibraryExportPanelVisible: false });
+    useUIStore.getState().setUI({
+      isLibraryExportPanelVisible: false,
+      libraryDisplayMode: LibraryDisplayMode.Grid,
+      cullWorkspaceFolderPath: null,
+    });
   }, []);
 
   const handleBackToLibrary = useCallback(() => {

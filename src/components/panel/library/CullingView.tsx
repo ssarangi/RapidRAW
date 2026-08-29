@@ -1479,7 +1479,7 @@ export default function CullingView(props: any) {
   const selectLibraryRoot = async (root: CatalogRoot) => {
     const folderKey = `LibraryFolder:${root.id}:.`;
     setCullFolderPath(folderKey);
-    useUIStore.getState().setUI({ cullWorkspaceFolderPath: folderKey });
+    useUIStore.getState().setUI({ cullWorkspaceFolderPath: folderKey, libraryDisplayMode: LibraryDisplayMode.Cull });
     setLocalCullPlan(null);
     setCullDecisions({});
     setCullError(null);
@@ -1508,7 +1508,7 @@ export default function CullingView(props: any) {
     const path = await open({ directory: true, multiple: false, title: 'Choose a folder to cull' });
     if (typeof path !== 'string') return;
     setCullFolderPath(path);
-    useUIStore.getState().setUI({ cullWorkspaceFolderPath: path });
+    useUIStore.getState().setUI({ cullWorkspaceFolderPath: path, libraryDisplayMode: LibraryDisplayMode.Cull });
     setLocalCullPlan(null);
     setCullDecisions({});
     setCullError(null);
