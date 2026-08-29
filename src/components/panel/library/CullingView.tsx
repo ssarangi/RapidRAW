@@ -30,6 +30,7 @@ import { AutoCullPlan, AutoCullResult, CatalogRoot, CullingSettings, CullSession
 import { Thumbnail } from './LibraryItems';
 import Text from '../../ui/Text';
 import Switch from '../../ui/Switch';
+import Checkbox from '../../ui/Checkbox';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { useProcessStore } from '../../../store/useProcessStore';
 import { useLibraryStore } from '../../../store/useLibraryStore';
@@ -1096,7 +1097,7 @@ export default function CullingView(props: any) {
   const cullWorkspaceFolderPath = useUIStore((state) => state.cullWorkspaceFolderPath);
   const cullProgress = useUIStore((state) => state.cullWorkspaceProgress);
   const thumbnails = useProcessStore((state) => state.thumbnails);
-  const [reviewFilter, setReviewFilter] = useState<'all' | 'selected' | 'highlights' | 'duplicates' | 'blurry'>('all');
+  const [reviewFilter, setReviewFilter] = useState<'all' | 'selected' | 'rejected' | 'highlights' | 'duplicates' | 'blurry'>('all');
   const [cullDecisions, setCullDecisions] = useState<Record<string, CullSessionDecision>>({});
   const [activeFaces, setActiveFaces] = useState<CullFaceReviewItem[]>([]);
   const [subjectEvidence, setSubjectEvidence] = useState<CullSubjectEvidence | null>(null);
@@ -1351,6 +1352,7 @@ export default function CullingView(props: any) {
     const decision = cullDecisions[image.path];
     if (reviewFilter === 'all') return true;
     if (reviewFilter === 'selected') return decision?.finalStatus === 'keep' || (!decision?.finalStatus && decision?.proposedStatus === 'keep');
+    if (reviewFilter === 'rejected') return decision?.finalStatus === 'reject' || (!decision?.finalStatus && decision?.proposedStatus === 'reject');
     if (reviewFilter === 'highlights') return highlightPaths.has(image.path);
     if (reviewFilter === 'duplicates') return decision?.reason.startsWith('duplicate_of:');
     return !!decision && !decision.reason.startsWith('duplicate_of:') && (decision.proposedStatus === 'reject' || decision.finalStatus === 'reject');
@@ -1361,6 +1363,10 @@ export default function CullingView(props: any) {
     selected: imageList.filter((image: ImageFile) => {
       const decision = cullDecisions[image.path];
       return decision?.finalStatus === 'keep' || (!decision?.finalStatus && decision?.proposedStatus === 'keep');
+    }).length,
+    rejected: imageList.filter((image: ImageFile) => {
+      const decision = cullDecisions[image.path];
+      return decision?.finalStatus === 'reject' || (!decision?.finalStatus && decision?.proposedStatus === 'reject');
     }).length,
     highlights: imageList.filter((image: ImageFile) => highlightPaths.has(image.path)).length,
     duplicates: imageList.filter((image: ImageFile) => cullDecisions[image.path]?.reason.startsWith('duplicate_of:')).length,
@@ -1520,6 +1526,7 @@ export default function CullingView(props: any) {
         catalogImageIds: Object.keys(catalogImageIds).length > 0 ? catalogImageIds : null,
       });
       setIsCompareMode(false);
+      setIsConfiguringCull(false);
       setLocalCullPlan(plan);
     } catch (error) {
       setCullError(String(error));
@@ -2042,15 +2049,11 @@ export default function CullingView(props: any) {
 
               {/* Footer Row */}
               <div className="mt-8 flex flex-wrap items-center justify-between gap-4 border-t border-border-color pt-5">
-                <label className="flex items-center gap-2 text-xs text-text-secondary cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={includeSubfolders}
-                    onChange={(e) => setIncludeSubfolders(e.target.checked)}
-                    className="accent-cyan-400 h-4 w-4 rounded"
-                  />
-                  Include subfolders in culling analysis
-                </label>
+                <Checkbox
+                  label="Include subfolders in culling analysis"
+                  checked={includeSubfolders}
+                  onChange={(checked) => setIncludeSubfolders(checked)}
+                />
                 <div className="flex items-center gap-3">
                   <button
                     disabled={isPlanningCull || (!cullFolderPath && imageList.length === 0)}
@@ -2066,34 +2069,128 @@ export default function CullingView(props: any) {
           </div>
         ) : displayCount === 0 || (localCullPlan && !isCompareMode) ? (
           <div className="w-full h-full overflow-y-auto p-3">
-            <div className="mb-3 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <Text variant={TextVariants.small} color={TextColors.secondary}>{cullImageList.length} images</Text>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-3 border-b border-border-color pb-3">
+              <div className="flex flex-wrap items-center gap-1.5">
+                {([
+                  { id: 'all', label: 'All', count: cullFilterCounts.all, dot: 'bg-text-secondary' },
+                  { id: 'selected', label: 'Keepers', count: cullFilterCounts.selected, dot: 'bg-green-400' },
+                  { id: 'rejected', label: 'Rejected', count: cullFilterCounts.rejected, dot: 'bg-red-400' },
+                  { id: 'duplicates', label: 'Duplicates', count: cullFilterCounts.duplicates, dot: 'bg-amber-400' },
+                  { id: 'blurry', label: 'Blurry', count: cullFilterCounts.blurry, dot: 'bg-rose-500' },
+                  { id: 'highlights', label: 'Highlights', count: cullFilterCounts.highlights, dot: 'bg-cyan-400' },
+                ] as const).map((filter) => (
+                  <button
+                    key={filter.id}
+                    onClick={() => setReviewFilter(filter.id)}
+                    className={clsx(
+                      'inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-colors cursor-pointer',
+                      reviewFilter === filter.id
+                        ? 'bg-surface text-text-primary border border-border-color shadow-xs font-semibold'
+                        : 'text-text-secondary hover:text-text-primary hover:bg-surface/50'
+                    )}
+                  >
+                    <span className={clsx('h-2 w-2 rounded-full', filter.dot)} />
+                    <span>{filter.label}</span>
+                    <span className="tabular-nums opacity-75 font-mono text-[11px]">({filter.count})</span>
+                  </button>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-2">
                 <button
-                  className="rounded border border-border-color px-2.5 py-1 text-xs text-text-primary hover:bg-surface flex items-center gap-1.5 transition-colors"
+                  className="rounded border border-border-color bg-surface/50 px-2.5 py-1 text-xs text-text-primary hover:bg-surface flex items-center gap-1.5 transition-colors cursor-pointer"
                   onClick={() => setIsConfiguringCull(true)}
+                  title="Adjust culling settings"
                 >
                   <SlidersHorizontal size={13} />
                   <span>Culling Settings</span>
                 </button>
-              </div>
-              <div className="flex items-center gap-2">
                 {displayCount > 0 && (
-                  <button className="rounded border border-border-color px-2 py-1 text-xs text-text-primary hover:bg-surface" onClick={() => setIsCompareMode(true)}>
+                  <button
+                    className="rounded border border-border-color bg-surface/50 px-2.5 py-1 text-xs text-text-primary hover:bg-surface transition-colors cursor-pointer"
+                    onClick={() => setIsCompareMode(true)}
+                  >
                     {displayCount === 1 ? 'Inspect selected' : `Compare ${displayCount} selected`}
                   </button>
                 )}
-                <Text variant={TextVariants.small} color={TextColors.secondary}>Select frames to inspect or compare</Text>
               </div>
             </div>
+
             <div ref={cullGridRef} className="relative grid select-none grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-3" onPointerDown={beginGridSelection} onPointerMove={extendGridSelection} onPointerUp={endGridSelection} onPointerCancel={endGridSelection} onClickCapture={(event) => { if (marqueeMoved.current) { event.preventDefault(); event.stopPropagation(); marqueeMoved.current = false; } }}>
               {marqueeBounds && <div className="pointer-events-none absolute z-20 border border-accent bg-accent/15" style={marqueeBounds} />}
               {cullImageList.map((image: ImageFile) => {
                 const decision = cullDecisions[image.path];
                 const finalistRank = finalistRanks.get(image.path);
+                const isKeeper = decision?.proposedStatus === 'keep' || decision?.finalStatus === 'keep';
+                const isRejected = decision && !isKeeper;
+                const isDuplicate = decision?.reason?.startsWith('duplicate_of:');
                 const selected = multiSelectedPaths.includes(image.path);
-                const border = decision?.proposedStatus === 'keep' ? 'border-green-400/70' : decision ? 'border-red-400/60' : 'border-border-color';
-                return <div key={image.path} data-cull-path={image.path} className={`relative overflow-hidden rounded-md border-2 ${selected ? 'ring-2 ring-accent' : ''} ${border}`}>{finalistRank && <span className="absolute left-2 top-2 z-20 rounded bg-cyan-500/90 px-1.5 py-0.5 text-[10px] font-medium text-white">{finalistRank === 1 ? 'Top finalist' : `Finalist #${finalistRank}`}</span>}<Thumbnail path={image.path} rating={imageRatings?.[image.path] || 0} tags={image.tags} aspectRatio={thumbnailAspectRatio} isEdited={image.is_edited} exif={image.exif} isCloudPlaceholder={image.is_cloud_placeholder} isActive={activePath === image.path} isSelected={selected} isForcedHover={false} onContextMenu={onContextMenu} onImageClick={onImageClick} onImageDoubleClick={onImageDoubleClick} onLoad={() => {}} /><div className="flex items-center justify-between gap-2 px-2 py-1.5 bg-bg-secondary text-xs"><span className="truncate">{image.path.split(/[\\/]/).pop()}</span><span className={decision?.proposedStatus === 'keep' ? 'text-green-300' : decision ? 'text-red-300' : 'text-text-secondary'}>{decision?.proposedStatus === 'keep' ? 'Selected' : decision ? 'Rejected' : ''}</span></div></div>;
+                const border = isKeeper
+                  ? 'border-green-500/80 ring-1 ring-green-500/30'
+                  : isRejected
+                  ? 'border-red-500/70'
+                  : 'border-border-color';
+
+                return (
+                  <div
+                    key={image.path}
+                    data-cull-path={image.path}
+                    className={clsx(
+                      'relative overflow-hidden rounded-md border-2 transition-all bg-bg-secondary',
+                      selected && 'ring-2 ring-accent',
+                      border,
+                    )}
+                  >
+                    {/* Top status badges */}
+                    <div className="absolute left-1.5 top-1.5 z-20 flex flex-wrap gap-1">
+                      {finalistRank && (
+                        <span className="rounded bg-cyan-500/95 px-1.5 py-0.5 text-[10px] font-bold text-black shadow-xs">
+                          {finalistRank === 1 ? '★ Top finalist' : `#${finalistRank} Finalist`}
+                        </span>
+                      )}
+                      {decision && (
+                        <span
+                          className={clsx(
+                            'rounded px-1.5 py-0.5 text-[10px] font-semibold shadow-xs',
+                            isKeeper ? 'bg-green-600/90 text-white' : 'bg-red-600/90 text-white',
+                          )}
+                        >
+                          {isKeeper ? 'Keep' : isDuplicate ? 'Duplicate' : 'Rejected'}
+                        </span>
+                      )}
+                    </div>
+
+                    <Thumbnail
+                      path={image.path}
+                      rating={imageRatings?.[image.path] || 0}
+                      tags={image.tags}
+                      aspectRatio={thumbnailAspectRatio}
+                      isEdited={image.is_edited}
+                      exif={image.exif}
+                      isCloudPlaceholder={image.is_cloud_placeholder}
+                      isActive={activePath === image.path}
+                      isSelected={selected}
+                      isForcedHover={false}
+                      onContextMenu={onContextMenu}
+                      onImageClick={onImageClick}
+                      onImageDoubleClick={onImageDoubleClick}
+                      onLoad={() => {}}
+                    />
+
+                    {/* Bottom filename and reason pill */}
+                    <div className="flex items-center justify-between gap-1.5 px-2 py-1.5 bg-bg-secondary text-xs border-t border-border-color/50">
+                      <span className="truncate font-mono text-[11px] text-text-primary">{image.path.split(/[\\/]/).pop()}</span>
+                      <span
+                        className={clsx(
+                          'shrink-0 text-[11px] font-medium',
+                          isKeeper ? 'text-green-400' : 'text-red-400',
+                        )}
+                      >
+                        {isKeeper ? 'Keep' : isDuplicate ? 'Duplicate' : 'Reject'}
+                      </span>
+                    </div>
+                  </div>
+                );
               })}
             </div>
           </div>
@@ -2204,6 +2301,39 @@ export default function CullingView(props: any) {
             </>
           )}
         </div>
+        {(isCatalog || localCullPlan) && (
+          <div className="shrink-0 border-b border-border-color p-3">
+            <div className="flex items-center gap-2 mb-2">
+              <Filter size={14} className="text-text-secondary" />
+              <Text variant={TextVariants.small} weight={TextWeights.semibold}>Quick filters</Text>
+            </div>
+            <div className="space-y-1">
+              {([
+                { id: 'all', label: 'All', count: cullFilterCounts.all, dot: 'bg-text-secondary' },
+                { id: 'selected', label: 'Keepers', count: cullFilterCounts.selected, dot: 'bg-green-400' },
+                { id: 'rejected', label: 'Rejected', count: cullFilterCounts.rejected, dot: 'bg-red-400' },
+                { id: 'duplicates', label: 'Duplicates', count: cullFilterCounts.duplicates, dot: 'bg-amber-400' },
+                { id: 'blurry', label: 'Blurry', count: cullFilterCounts.blurry, dot: 'bg-rose-500' },
+                { id: 'highlights', label: 'Highlights', count: cullFilterCounts.highlights, dot: 'bg-cyan-400' },
+              ] as const).map((filter) => (
+                <button
+                  key={filter.id}
+                  className={clsx(
+                    'w-full flex items-center justify-between rounded px-2 py-1.5 text-left text-xs transition-colors cursor-pointer',
+                    reviewFilter === filter.id ? 'bg-surface text-text-primary font-medium' : 'text-text-secondary hover:bg-surface/50'
+                  )}
+                  onClick={() => setReviewFilter(filter.id)}
+                >
+                  <span className="flex items-center gap-2">
+                    <span className={clsx('h-2 w-2 rounded-full', filter.dot)} />
+                    {filter.label}
+                  </span>
+                  <span className="tabular-nums opacity-75 font-mono text-[11px]">{filter.count}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {activePath && cullDecisions[activePath] && (
           <div className="shrink-0 border-b border-border-color px-3 py-2">
             <div className="flex items-center justify-between gap-2">

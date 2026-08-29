@@ -35,6 +35,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useDroppable } from '@dnd-kit/core';
 import { toast } from 'react-toastify';
 import Text from '../../ui/Text';
+import Checkbox from '../../ui/Checkbox';
 import { TEXT_COLOR_KEYS, TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { useShallow } from 'zustand/react/shallow';
 import { useLibraryStore } from '../../../store/useLibraryStore';
@@ -1125,17 +1126,13 @@ export default function FolderTree({
               )}
 	            </AnimatePresence>
 	          </div>
-	          <label className="mt-2 flex items-center gap-2 rounded-md px-2 py-1.5 text-text-secondary hover:bg-surface hover:text-text-primary cursor-pointer">
-	            <input
-	              type="checkbox"
+	          <div className="mt-2 px-2 py-1.5">
+	            <Checkbox
+	              label="Show images inside subfolders"
 	              checked={includeSubfolderImages}
-	              onChange={(event) => handleIncludeSubfoldersChange(event.target.checked)}
-	              className="h-4 w-4 accent-accent"
+	              onChange={(checked) => handleIncludeSubfoldersChange(checked)}
 	            />
-	            <Text as="span" variant={TextVariants.small}>
-	              Show images inside subfolders
-	            </Text>
-	          </label>
+	          </div>
 	        </div>
 
         <LayoutGroup id="folder-tree">
