@@ -179,6 +179,7 @@ export default function MainLibrary(props: MainLibraryProps) {
   const [isBusyLoaderMounted, setIsBusyLoaderMounted] = useState(false);
   const [isProgressHovered, setIsProgressHovered] = useState(false);
   const isSettingsOpen = useUIStore((state) => state.isSettingsOpen);
+  const [isStandaloneCull, setIsStandaloneCull] = useState(false);
 
   const libraryDisplayMode = props.appSettings?.libraryDisplayMode || LibraryDisplayMode.Grid;
 
@@ -344,8 +345,8 @@ export default function MainLibrary(props: MainLibraryProps) {
     checkVersion();
   }, []);
 
-  if ((!props.rootPaths || props.rootPaths.length === 0) && libraryDisplayMode === LibraryDisplayMode.Cull) {
-    return <CullingView {...props} />;
+  if ((!props.rootPaths || props.rootPaths.length === 0) && isStandaloneCull) {
+    return <CullingView {...props} onExitCull={() => setIsStandaloneCull(false)} />;
   }
 
   if (!props.rootPaths || props.rootPaths.length === 0) {
@@ -466,7 +467,10 @@ export default function MainLibrary(props: MainLibraryProps) {
                       </div>
                       <Button
                         className="rounded-md h-10 w-full bg-surface text-text-primary shadow-md transition-transform duration-200 hover:scale-[1.01] active:scale-[.98]"
-                        onClick={() => setLibraryDisplayMode(LibraryDisplayMode.Cull)}
+                        onClick={() => {
+                          setIsStandaloneCull(true);
+                          setLibraryDisplayMode(LibraryDisplayMode.Cull);
+                        }}
                         size="lg"
                       >
                         <Columns size={18} className="mr-2" /> {t('library.splash.cullFolder')}
@@ -655,7 +659,10 @@ export default function MainLibrary(props: MainLibraryProps) {
             )}
             <Button
               className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center"
-              onClick={props.onGoHome}
+              onClick={() => {
+                setIsStandaloneCull(false);
+                props.onGoHome();
+              }}
               data-tooltip={t('library.tooltips.goHome')}
             >
               <Home className="w-5 h-5" />
