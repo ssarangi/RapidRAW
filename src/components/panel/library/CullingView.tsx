@@ -23,6 +23,11 @@ import {
   Play,
   Database,
   ChevronDown,
+  ChevronRight,
+  HelpCircle,
+  Columns,
+  Grid3X3,
+  ArrowLeftRight,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import clsx from 'clsx';
@@ -1074,8 +1079,14 @@ export default function CullingView(props: any) {
 
   const containerRef = useRef<HTMLDivElement>(null);
   const [listHeight, setListHeight] = useState(0);
-  const [sidebarWidth, setSidebarWidth] = useState(224);
+  const [sidebarWidth, setSidebarWidth] = useState(340);
   const isResizing = useRef(false);
+
+  const [isSessionExpanded, setIsSessionExpanded] = useState(true);
+  const [isQuickFiltersExpanded, setIsQuickFiltersExpanded] = useState(true);
+  const [isRejectionReasonsExpanded, setIsRejectionReasonsExpanded] = useState(true);
+  const [isFacesExpanded, setIsFacesExpanded] = useState(true);
+  const [isDuplicatesExpanded, setIsDuplicatesExpanded] = useState(true);
 
   const requestQueueRef = useRef<Map<string, { path: string; modified?: number }>>(new Map());
   const requestTimeoutRef = useRef<any>(null);
@@ -1097,7 +1108,7 @@ export default function CullingView(props: any) {
   const cullWorkspaceFolderPath = useUIStore((state) => state.cullWorkspaceFolderPath);
   const cullProgress = useUIStore((state) => state.cullWorkspaceProgress);
   const thumbnails = useProcessStore((state) => state.thumbnails);
-  const [reviewFilter, setReviewFilter] = useState<'all' | 'selected' | 'rejected' | 'highlights' | 'duplicates' | 'blurry'>('all');
+  const [reviewFilter, setReviewFilter] = useState<'all' | 'selected' | 'highlights' | 'blurry' | 'closed_eyes' | 'duplicates' | 'rejected'>('all');
   const [cullDecisions, setCullDecisions] = useState<Record<string, CullSessionDecision>>({});
   const [activeFaces, setActiveFaces] = useState<CullFaceReviewItem[]>([]);
   const [subjectEvidence, setSubjectEvidence] = useState<CullSubjectEvidence | null>(null);
@@ -1305,7 +1316,7 @@ export default function CullingView(props: any) {
   const resize = useCallback((mouseMoveEvent: MouseEvent) => {
     if (!isResizing.current) return;
     const newWidth = window.innerWidth - mouseMoveEvent.clientX;
-    if (newWidth >= 160 && newWidth <= 450) {
+    if (newWidth >= 260 && newWidth <= 520) {
       setSidebarWidth(newWidth);
     }
   }, []);
@@ -1348,15 +1359,29 @@ export default function CullingView(props: any) {
     [rankedFinalists],
   );
 
+  const isClosedEyes = useCallback((decision?: CullSessionDecision) => {
+    if (!decision) return false;
+    const reason = decision.reason?.toLowerCase() || '';
+    return reason.includes('eye') || reason.includes('blink') || reason.includes('closed');
+  }, []);
+
+  const isBlurry = useCallback((decision?: CullSessionDecision) => {
+    if (!decision) return false;
+    const reason = decision.reason?.toLowerCase() || '';
+    return reason.includes('blur') || reason.includes('focus') || reason.includes('sharp');
+  }, []);
+
   const cullImageList = useMemo(() => imageList.filter((image: ImageFile) => {
     const decision = cullDecisions[image.path];
     if (reviewFilter === 'all') return true;
     if (reviewFilter === 'selected') return decision?.finalStatus === 'keep' || (!decision?.finalStatus && decision?.proposedStatus === 'keep');
     if (reviewFilter === 'rejected') return decision?.finalStatus === 'reject' || (!decision?.finalStatus && decision?.proposedStatus === 'reject');
     if (reviewFilter === 'highlights') return highlightPaths.has(image.path);
-    if (reviewFilter === 'duplicates') return decision?.reason.startsWith('duplicate_of:');
-    return !!decision && !decision.reason.startsWith('duplicate_of:') && (decision.proposedStatus === 'reject' || decision.finalStatus === 'reject');
-  }), [imageList, cullDecisions, highlightPaths, reviewFilter]);
+    if (reviewFilter === 'duplicates') return decision?.reason?.startsWith('duplicate_of:');
+    if (reviewFilter === 'closed_eyes') return isClosedEyes(decision);
+    if (reviewFilter === 'blurry') return isBlurry(decision) && !decision?.reason?.startsWith('duplicate_of:');
+    return !!decision && !decision.reason?.startsWith('duplicate_of:') && (decision.proposedStatus === 'reject' || decision.finalStatus === 'reject');
+  }), [imageList, cullDecisions, highlightPaths, reviewFilter, isClosedEyes, isBlurry]);
 
   const cullFilterCounts = useMemo(() => ({
     all: imageList.length,
@@ -1369,12 +1394,20 @@ export default function CullingView(props: any) {
       return decision?.finalStatus === 'reject' || (!decision?.finalStatus && decision?.proposedStatus === 'reject');
     }).length,
     highlights: imageList.filter((image: ImageFile) => highlightPaths.has(image.path)).length,
-    duplicates: imageList.filter((image: ImageFile) => cullDecisions[image.path]?.reason.startsWith('duplicate_of:')).length,
+    duplicates: imageList.filter((image: ImageFile) => cullDecisions[image.path]?.reason?.startsWith('duplicate_of:')).length,
     blurry: imageList.filter((image: ImageFile) => {
       const decision = cullDecisions[image.path];
-      return !!decision && !decision.reason.startsWith('duplicate_of:') && (decision.proposedStatus === 'reject' || decision.finalStatus === 'reject');
+      return isBlurry(decision) && !decision?.reason?.startsWith('duplicate_of:');
     }).length,
-  }), [imageList, cullDecisions, highlightPaths]);
+    closed_eyes: imageList.filter((image: ImageFile) => {
+      const decision = cullDecisions[image.path];
+      return isClosedEyes(decision) && !decision?.reason?.startsWith('duplicate_of:');
+    }).length,
+    warnings: imageList.filter((image: ImageFile) => {
+      const decision = cullDecisions[image.path];
+      return (isBlurry(decision) || isClosedEyes(decision)) && !decision?.reason?.startsWith('duplicate_of:');
+    }).length,
+  }), [imageList, cullDecisions, highlightPaths, isBlurry, isClosedEyes]);
 
   useEffect(() => {
     cullImageList.slice(0, 500).forEach((image: ImageFile) => queueThumbnailRequest(image));
@@ -2242,170 +2275,466 @@ export default function CullingView(props: any) {
         )}
       </div>
 
+      {/* Right Culling Rail */}
       <div
         ref={containerRef}
         style={{ width: sidebarWidth }}
-        className="relative shrink-0 border-l border-surface/50 bg-bg-secondary/50 flex flex-col"
+        className="relative shrink-0 border-l border-border-color bg-bg-secondary flex flex-col h-full overflow-hidden select-none"
         onClick={handleSidebarEmptyClick}
         onContextMenu={handleSidebarEmptyContextMenu}
       >
-        <div className="shrink-0 border-b border-border-color p-3">
-          <div className="mb-2 flex items-center justify-between gap-2">
-            <Text variant={TextVariants.small} weight={TextWeights.semibold}>Culling session</Text>
-            {isPlanningCull && <Loader2 size={14} className="animate-spin text-accent" />}
-          </div>
-          {cullFolderPath ? (
-            <button
-              className="w-full truncate rounded-md border border-border-color bg-bg-primary px-2 py-1.5 text-left text-xs text-text-primary hover:bg-surface"
-              title={cullCatalogScope?.absoluteFolderPath || cullFolderPath}
-              onClick={() => void chooseCullFolder()}
-            >
-              {cullCatalogScope?.absoluteFolderPath || cullFolderPath}
-            </button>
-          ) : (
-            <div className="rounded-md border border-dashed border-border-color bg-bg-primary/50 px-2.5 py-1.5 text-xs text-text-secondary">
-              Select a source from the center panel
-            </div>
-          )}
-          {localCullPlan && (
-            <>
-              <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-2">
-                {localCullPlan.rejectCount} frames marked for review out of {localCullPlan.totalCount}.
-              </Text>
-              <div className="mt-2 grid grid-cols-2 gap-2">
-                <button className="rounded border border-border-color px-2 py-1.5 text-xs text-text-primary hover:bg-surface" onClick={selectAllCullCandidates}>
-                  Select all
-                </button>
-                <button className="rounded border border-border-color px-2 py-1.5 text-xs text-text-secondary hover:bg-surface" onClick={onClearSelection}>
-                  Clear selection
-                </button>
-              </div>
-              {multiSelectedPaths.filter((path: string) => localCullPlan.items.some((item) => item.representativePath === path)).length > 0 && (
-                <div className="mt-2 grid grid-cols-2 gap-2">
-                  <button className="rounded border border-green-400/40 px-2 py-1.5 text-xs text-green-300 hover:bg-green-400/10" onClick={() => void updateSelectedCullDecisions(true)}>
-                    Keep selected
-                  </button>
-                  <button className="rounded border border-red-400/40 px-2 py-1.5 text-xs text-red-300 hover:bg-red-400/10" onClick={() => void updateSelectedCullDecisions(false)}>
-                    Reject selected
-                  </button>
-                </div>
-              )}
-              <button
-                disabled={isApplyingCull || localCullPlan.rejectCount === 0}
-                className="mt-2 inline-flex w-full items-center justify-center gap-2 rounded-md border border-red-500/50 px-3 py-2 text-sm text-red-200 hover:bg-red-500/10 disabled:opacity-50"
-                onClick={() => void applyCullFromRail()}
-              >
-                {isApplyingCull ? <Loader2 size={15} className="animate-spin" /> : null}
-                {isApplyingCull ? 'Moving rejected frames...' : `Move ${localCullPlan.rejectCount} rejected frames`}
-              </button>
-            </>
-          )}
-        </div>
-        {(isCatalog || localCullPlan) && (
-          <div className="shrink-0 border-b border-border-color p-3">
-            <div className="flex items-center gap-2 mb-2">
-              <Filter size={14} className="text-text-secondary" />
-              <Text variant={TextVariants.small} weight={TextWeights.semibold}>Quick filters</Text>
-            </div>
-            <div className="space-y-1">
-              {([
-                { id: 'all', label: 'All', count: cullFilterCounts.all, dot: 'bg-text-secondary' },
-                { id: 'selected', label: 'Keepers', count: cullFilterCounts.selected, dot: 'bg-green-400' },
-                { id: 'rejected', label: 'Rejected', count: cullFilterCounts.rejected, dot: 'bg-red-400' },
-                { id: 'duplicates', label: 'Duplicates', count: cullFilterCounts.duplicates, dot: 'bg-amber-400' },
-                { id: 'blurry', label: 'Blurry', count: cullFilterCounts.blurry, dot: 'bg-rose-500' },
-                { id: 'highlights', label: 'Highlights', count: cullFilterCounts.highlights, dot: 'bg-cyan-400' },
-              ] as const).map((filter) => (
-                <button
-                  key={filter.id}
-                  className={clsx(
-                    'w-full flex items-center justify-between rounded px-2 py-1.5 text-left text-xs transition-colors cursor-pointer',
-                    reviewFilter === filter.id ? 'bg-surface text-text-primary font-medium' : 'text-text-secondary hover:bg-surface/50'
-                  )}
-                  onClick={() => setReviewFilter(filter.id)}
-                >
-                  <span className="flex items-center gap-2">
-                    <span className={clsx('h-2 w-2 rounded-full', filter.dot)} />
-                    {filter.label}
-                  </span>
-                  <span className="tabular-nums opacity-75 font-mono text-[11px]">{filter.count}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-        {activePath && cullDecisions[activePath] && (
-          <div className="shrink-0 border-b border-border-color px-3 py-2">
-            <div className="flex items-center justify-between gap-2">
-              <Text variant={TextVariants.small} weight={TextWeights.semibold}>Cull decision</Text>
-              <span className={cullDecisions[activePath].proposedStatus === 'keep' ? 'text-xs text-green-300' : 'text-xs text-red-300'}>{cullDecisions[activePath].proposedStatus === 'keep' ? 'Selected' : 'Rejected'}</span>
-            </div>
-            {finalistRanks.has(activePath) && <div className="mt-1 text-xs text-cyan-200">{finalistRanks.get(activePath) === 1 ? 'Top technical finalist' : `Technical finalist #${finalistRanks.get(activePath)}`}</div>}
-            {localCullPlan && thumbnails[activePath] && <img className="mt-2 aspect-[4/3] w-full rounded-sm border border-border-color bg-surface object-contain" src={thumbnails[activePath]} alt="Selected culling frame" />}
-            {localCullPlan && (
-              <>
-                <div className="mt-2 flex gap-2">
-                  <button className="rounded bg-green-400/10 px-2 py-1 text-xs text-green-300 hover:bg-green-400/20" onClick={() => void updateLocalCullDecision(activePath, true, decisionFeedbackReason)}>Keep</button>
-                  <button className="rounded bg-red-400/10 px-2 py-1 text-xs text-red-300 hover:bg-red-400/20" onClick={() => void updateLocalCullDecision(activePath, false, decisionFeedbackReason)}>Reject</button>
-                </div>
-                {localCullPlan.sessionId && (
-                  <label className="mt-2 block text-xs text-text-secondary">
-                    Why this choice?
-                    <div className="relative mt-1">
-                      <select
-                        value={decisionFeedbackReason}
-                        onChange={(event) => setDecisionFeedbackReason(event.target.value)}
-                        className="h-8 w-full appearance-none rounded border border-border-color bg-bg-primary pl-2 pr-7 text-xs text-text-primary outline-none focus:border-accent cursor-pointer"
-                        style={{ colorScheme: 'dark' }}
-                      >
-                        <option value="" className="bg-bg-secondary text-text-primary">No reason recorded</option>
-                        {CULL_FEEDBACK_REASONS.map((reason) => (
-                          <option key={reason} value={reason} className="bg-bg-secondary text-text-primary">{reason}</option>
-                        ))}
-                      </select>
-                      <ChevronDown size={14} className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-text-secondary" />
-                    </div>
-                  </label>
-                )}
-              </>
-            )}
-            {activePlanItem && activePlanItem.decisionFactors.length > 0 && <div className="mt-3 space-y-2 border-t border-border-color pt-2">{activePlanItem.decisionFactors.map((factor) => <div key={factor.id} className="text-xs"><div className={factor.impact === 'reject' ? 'text-red-300' : 'text-text-primary'}>{factor.label}</div><div className="mt-0.5 text-text-secondary">{factor.detail}</div></div>)}</div>}
-          </div>
-        )}
-        {localCullPlan && relatedDuplicatePaths.length > 0 && <div className="shrink-0 border-b border-border-color px-3 py-3"><div className="mb-2 flex items-center justify-between"><Text variant={TextVariants.small} weight={TextWeights.semibold}>Related duplicates</Text><span className="text-xs text-text-secondary">{relatedDuplicatePaths.length}</span></div><div className="grid grid-cols-3 gap-1.5">{relatedDuplicatePaths.slice(0, 6).map((path) => { const isRepresentative = path === duplicateRepresentativePath; return <button key={path} className={clsx('relative aspect-square overflow-hidden rounded-sm border bg-surface', isRepresentative ? 'border-green-400 ring-1 ring-green-400' : path === activePath ? 'border-accent ring-1 ring-accent' : 'border-border-color hover:border-text-secondary')} onClick={() => useLibraryStore.getState().setLibrary({ multiSelectedPaths: [path], libraryActivePath: path, selectionAnchorPath: path })} title={path}>{thumbnails[path] ? <img className="h-full w-full object-cover" src={thumbnails[path]} alt={isRepresentative ? 'Selected frame from duplicate group' : 'Related duplicate'} /> : <div className="h-full w-full animate-pulse bg-surface/70" />}{isRepresentative && <span className="absolute bottom-1 left-1 rounded bg-green-500/90 px-1 py-0.5 text-[10px] font-medium text-white">Selected</span>}</button>; })}</div></div>}
-        {isCatalog && (activeFaces.length > 0 || (subjectEvidence?.aiTags.length ?? 0) > 0 || (subjectEvidence?.species.length ?? 0) > 0) && (
-          <div className="shrink-0 border-b border-border-color px-3 py-3">
-            <div className="mb-2 flex items-center justify-between">
-              <Text variant={TextVariants.small} weight={TextWeights.semibold}>Key subjects</Text>
-              <span className="text-xs text-text-secondary">Catalog evidence</span>
-            </div>
-            {(subjectEvidence?.aiTags.length || subjectEvidence?.species.length) ? <div className="mb-3 flex flex-wrap gap-1.5">
-              {subjectEvidence?.species.filter((item) => item.reviewState !== 'rejected').slice(0, 3).map((item) => <span key={`${item.scientificName}-${item.confidence}`} className="rounded bg-cyan-400/15 px-1.5 py-0.5 text-xs text-cyan-200">{item.commonName || item.scientificName}</span>)}
-              {subjectEvidence?.aiTags.filter((item) => item.reviewState !== 'rejected').slice(0, 6).map((item) => <span key={item.name} className="rounded bg-surface px-1.5 py-0.5 text-xs text-text-secondary">{item.name}</span>)}
-            </div> : null}
-            {activeFaces.length > 0 && <><Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mb-1.5">People detected</Text><div className="grid grid-cols-3 gap-1.5">
-              {activeFaces.slice(0, 6).map((item) => {
-                const source = item.thumbnailDataUrl || (item.cropPath ? convertFileSrc(item.cropPath) : null);
-                return <div key={item.face.id} className="aspect-square overflow-hidden rounded-sm border border-border-color bg-surface">
-                  {source ? <img className="h-full w-full object-cover" src={source} alt="Detected person" /> : <div className="h-full w-full animate-pulse bg-surface/70" />}
-                </div>;
-              })}
-            </div></>}
-          </div>
-        )}
         <div
           onMouseDown={startResizing}
-          className="absolute top-0 bottom-0 left-0 w-1 cursor-col-resize hover:bg-surface/50 active:bg-surface transition-colors z-40"
+          className="absolute top-0 bottom-0 left-0 w-1.5 cursor-col-resize hover:bg-cyan-500/50 active:bg-cyan-500 transition-colors z-40"
         />
-        <div key={`${sidebarWidth}-${thumbnailAspectRatio}`} style={{ height: listHeight, width: '100%' }} className="min-h-0 flex-1">
-          <List
-            listRef={setListHandle}
-            rowCount={cullImageList.length}
-            rowHeight={sidebarWidth - 16}
-            rowComponent={Row as unknown as (props: any) => React.ReactElement | null}
-            rowProps={rowProps}
-            className="custom-scrollbar"
-          />
+
+        <div className="flex-1 overflow-y-auto custom-scrollbar divide-y divide-border-color/60">
+          {/* Section 1: Culling Session Header & Action */}
+          <div className="p-3.5">
+            <button
+              onClick={() => setIsSessionExpanded((v) => !v)}
+              className="w-full flex items-center justify-between text-xs font-semibold text-text-primary hover:text-accent transition-colors mb-2.5 cursor-pointer"
+            >
+              <div className="flex items-center gap-1.5 truncate">
+                <ChevronDown size={15} className={clsx('transition-transform duration-200 text-text-secondary shrink-0', !isSessionExpanded && '-rotate-90')} />
+                <span className="truncate">
+                  {localCullPlan ? `Culled in ${localCullPlan.totalCount} photos` : 'Culling session'}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5 text-text-secondary shrink-0">
+                {isPlanningCull && <Loader2 size={13} className="animate-spin text-accent" />}
+                <Info size={14} className="hover:text-text-primary" title="Culling session details" />
+              </div>
+            </button>
+
+            {isSessionExpanded && (
+              <div className="space-y-2.5">
+                {cullFolderPath ? (
+                  <div className="flex items-center justify-between rounded-md border border-border-color bg-bg-primary px-2.5 py-1.5 text-xs">
+                    <span className="font-mono text-text-primary truncate" title={cullCatalogScope?.absoluteFolderPath || cullFolderPath}>
+                      {(cullCatalogScope?.absoluteFolderPath || cullFolderPath).split(/[\\/]/).pop()}
+                    </span>
+                    <button
+                      onClick={() => void chooseCullFolder()}
+                      className="shrink-0 font-medium text-accent hover:underline ml-2 cursor-pointer"
+                    >
+                      Change
+                    </button>
+                  </div>
+                ) : (
+                  <div className="rounded-md border border-dashed border-border-color bg-bg-primary/50 px-2.5 py-1.5 text-xs text-text-secondary">
+                    Select a source from the center panel
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2 pt-0.5">
+                  <button
+                    onClick={() => setIsConfiguringCull(true)}
+                    className="rounded-full border border-border-color bg-surface/70 hover:bg-surface px-4 py-1.5 text-xs font-semibold text-text-primary transition-colors cursor-pointer shadow-xs"
+                  >
+                    Restart Culling
+                  </button>
+                  <span className="text-[11px] text-text-secondary truncate">
+                    {localCullPlan ? `(${localCullPlan.rejectCount} marked for review)` : '(Ready)'}
+                  </span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Section 2: Quick Filters */}
+          <div className="p-3.5">
+            <button
+              onClick={() => setIsQuickFiltersExpanded((v) => !v)}
+              className="w-full flex items-center justify-between text-xs font-semibold text-text-primary hover:text-accent transition-colors mb-2.5 cursor-pointer"
+            >
+              <div className="flex items-center gap-1.5">
+                <ChevronDown size={15} className={clsx('transition-transform duration-200 text-text-secondary shrink-0', !isQuickFiltersExpanded && '-rotate-90')} />
+                <span>Quick filters</span>
+              </div>
+              <HelpCircle size={14} className="text-text-secondary hover:text-text-primary shrink-0" title="Filter photos by classification" />
+            </button>
+
+            {isQuickFiltersExpanded && (
+              <div className="space-y-1">
+                {([
+                  { id: 'selected', label: 'Selected', count: cullFilterCounts.selected, dot: 'bg-green-500', stars: 5 },
+                  { id: 'highlights', label: 'Highlights', count: cullFilterCounts.highlights, dot: 'bg-cyan-400', stars: 4 },
+                  { id: 'blurry', label: 'Blurred', count: cullFilterCounts.blurry, dot: 'bg-rose-500', stars: 2 },
+                  { id: 'closed_eyes', label: 'Closed Eyes', count: cullFilterCounts.closed_eyes, dot: 'bg-purple-500', stars: 1, infoDot: true, tooltip: 'Show images with blinking or closed eyes' },
+                  { id: 'all', label: 'All Photos', count: cullFilterCounts.all, dot: 'bg-text-secondary/60', stars: 0 },
+                ] as const).map((item) => (
+                  <button
+                    key={item.id}
+                    onClick={() => setReviewFilter(item.id as any)}
+                    className={clsx(
+                      'w-full flex items-center justify-between rounded-md px-2.5 py-1.5 text-xs transition-colors cursor-pointer',
+                      reviewFilter === item.id
+                        ? 'bg-surface text-text-primary font-semibold shadow-xs'
+                        : 'text-text-secondary hover:bg-surface/50 hover:text-text-primary'
+                    )}
+                    title={item.tooltip}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className={clsx('h-2 w-2 rounded-full shrink-0', item.dot)} />
+                      <span>{item.label} ({item.count})</span>
+                      {item.infoDot && <span className="h-1.5 w-1.5 rounded-full bg-cyan-400 shrink-0" />}
+                    </div>
+                    {renderStars(item.stars)}
+                  </button>
+                ))}
+
+                {/* Other Filters */}
+                <div className="pt-2.5">
+                  <div className="text-[11px] font-medium text-text-secondary mb-1.5 px-0.5">Other Filters</div>
+                  <div className="flex flex-wrap gap-1.5">
+                    <button
+                      onClick={() => setReviewFilter('duplicates')}
+                      className={clsx(
+                        'rounded-md border px-2.5 py-1 text-xs transition-colors cursor-pointer',
+                        reviewFilter === 'duplicates'
+                          ? 'border-accent bg-accent/15 text-text-primary font-semibold'
+                          : 'border-border-color bg-surface/40 text-text-secondary hover:text-text-primary hover:bg-surface'
+                      )}
+                    >
+                      Duplicates ({cullFilterCounts.duplicates})
+                    </button>
+                    <button
+                      onClick={() => setReviewFilter('rejected')}
+                      className={clsx(
+                        'rounded-md border px-2.5 py-1 text-xs transition-colors cursor-pointer',
+                        reviewFilter === 'rejected'
+                          ? 'border-red-400 bg-red-500/15 text-red-200 font-semibold'
+                          : 'border-border-color bg-surface/40 text-text-secondary hover:text-text-primary hover:bg-surface'
+                      )}
+                    >
+                      Rejected ({cullFilterCounts.rejected})
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Section 3: Key faces */}
+          {(activeFaces.length > 0 || (isCatalog && ((subjectEvidence?.aiTags.length ?? 0) > 0 || (subjectEvidence?.species.length ?? 0) > 0))) && (
+            <div className="p-3.5">
+              <button
+                onClick={() => setIsFacesExpanded((v) => !v)}
+                className="w-full flex items-center justify-between text-xs font-semibold text-text-primary hover:text-accent transition-colors mb-2.5 cursor-pointer"
+              >
+                <div className="flex items-center gap-1.5">
+                  <ChevronDown size={15} className={clsx('transition-transform duration-200 text-text-secondary shrink-0', !isFacesExpanded && '-rotate-90')} />
+                  <span>Key faces {activeFaces.length > 0 ? `(${activeFaces.length})` : ''}</span>
+                </div>
+              </button>
+
+              {isFacesExpanded && (
+                <div className="space-y-2.5">
+                  {activeFaces.length > 0 ? (
+                    <div className="grid grid-cols-3 gap-2">
+                      {activeFaces.slice(0, 6).map((item) => {
+                        const source = item.thumbnailDataUrl || (item.cropPath ? convertFileSrc(item.cropPath) : null);
+                        return (
+                          <div key={item.face.id} className="aspect-square overflow-hidden rounded-lg border border-border-color bg-surface shadow-xs">
+                            {source ? <img className="h-full w-full object-cover" src={source} alt="Key face" /> : <div className="h-full w-full animate-pulse bg-surface/70" />}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+
+                  {(subjectEvidence?.species.length || subjectEvidence?.aiTags.length) ? (
+                    <div className="flex flex-wrap gap-1">
+                      {subjectEvidence?.species.filter((item) => item.reviewState !== 'rejected').slice(0, 3).map((item) => (
+                        <span key={`${item.scientificName}-${item.confidence}`} className="rounded bg-cyan-400/15 px-1.5 py-0.5 text-[11px] text-cyan-200">
+                          {item.commonName || item.scientificName}
+                        </span>
+                      ))}
+                      {subjectEvidence?.aiTags.filter((item) => item.reviewState !== 'rejected').slice(0, 4).map((item) => (
+                        <span key={item.name} className="rounded bg-surface px-1.5 py-0.5 text-[11px] text-text-secondary">
+                          {item.name}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Section 4: Duplicates */}
+          {localCullPlan && (
+            <div className="p-3.5">
+              <button
+                onClick={() => setIsDuplicatesExpanded((v) => !v)}
+                className="w-full flex items-center justify-between text-xs font-semibold text-text-primary hover:text-accent transition-colors mb-2.5 cursor-pointer"
+              >
+                <div className="flex items-center gap-1.5">
+                  <ChevronDown size={15} className={clsx('transition-transform duration-200 text-text-secondary shrink-0', !isDuplicatesExpanded && '-rotate-90')} />
+                  <span>Duplicates ({relatedDuplicatePaths.length})</span>
+                </div>
+                <div className="flex items-center gap-1 text-text-secondary">
+                  <Columns size={13} className="hover:text-text-primary" />
+                  <ArrowLeftRight size={13} className="hover:text-text-primary" />
+                  <Grid3X3 size={13} className="hover:text-text-primary" />
+                </div>
+              </button>
+
+              {isDuplicatesExpanded && relatedDuplicatePaths.length > 0 && (
+                <div className="grid grid-cols-3 gap-1.5">
+                  {relatedDuplicatePaths.slice(0, 6).map((path) => {
+                    const isRepresentative = path === duplicateRepresentativePath;
+                    return (
+                      <button
+                        key={path}
+                        className={clsx(
+                          'relative aspect-square overflow-hidden rounded-md border bg-surface transition-all cursor-pointer',
+                          isRepresentative ? 'border-green-400 ring-2 ring-green-400/50' : path === activePath ? 'border-accent ring-1 ring-accent' : 'border-border-color hover:border-text-secondary'
+                        )}
+                        onClick={() => useLibraryStore.getState().setLibrary({ multiSelectedPaths: [path], libraryActivePath: path, selectionAnchorPath: path })}
+                        title={path}
+                      >
+                        {thumbnails[path] ? <img className="h-full w-full object-cover" src={thumbnails[path]} alt={path} /> : <div className="h-full w-full animate-pulse bg-surface/70" />}
+                        {isRepresentative && (
+                          <span className="absolute bottom-1 left-1 rounded bg-green-500 px-1 py-0.2 text-[9px] font-bold text-white shadow-xs">
+                            Selected
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Section 5: Rejection Reasons Breakdown */}
+          {localCullPlan && localCullPlan.rejectCount > 0 && (
+            <div className="p-3.5">
+              <button
+                onClick={() => setIsRejectionReasonsExpanded((v) => !v)}
+                className="w-full flex items-center justify-between text-xs font-semibold text-text-primary hover:text-accent transition-colors mb-2.5 cursor-pointer"
+              >
+                <div className="flex items-center gap-1.5">
+                  <ChevronDown size={15} className={clsx('transition-transform duration-200 text-text-secondary shrink-0', !isRejectionReasonsExpanded && '-rotate-90')} />
+                  <span>Rejection Reasons ({localCullPlan.rejectCount})</span>
+                </div>
+                <span className="text-[11px] text-text-secondary">
+                  {Math.round((localCullPlan.rejectCount / localCullPlan.totalCount) * 100)}% rejected
+                </span>
+              </button>
+
+              {isRejectionReasonsExpanded && (
+                <div className="space-y-2">
+                  {[
+                    {
+                      id: 'blurry',
+                      label: 'Motion Blur / Out of Focus',
+                      count: cullFilterCounts.blurry,
+                      color: 'bg-rose-500',
+                    },
+                    {
+                      id: 'closed_eyes',
+                      label: 'Closed Eyes / Blinking',
+                      count: cullFilterCounts.closed_eyes,
+                      color: 'bg-purple-500',
+                    },
+                    {
+                      id: 'duplicates',
+                      label: 'Duplicate Burst Sequences',
+                      count: cullFilterCounts.duplicates,
+                      color: 'bg-amber-400',
+                    },
+                    {
+                      id: 'rejected',
+                      label: 'Sub-optimal Technical Score',
+                      count: Math.max(0, cullFilterCounts.rejected - cullFilterCounts.blurry - cullFilterCounts.closed_eyes - cullFilterCounts.duplicates),
+                      color: 'bg-red-400',
+                    },
+                  ]
+                    .filter((item) => item.count > 0)
+                    .map((item) => {
+                      const pct = Math.round((item.count / (localCullPlan.rejectCount || 1)) * 100);
+                      return (
+                        <button
+                          key={item.id}
+                          onClick={() => setReviewFilter(item.id as any)}
+                          className={clsx(
+                            'w-full text-left rounded-lg border border-border-color bg-bg-primary p-2.5 transition-all cursor-pointer hover:border-border-color/80 group',
+                            reviewFilter === item.id && 'ring-1 ring-accent border-accent'
+                          )}
+                        >
+                          <div className="flex items-center justify-between text-xs mb-1">
+                            <div className="flex items-center gap-1.5 font-medium text-text-primary">
+                              <span className={clsx('h-2 w-2 rounded-full shrink-0', item.color)} />
+                              <span className="truncate">{item.label}</span>
+                            </div>
+                            <span className="font-mono text-[11px] text-text-secondary tabular-nums">
+                              {item.count} <span className="opacity-60">({pct}%)</span>
+                            </span>
+                          </div>
+                          <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface">
+                            <div
+                              className={clsx('h-full transition-all duration-300', item.color)}
+                              style={{ width: `${Math.max(5, pct)}%` }}
+                            />
+                          </div>
+                        </button>
+                      );
+                    })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Section 6: Active Photo Decision & Rejection Factors Inspector */}
+          {activePath && cullDecisions[activePath] && (
+            <div className="p-3.5 space-y-3">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-semibold text-text-primary">Inspected Frame</span>
+                <span
+                  className={clsx(
+                    'rounded-full px-2 py-0.5 text-[11px] font-bold shadow-xs',
+                    cullDecisions[activePath].proposedStatus === 'keep'
+                      ? 'bg-green-500/20 text-green-300 border border-green-500/40'
+                      : 'bg-red-500/20 text-red-300 border border-red-500/40'
+                  )}
+                >
+                  {cullDecisions[activePath].proposedStatus === 'keep' ? '✓ Selected (Keep)' : '✕ Rejected'}
+                </span>
+              </div>
+
+              {/* Rejection / Decision Summary Card */}
+              <div className="rounded-lg border border-border-color bg-bg-primary p-3 shadow-xs">
+                <div className="text-xs font-semibold text-text-primary">
+                  {cullDecisions[activePath].proposedStatus === 'keep'
+                    ? 'Selected Keeper'
+                    : isBlurry(cullDecisions[activePath])
+                    ? 'Motion Blur / Out of Focus'
+                    : isClosedEyes(cullDecisions[activePath])
+                    ? 'Closed Eyes / Blinking'
+                    : cullDecisions[activePath].reason?.startsWith('duplicate_of:')
+                    ? 'Duplicate Burst Frame'
+                    : 'Marked for Review'}
+                </div>
+                <div className="text-[11px] text-text-secondary mt-0.5">
+                  {cullDecisions[activePath].reason?.startsWith('duplicate_of:')
+                    ? `Similar to representative frame (${cullDecisions[activePath].reason.slice(13).split(/[\\/]/).pop()})`
+                    : cullDecisions[activePath].proposedStatus === 'keep'
+                    ? 'Meets sharpness, eye openness, and composition criteria'
+                    : cullDecisions[activePath].reason || 'Does not meet keeper threshold criteria'}
+                </div>
+
+                {/* Quality Score Progress Bar */}
+                <div className="mt-2.5 pt-2 border-t border-border-color/50">
+                  <div className="flex items-center justify-between text-[11px] text-text-secondary mb-1">
+                    <span>Quality / Sharpness score</span>
+                    <span className="font-mono font-bold text-text-primary">
+                      {Math.round(cullDecisions[activePath].qualityScore || 0)}/100
+                    </span>
+                  </div>
+                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface">
+                    <div
+                      className={clsx(
+                        'h-full transition-all duration-300',
+                        cullDecisions[activePath].qualityScore >= 70
+                          ? 'bg-green-400'
+                          : cullDecisions[activePath].qualityScore >= 45
+                          ? 'bg-amber-400'
+                          : 'bg-rose-500'
+                      )}
+                      style={{ width: `${Math.min(100, Math.max(5, cullDecisions[activePath].qualityScore || 0))}%` }}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Decision Factors breakdown if available */}
+              {activePlanItem && activePlanItem.decisionFactors && activePlanItem.decisionFactors.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="text-[11px] font-semibold text-text-secondary px-0.5">Decision Factors</div>
+                  {activePlanItem.decisionFactors.map((factor) => (
+                    <div
+                      key={factor.id}
+                      className={clsx(
+                        'rounded-md border px-2.5 py-1.5 text-xs flex items-start justify-between gap-2',
+                        factor.impact === 'reject'
+                          ? 'border-red-500/30 bg-red-500/10 text-red-200'
+                          : 'border-border-color bg-bg-primary text-text-primary'
+                      )}
+                    >
+                      <div>
+                        <div className="font-medium text-[11px]">{factor.label}</div>
+                        <div className="text-[10px] opacity-75 mt-0.5">{factor.detail}</div>
+                      </div>
+                      <span
+                        className={clsx(
+                          'rounded px-1.5 py-0.5 text-[9px] font-bold uppercase shrink-0',
+                          factor.impact === 'reject' ? 'bg-red-500/30 text-red-300' : 'bg-green-500/30 text-green-300'
+                        )}
+                      >
+                        {factor.impact}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Keep / Reject Quick Override */}
+              <div className="flex gap-2 pt-0.5">
+                <button
+                  className="flex-1 rounded-md bg-green-500/15 border border-green-500/40 py-2 text-xs font-bold text-green-300 hover:bg-green-500/25 transition-colors cursor-pointer"
+                  onClick={() => void updateLocalCullDecision(activePath, true, decisionFeedbackReason)}
+                >
+                  Keep
+                </button>
+                <button
+                  className="flex-1 rounded-md bg-red-500/15 border border-red-500/40 py-2 text-xs font-bold text-red-300 hover:bg-red-500/25 transition-colors cursor-pointer"
+                  onClick={() => void updateLocalCullDecision(activePath, false, decisionFeedbackReason)}
+                >
+                  Reject
+                </button>
+              </div>
+
+              {/* Feedback reason dropdown */}
+              {localCullPlan && localCullPlan.sessionId && (
+                <label className="block text-xs text-text-secondary pt-0.5">
+                  Why this choice?
+                  <div className="relative mt-1">
+                    <select
+                      value={decisionFeedbackReason}
+                      onChange={(event) => setDecisionFeedbackReason(event.target.value)}
+                      className="h-8 w-full appearance-none rounded border border-border-color bg-bg-primary pl-2 pr-7 text-xs text-text-primary outline-none focus:border-accent cursor-pointer"
+                      style={{ colorScheme: 'dark' }}
+                    >
+                      <option value="" className="bg-bg-secondary text-text-primary">No reason recorded</option>
+                      {CULL_FEEDBACK_REASONS.map((reason) => (
+                        <option key={reason} value={reason} className="bg-bg-secondary text-text-primary">{reason}</option>
+                      ))}
+                    </select>
+                    <ChevronDown size={14} className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-text-secondary" />
+                  </div>
+                </label>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Section 6: Sticky Bottom Export / Action Bar */}
+        <div className="shrink-0 border-t border-border-color p-3.5 bg-bg-secondary">
+          <button
+            disabled={isApplyingCull || !localCullPlan}
+            onClick={() => void applyCullFromRail()}
+            className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 py-3 px-4 text-sm font-bold text-black shadow-lg hover:shadow-cyan-500/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+          >
+            {isApplyingCull ? <Loader2 size={16} className="animate-spin" /> : null}
+            {isApplyingCull
+              ? 'Moving rejected frames...'
+              : localCullPlan && localCullPlan.rejectCount > 0
+              ? `Move ${localCullPlan.rejectCount} Rejected Photos`
+              : `Export ${cullFilterCounts.selected} Photos`}
+          </button>
         </div>
       </div>
     </div>
