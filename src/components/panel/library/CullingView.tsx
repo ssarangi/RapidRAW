@@ -1771,11 +1771,25 @@ export default function CullingView(props: any) {
       ? planItemFactors?.find((factor) => factor.impact === 'reject')
       : undefined;
     const keeperHighlight = isKeeper ? keeperHighlightLabel(planItemFactors) : null;
-    const border = isKeeper
-      ? 'border-green-500/80 ring-1 ring-green-500/30'
+    const borderColor = isKeeper
+      ? 'border-green-500/80'
       : isRejected
       ? 'border-red-500/70'
       : 'border-border-color';
+    const isActiveTile = activePath === image.path;
+    // The active tile needs to read clearly against a bold green/reject
+    // border, so it gets its own outer glow (a color not otherwise used for
+    // keep/reject/finalist state) plus dimming everything else - a thin
+    // inset ring alone got lost next to the state border. Active takes
+    // priority over the multi-select ring and the keeper's subtle ring when
+    // both would otherwise apply to the same tile.
+    const ring = isActiveTile
+      ? 'ring-4 ring-offset-2 ring-offset-bg-primary ring-cyan-400 shadow-[0_0_16px_rgba(34,211,238,0.6)] z-10'
+      : selected
+        ? 'ring-2 ring-accent'
+        : isKeeper
+          ? 'ring-1 ring-green-500/30'
+          : '';
 
     return (
       <div
@@ -1783,8 +1797,9 @@ export default function CullingView(props: any) {
         data-cull-path={image.path}
         className={clsx(
           'relative overflow-hidden rounded-md border-2 transition-all bg-bg-secondary',
-          selected && 'ring-2 ring-accent',
-          border,
+          borderColor,
+          ring,
+          !isActiveTile && activePath && 'opacity-55',
         )}
       >
         {/* Top status badges */}
