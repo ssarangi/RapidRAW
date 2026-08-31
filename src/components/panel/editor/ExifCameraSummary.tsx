@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Camera } from 'lucide-react';
 import Text from '../../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { IconAperture, IconShutter, IconIso, IconFocalLength, IconLens } from './ExifIcons';
@@ -62,6 +63,17 @@ export default function ExifCameraSummary({ exif }: { exif: { [key: string]: str
     },
   }), [t]);
 
+  const cameraName = useMemo(() => {
+    const exifData = exif || {};
+    const make = (exifData.Make || '').trim();
+    const model = (exifData.Model || '').trim();
+    if (!make && !model) return null;
+    // Some cameras already include the brand in the model string (e.g.
+    // "Canon EOS R5"), so avoid a duplicated "Canon Canon EOS R5".
+    if (!make || model.toLowerCase().startsWith(make.toLowerCase())) return model || make;
+    return `${make} ${model}`;
+  }, [exif]);
+
   const { cameraGridSettings, lensSetting } = useMemo(() => {
     const exifData = exif || {};
     const cameraGridSettings = CAMERA_GRID_KEYS.map((key) => {
@@ -91,6 +103,19 @@ export default function ExifCameraSummary({ exif }: { exif: { [key: string]: str
 
   return (
     <div className="flex flex-col gap-2">
+      {cameraName && (
+        <div
+          className="flex items-center gap-2 bg-surface border border-surface px-3 py-2 rounded-xl cursor-default"
+          data-tooltip={t('editor.metadata.camera.title')}
+        >
+          <span className="text-text-secondary opacity-90 flex items-center justify-center shrink-0">
+            <Camera size={16} />
+          </span>
+          <Text as="span" variant={TextVariants.small} color={TextColors.primary} weight={TextWeights.medium} className="truncate">
+            {cameraName}
+          </Text>
+        </div>
+      )}
       <div className="grid grid-cols-2 gap-2">
         {cameraGridSettings.map((item) => {
           const Icon = CAMERA_ICONS[item.key];
