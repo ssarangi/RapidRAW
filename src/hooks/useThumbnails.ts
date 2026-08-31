@@ -5,6 +5,10 @@ import debounce from 'lodash.debounce';
 export interface ThumbnailRequest {
   path: string;
   modified?: number | null;
+  /** Grid/culling tiles only need the small thumbnail; set this when the
+   * image is about to be opened in the editor, which uses the medium size
+   * as an instant preview while the full-resolution image loads. */
+  needMedium?: boolean;
 }
 
 export function useThumbnails() {

@@ -150,6 +150,12 @@ pub struct ThumbnailProgressTracker {
 pub struct ThumbnailJob {
     pub path: String,
     pub modified: Option<u64>,
+    /// Grid/culling requests only need the small thumbnail to render a tile;
+    /// the medium size is only used as an instant preview while the editor
+    /// loads the full-resolution image, so it's skipped unless explicitly
+    /// requested - halving bulk thumbnail generation cost for large batches.
+    #[serde(default)]
+    pub need_medium: bool,
 }
 
 pub struct ThumbnailManager {

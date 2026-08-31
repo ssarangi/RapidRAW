@@ -2024,6 +2024,7 @@ pub(crate) fn generate_single_thumbnail_and_cache(
     gpu_context: Option<&GpuContext>,
     preloaded_image: Option<&DynamicImage>,
     force_regenerate: bool,
+    need_medium: bool,
     app_handle: &AppHandle,
     settings: &AppSettings,
 ) -> Option<(String, String, u8, bool)> {
@@ -2057,11 +2058,17 @@ pub(crate) fn generate_single_thumbnail_and_cache(
 
     let small_path = thumb_cache_dir.join(format!("{}_small.jpg", cache_hash));
     let medium_path = thumb_cache_dir.join(format!("{}_medium.jpg", cache_hash));
+    let medium_already_cached = medium_path.exists();
+    // A stale medium thumbnail from a prior edit is worse than none, so a
+    // force-regenerate (the image changed) refreshes it if it already
+    // exists, even when this particular caller doesn't need it - but a
+    // fresh grid/culling request never generates it speculatively.
+    let should_produce_medium = need_medium || medium_already_cached;
 
-    if !force_regenerate && small_path.exists() && medium_path.exists() {
+    if !force_regenerate && small_path.exists() && (!should_produce_medium || medium_already_cached) {
         return Some((
             small_path.to_string_lossy().into_owned(),
-            medium_path.to_string_lossy().into_owned(),
+            if medium_already_cached { medium_path.to_string_lossy().into_owned() } else { String::new() },
             rating,
             is_edited,
         ));
@@ -2074,18 +2081,24 @@ pub(crate) fn generate_single_thumbnail_and_cache(
     let target_width_small = settings.small_thumbnail_resolution.unwrap_or(480);
     let target_width_medium = settings.medium_thumbnail_resolution.unwrap_or(1280);
 
-    if let Ok(thumb_image) =
-        generate_thumbnail_data(path_str, gpu_context, preloaded_image, app_handle)
-        && let (Ok(small_data), Ok(medium_data)) = (
-            encode_thumbnail(&thumb_image, target_width_small),
-            encode_thumbnail(&thumb_image, target_width_medium),
-        )
+    if let Ok(thumb_image) = generate_thumbnail_data(path_str, gpu_context, preloaded_image, app_handle)
+        && let Ok(small_data) = encode_thumbnail(&thumb_image, target_width_small)
     {
         let _ = fs::write(&small_path, &small_data);
-        let _ = fs::write(&medium_path, &medium_data);
+        let medium_path_str = if should_produce_medium {
+            match encode_thumbnail(&thumb_image, target_width_medium) {
+                Ok(medium_data) => {
+                    let _ = fs::write(&medium_path, &medium_data);
+                    medium_path.to_string_lossy().into_owned()
+                }
+                Err(_) => String::new(),
+            }
+        } else {
+            String::new()
+        };
         return Some((
             small_path.to_string_lossy().into_owned(),
-            medium_path.to_string_lossy().into_owned(),
+            medium_path_str,
             rating,
             is_edited,
         ));
@@ -2143,6 +2156,7 @@ pub fn start_thumbnail_workers(app_handle: tauri::AppHandle) {
                         gpu_context.as_ref(),
                         None,
                         false,
+                        job_to_process.need_medium,
                         &app_clone,
                         &current_settings,
                     );
@@ -2820,6 +2834,7 @@ pub fn save_metadata_and_update_thumbnail(
             gpu_context.as_ref(),
             preloaded_image_option.as_deref(),
             true,
+            true,
             &app_handle_clone,
             &settings,
         );
@@ -2923,6 +2938,7 @@ pub async fn apply_adjustments_to_paths(
                 gpu_context.as_ref(),
                 None,
                 true,
+                true,
                 &app_handle,
                 &settings,
             );
@@ -2999,6 +3015,7 @@ pub async fn reset_adjustments_for_paths(
                 &thumb_cache_dir,
                 gpu_context.as_ref(),
                 None,
+                true,
                 true,
                 &app_handle,
                 &settings,
@@ -3117,6 +3134,7 @@ pub async fn apply_auto_adjustments_to_paths(
                 &thumb_cache_dir,
                 gpu_context.as_ref(),
                 loaded_image.as_ref(),
+                true,
                 true,
                 &app_handle,
                 &settings,

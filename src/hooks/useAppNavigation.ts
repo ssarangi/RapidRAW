@@ -111,6 +111,13 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
 
       const cachedThumb = useProcessStore.getState().thumbnails[path];
       const cachedMedium = useProcessStore.getState().mediumThumbnails[path] || cachedThumb;
+      // Bulk grid/culling requests intentionally skip the medium thumbnail
+      // (only used here, as an instant preview while the full image loads),
+      // so ask for it directly for whichever image is actually being opened.
+      // A no-op on the backend if it's already cached.
+      if (!useProcessStore.getState().mediumThumbnails[path]) {
+        invoke('update_thumbnail_queue', { paths: [{ path, needMedium: true }] }).catch(() => {});
+      }
 
       const cached = globalImageCache.get(path);
       const cachedEntry = cached?.selectedImage?.isReady ? cached : null;

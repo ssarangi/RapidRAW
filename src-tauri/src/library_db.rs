@@ -3728,9 +3728,11 @@ fn run_catalog_thumbnail_generation_impl(
             &[],
             modified,
         );
+        // This bulk pass only needs the small thumbnail (see need_medium: false
+        // below), so only that file's presence determines whether it's cached.
         if !force_regenerate
             && let Some(ref hash) = cache_hash
-            && thumb_cache_dir.join(format!("{hash}.jpg")).exists()
+            && thumb_cache_dir.join(format!("{hash}_small.jpg")).exists()
         {
             skipped += 1;
             continue;
@@ -3746,6 +3748,7 @@ fn run_catalog_thumbnail_generation_impl(
             gpu_context.as_ref(),
             None,
             force_regenerate,
+            false,
             app,
             &settings,
         );

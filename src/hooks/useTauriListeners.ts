@@ -107,9 +107,13 @@ export function useTauriListeners({
         if (!isEffectActive) return;
         const { path, thumbnailPath, previewPath, rating, is_edited, data } = event.payload;
 
-        if (thumbnailPath && previewPath) {
+        if (thumbnailPath) {
           thumbnailBuffer.current[path] = convertFileSrc(thumbnailPath.replace(/\\/g, '/'));
-          mediumThumbnailBuffer.current[path] = convertFileSrc(previewPath.replace(/\\/g, '/'));
+          // previewPath (medium) is only generated on demand - e.g. bulk
+          // grid/culling requests skip it - so it can legitimately be absent.
+          if (previewPath) {
+            mediumThumbnailBuffer.current[path] = convertFileSrc(previewPath.replace(/\\/g, '/'));
+          }
           refs.current.markGenerated(path);
         } else if (data) {
           thumbnailBuffer.current[path] = data;
