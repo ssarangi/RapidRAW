@@ -74,7 +74,11 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
     if (transformWrapperRef.current) {
       transformWrapperRef.current.resetTransform(0);
     }
-    useEditorStore.getState().setEditor({ zoom: 1 });
+    useEditorStore.getState().setEditor({
+      zoom: 1,
+      showOriginal: false,
+      previewOverride: null,
+    });
 
     debouncedSave.flush();
     debouncedSetHistory.cancel();
@@ -104,6 +108,9 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
       if (selectedImage?.path && cachedEditStateRef.current) {
         globalImageCache.set(selectedImage.path, cachedEditStateRef.current);
       }
+
+      const cachedThumb = useProcessStore.getState().thumbnails[path];
+      const cachedMedium = useProcessStore.getState().mediumThumbnails[path] || cachedThumb;
 
       const cached = globalImageCache.get(path);
       const cachedEntry = cached?.selectedImage?.isReady ? cached : null;
@@ -138,7 +145,7 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
         activeAiPatchContainerId: null,
         activeAiSubMaskId: null,
         isWbPickerActive: false,
-        transformedOriginalUrl: null,
+        previewOverride: null,
       });
 
       setUI({
@@ -150,7 +157,7 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
         setEditor({
           selectedImage: {
             ...cachedEntry.selectedImage,
-            thumbnailUrl: useProcessStore.getState().thumbnails[path] || cachedEntry.selectedImage.thumbnailUrl,
+            thumbnailUrl: cachedMedium || cachedEntry.selectedImage.thumbnailUrl,
           },
           originalSize: cachedEntry.originalSize,
           previewSize: cachedEntry.previewSize,
@@ -216,9 +223,8 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
           isRaw: false,
           isReady: false,
           metadata: null,
-          originalUrl: null,
           path,
-          thumbnailUrl: useProcessStore.getState().thumbnails[path],
+          thumbnailUrl: cachedMedium,
           width: 0,
         },
         originalSize: { width: 0, height: 0 },

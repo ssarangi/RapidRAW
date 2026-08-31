@@ -1,8 +1,5 @@
 import { Progress } from './AppProperties';
 
-export const EXPORT_TIMEOUT = 4000;
-export const IMPORT_TIMEOUT = 5000;
-
 export enum FileFormats {
   Jpeg = 'jpeg',
   Png = 'png',
@@ -61,7 +58,7 @@ export enum WatermarkAnchor {
   BottomRight = 'bottomRight',
 }
 
-export interface WatermarkSettings {
+interface WatermarkSettings {
   path: string;
   anchor: WatermarkAnchor;
   scale: number;

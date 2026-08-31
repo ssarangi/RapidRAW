@@ -12,7 +12,7 @@ import {
 import { Adjustments, INITIAL_ADJUSTMENTS } from '../utils/adjustments';
 import { ColumnWidths } from '../components/panel/MainLibrary';
 
-export interface SearchCriteria {
+interface SearchCriteria {
   tags: string[];
   text: string;
   mode: 'AND' | 'OR';

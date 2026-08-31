@@ -31,7 +31,7 @@ export const useKeyboardShortcuts = ({
   handleToggleFullScreen,
   handleZoomChange,
 }: KeyboardShortcutsProps) => {
-  const { handleRotate, handleCopyAdjustments, handlePasteAdjustments } = useEditorActions();
+  const { handleRotate, handleCopyAdjustments, handlePasteAdjustments, toggleShowOriginal } = useEditorActions();
   const { handleRate, handleSetColorLabel } = useLibraryActions();
 
   const sortedListRef = useRef(sortedImageList);
@@ -155,7 +155,7 @@ export const useKeyboardShortcuts = ({
           e.preventDefault();
           const currentIndex = sortedListRef.current.findIndex((img) => img.path === s.editor.selectedImage!.path);
           if (currentIndex === -1) return;
-          let nextIndex = currentIndex - 1 < 0 ? sortedListRef.current.length - 1 : currentIndex - 1;
+          const nextIndex = currentIndex - 1 < 0 ? sortedListRef.current.length - 1 : currentIndex - 1;
           handleImageSelect(sortedListRef.current[nextIndex].path, true);
         },
       },
@@ -165,7 +165,7 @@ export const useKeyboardShortcuts = ({
           e.preventDefault();
           const currentIndex = sortedListRef.current.findIndex((img) => img.path === s.editor.selectedImage!.path);
           if (currentIndex === -1) return;
-          let nextIndex = currentIndex + 1 >= sortedListRef.current.length ? 0 : currentIndex + 1;
+          const nextIndex = currentIndex + 1 >= sortedListRef.current.length ? 0 : currentIndex + 1;
           handleImageSelect(sortedListRef.current[nextIndex].path, true);
         },
       },
@@ -302,9 +302,9 @@ export const useKeyboardShortcuts = ({
       },
       show_original: {
         shouldFire: (s: any) => s.ui.activeView === 'editor' && !!s.editor.selectedImage,
-        execute: (e: any, s: any) => {
+        execute: (e: any) => {
           e.preventDefault();
-          s.editor.setEditor({ showOriginal: !s.editor.showOriginal });
+          toggleShowOriginal();
         },
       },
       toggle_adjustments: {
@@ -360,7 +360,12 @@ export const useKeyboardShortcuts = ({
         shouldFire: (s: any) => !!s.editor.selectedImage,
         execute: (e: any, s: any) => {
           e.preventDefault();
-          s.editor.setEditor({ isWaveformVisible: !s.editor.isWaveformVisible });
+          const nextVisibility = !s.editor.isWaveformVisible;
+          s.editor.setEditor({ isWaveformVisible: nextVisibility });
+          s.settings.handleSettingsChange({
+            ...s.settings.appSettings,
+            isWaveformVisible: nextVisibility,
+          });
         },
       },
       toggle_export: {
@@ -528,24 +533,28 @@ export const useKeyboardShortcuts = ({
         shouldFire: (s: any) =>
           s.ui.activeView === 'editor' &&
           !!s.editor.selectedImage &&
-          !!s.editor.brushSettings &&
-          s.ui.activePanel === Panel.Masks,
+          (s.ui.activePanel === Panel.Masks || s.ui.activePanel === Panel.Ai),
         execute: (e: any, s: any) => {
           e.preventDefault();
-          const newSize = Math.min((s.editor.brushSettings.size || 50) + 10, 200);
-          s.editor.setEditor({ brushSettings: { ...s.editor.brushSettings, size: newSize } });
+          const currentSettings = s.editor.brushSettings || { size: 50 };
+          const newSize = Math.min((currentSettings.size || 50) + 10, 200);
+          s.editor.setEditor({
+            brushSettings: { ...currentSettings, size: newSize },
+          });
         },
       },
       brush_size_down: {
         shouldFire: (s: any) =>
           s.ui.activeView === 'editor' &&
           !!s.editor.selectedImage &&
-          !!s.editor.brushSettings &&
-          s.ui.activePanel === Panel.Masks,
+          (s.ui.activePanel === Panel.Masks || s.ui.activePanel === Panel.Ai),
         execute: (e: any, s: any) => {
           e.preventDefault();
-          const newSize = Math.max((s.editor.brushSettings.size || 50) - 10, 1);
-          s.editor.setEditor({ brushSettings: { ...s.editor.brushSettings, size: newSize } });
+          const currentSettings = s.editor.brushSettings || { size: 50 };
+          const newSize = Math.max((currentSettings.size || 50) - 10, 1);
+          s.editor.setEditor({
+            brushSettings: { ...currentSettings, size: newSize },
+          });
         },
       },
     };
@@ -684,5 +693,6 @@ export const useKeyboardShortcuts = ({
     handlePasteAdjustments,
     handleRate,
     handleSetColorLabel,
+    toggleShowOriginal,
   ]);
 };

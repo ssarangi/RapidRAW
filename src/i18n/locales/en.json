@@ -367,11 +367,22 @@
       "generatingDepthMap": "Calculating AI Depth Map...",
       "generativeEditTitle": "Generative Edit",
       "inpaintingTitle": "Inpainting",
+      "liquify": {
+        "mode": "Liquify Mode",
+        "modes": {
+          "expand": "Expand",
+          "pinch": "Pinch",
+          "push": "Push",
+          "twirl": "Twirl"
+        }
+      },
       "manualCleanupTitle": "Manual Cleanup",
       "noImageSelected": "No image selected.",
       "params": {
         "feather": "Feather",
-        "grow": "Grow"
+        "grow": "Grow",
+        "intensity": "Intensity",
+        "pressure": "Pressure"
       },
       "patches": {
         "aiEdit": "AI Edit {{count}}",
@@ -384,9 +395,13 @@
         "heal_one": "Heal {{count}}",
         "heal_other": "Heal {{count}}",
         "invertedName": "{{name}} Inverted",
+        "liquify": "Liquify {{count}}",
+        "liquify_one": "Liquify {{count}}",
+        "liquify_other": "Liquify {{count}}",
         "quickErase": "Quick Erase {{count}}",
         "quickErase_one": "Quick Erase {{count}}",
-        "quickErase_other": "Quick Erase {{count}}"
+        "quickErase_other": "Quick Erase {{count}}",
+        "retouch": "Retouch {{count}}"
       },
       "resetInpaintingTooltip": "Reset Inpainting",
       "settings": {
@@ -407,7 +422,8 @@
         "quickEraseDesc": "Fill selection to remove the object.",
         "selectionPropertiesTitle": "Selection Properties",
         "useBasicInpaint": "Use basic inpainting"
-      }
+      },
+      "touchUpTitle": "Touch Up"
     },
     "crop": {
       "aspectRatioHeading": "Aspect Ratio",
@@ -556,6 +572,8 @@
         "switchToSubtract": "Switch to Subtract"
       },
       "addNewMask": "Add New Mask",
+      "aiTitle": "AI Selections",
+      "basicTitle": "Basic Tools",
       "brush": {
         "brush": "Brush",
         "eraser": "Eraser",
@@ -564,7 +582,6 @@
         "size": "Brush Size"
       },
       "comingSoon": "Coming Soon",
-      "createNewTitle": "Create New Mask",
       "depthRange": {
         "far": "Far",
         "near": "Near",
@@ -588,6 +605,7 @@
         "maskName_one": "Mask {{count}}",
         "maskName_other": "Mask {{count}}"
       },
+      "rangeTitle": "Ranges & Global",
       "resetMaskingTooltip": "Reset Masking",
       "settings": {
         "aiModelDownloading": "AI Model Downloading: ",
@@ -610,8 +628,7 @@
       "tooltips": {
         "addToCurrent": "Add {{name}} to Current Mask or Create New (Right-click)",
         "createNew": "Create New {{name}} Mask",
-        "selectNewSourcePoint": "{{modifier}} + Click to select a new source point",
-        "showMore": "Show More Mask Types"
+        "selectNewSourcePoint": "{{modifier}} + Click to select a new source point"
       }
     },
     "metadata": {
@@ -1076,11 +1093,13 @@
       "foreground": "Foreground",
       "heal": "Heal",
       "linear": "Linear",
+      "liquify": "Liquify",
       "luminance": "Luminance",
       "others": "Others",
       "quickErase": "Quick Erase",
       "quickEraser": "Quick Eraser",
       "radial": "Radial",
+      "retouch": "Retouch",
       "sky": "Sky",
       "subject": "Subject"
     }
@@ -1715,6 +1734,8 @@
       "livePreviewQualityDesc": "Controls the resolution and compression of the image while dragging sliders. Lower quality significantly improves responsiveness.",
       "livePreviews": "Live Interactive Previews",
       "livePreviewsDesc": "Update the preview immediately while dragging sliders. Disable this if the interface feels laggy during adjustments.",
+      "mediumThumbnailRes": "Editor Thumbnail Resolution",
+      "mediumThumbnailResDesc": "Resolution of the preview shown while full images load in the editor.",
       "modes": {
         "dynamic": "Dynamic",
         "static": "Fixed Resolution"
@@ -1763,6 +1784,8 @@
       "renderScaleDesc": "Scales the render resolution relative to your display. Lower values improve performance on high-resolution screens at the cost of some sharpness.",
       "restartRequired": "Changes to the processing engine require an application restart to take effect.",
       "saveRelaunch": "Save & Relaunch",
+      "smallThumbnailRes": "Grid Thumbnail Resolution",
+      "smallThumbnailResDesc": "Resolution of thumbnails shown in the library grid.",
       "staticDesc": "The editor renders the image at a fixed resolution. This mode is the fastest and most consistent, making it ideal for lower-end hardware where smooth performance is prioritized over pixel-perfect zoom.",
       "staticPreviewRes": "Static Preview Resolution",
       "staticPreviewResDesc": "Sets the resolution for static previews like crop mode, lens correction, and perspective tools. Does not affect the main editor preview.",

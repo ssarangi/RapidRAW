@@ -366,11 +366,22 @@
       "generatingDepthMap": "正在计算 AI 深度图...",
       "generativeEditTitle": "生成式编辑",
       "inpaintingTitle": "图像修复",
+      "liquify": {
+        "mode": "液化模式",
+        "modes": {
+          "expand": "膨胀",
+          "pinch": "捏合",
+          "push": "推动",
+          "twirl": "旋转扭曲"
+        }
+      },
       "manualCleanupTitle": "手动清理",
       "noImageSelected": "未选择图像。",
       "params": {
         "feather": "羽化",
-        "grow": "扩展"
+        "grow": "扩展",
+        "intensity": "强度",
+        "pressure": "压力"
       },
       "patches": {
         "aiEdit": "AI 编辑 {{count}}",
@@ -381,9 +392,13 @@
         "heal": "修复 {{count}}",
         "heal_other": "修复 {{count}}",
         "invertedName": "{{name}} 反转",
+        "liquify": "液化 {{count}}",
+        "liquify_one": "液化 {{count}}",
+        "liquify_other": "液化 {{count}}",
         "quickErase": "快速擦除 {{count}}",
         "quickErase_one": "快速擦除 {{count}}",
-        "quickErase_other": "快速擦除 {{count}}"
+        "quickErase_other": "快速擦除 {{count}}",
+        "retouch": "修饰 {{count}}"
       },
       "resetInpaintingTooltip": "重置图像修复",
       "settings": {
@@ -404,7 +419,8 @@
         "quickEraseDesc": "填充选区以移除对象。",
         "selectionPropertiesTitle": "选区属性",
         "useBasicInpaint": "使用基础图像修复"
-      }
+      },
+      "touchUpTitle": "润色"
     },
     "crop": {
       "aspectRatioHeading": "宽高比",
@@ -553,6 +569,8 @@
         "switchToSubtract": "切换到减去"
       },
       "addNewMask": "添加新蒙版",
+      "aiTitle": "AI 选择",
+      "basicTitle": "基本工具",
       "brush": {
         "brush": "画笔",
         "eraser": "橡皮擦",
@@ -561,7 +579,6 @@
         "size": "画笔大小"
       },
       "comingSoon": "即将推出",
-      "createNewTitle": "创建新蒙版",
       "depthRange": {
         "far": "远",
         "near": "近",
@@ -585,6 +602,7 @@
         "maskName_one": "蒙版 {{count}}",
         "maskName_other": "蒙版 {{count}}"
       },
+      "rangeTitle": "范围与全局",
       "resetMaskingTooltip": "重置蒙版",
       "settings": {
         "aiModelDownloading": "AI 模型下载中：",
@@ -607,8 +625,7 @@
       "tooltips": {
         "addToCurrent": "将 {{name}} 添加到当前蒙版或创建新蒙版（右键单击）",
         "createNew": "创建新 {{name}} 蒙版",
-        "selectNewSourcePoint": "{{modifier}} + 点击选择新的源点",
-        "showMore": "显示更多蒙版类型"
+        "selectNewSourcePoint": "{{modifier}} + 点击选择新的源点"
       }
     },
     "metadata": {
@@ -1069,11 +1086,13 @@
       "foreground": "前景",
       "heal": "修复",
       "linear": "线性",
+      "liquify": "液化",
       "luminance": "亮度",
       "others": "其他",
       "quickErase": "快速擦除",
       "quickEraser": "快速橡皮擦",
       "radial": "径向",
+      "retouch": "修饰",
       "sky": "天空",
       "subject": "主体"
     }
@@ -1672,6 +1691,8 @@
       "livePreviewQualityDesc": "控制拖动滑块时图像的分辨率和压缩。较低的质量可显著提高响应速度。",
       "livePreviews": "实时交互式预览",
       "livePreviewsDesc": "拖动滑块时立即更新预览。如果界面在调整时感觉卡顿，请禁用此选项。",
+      "mediumThumbnailRes": "编辑器缩略图分辨率",
+      "mediumThumbnailResDesc": "在编辑器中加载完整图像时显示的预览分辨率。",
       "modes": {
         "dynamic": "动态",
         "static": "固定分辨率"
@@ -1720,6 +1741,8 @@
       "renderScaleDesc": "相对于显示器缩放渲染分辨率。较低的值可在高分辨率屏幕上提高性能，但会牺牲一些清晰度。",
       "restartRequired": "处理引擎的更改需要重启应用程序才能生效。",
       "saveRelaunch": "保存并重新启动",
+      "smallThumbnailRes": "网格缩略图分辨率",
+      "smallThumbnailResDesc": "图库网格中显示的缩略图分辨率。",
       "staticDesc": "编辑器以固定分辨率渲染图像。此模式最快且最一致，非常适合低端硬件，优先考虑流畅性能而非像素完美的缩放。",
       "staticPreviewRes": "静态预览分辨率",
       "staticPreviewResDesc": "设置静态预览的分辨率，如裁剪模式、镜头校正和透视工具。不影响主编辑器预览。",

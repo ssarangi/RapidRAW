@@ -366,11 +366,22 @@
       "generatingDepthMap": "AI深度マップを計算中...",
       "generativeEditTitle": "生成編集",
       "inpaintingTitle": "インペインティング",
+      "liquify": {
+        "mode": "ゆがみモード",
+        "modes": {
+          "expand": "膨張",
+          "pinch": "ピンチ",
+          "push": "プッシュ",
+          "twirl": "渦巻き"
+        }
+      },
       "manualCleanupTitle": "手動クリーンアップ",
       "noImageSelected": "画像が選択されていません。",
       "params": {
         "feather": "ぼかし",
-        "grow": "拡張"
+        "grow": "拡張",
+        "intensity": "強度",
+        "pressure": "圧力"
       },
       "patches": {
         "aiEdit": "AI編集 {{count}}",
@@ -381,9 +392,13 @@
         "heal": "修復 {{count}}",
         "heal_other": "修復 {{count}}",
         "invertedName": "{{name}} 反転",
+        "liquify": "ゆがみ {{count}}",
+        "liquify_one": "ゆがみ {{count}}",
+        "liquify_other": "ゆがみ {{count}}",
         "quickErase": "クイック消去 {{count}}",
         "quickErase_one": "クイック消去 {{count}}",
-        "quickErase_other": "クイック消去 {{count}}"
+        "quickErase_other": "クイック消去 {{count}}",
+        "retouch": "レタッチ {{count}}"
       },
       "resetInpaintingTooltip": "インペインティングをリセット",
       "settings": {
@@ -404,7 +419,8 @@
         "quickEraseDesc": "選択範囲を塗りつぶしてオブジェクトを削除します。",
         "selectionPropertiesTitle": "選択範囲のプロパティ",
         "useBasicInpaint": "簡易インペインティングを使用"
-      }
+      },
+      "touchUpTitle": "タッチアップ"
     },
     "crop": {
       "aspectRatioHeading": "アスペクト比",
@@ -553,6 +569,8 @@
         "switchToSubtract": "減算に切り替え"
       },
       "addNewMask": "新しいマスクを追加",
+      "aiTitle": "AI選択",
+      "basicTitle": "基本ツール",
       "brush": {
         "brush": "ブラシ",
         "eraser": "消しゴム",
@@ -561,7 +579,6 @@
         "size": "ブラシサイズ"
       },
       "comingSoon": "近日公開",
-      "createNewTitle": "新しいマスクを作成",
       "depthRange": {
         "far": "遠景",
         "near": "近景",
@@ -585,6 +602,7 @@
         "maskName_one": "マスク {{count}}",
         "maskName_other": "マスク {{count}}"
       },
+      "rangeTitle": "範囲とグローバル",
       "resetMaskingTooltip": "マスク処理をリセット",
       "settings": {
         "aiModelDownloading": "AIモデルをダウンロード中: ",
@@ -607,8 +625,7 @@
       "tooltips": {
         "addToCurrent": "{{name}}を現在のマスクに追加、または新規作成 (右クリック)",
         "createNew": "新規の {{name}} マスクを作成",
-        "selectNewSourcePoint": "{{modifier}} + クリックで新しいソースポイントを選択",
-        "showMore": "他のマスクタイプを表示"
+        "selectNewSourcePoint": "{{modifier}} + クリックで新しいソースポイントを選択"
       }
     },
     "metadata": {
@@ -1069,11 +1086,13 @@
       "foreground": "手前",
       "heal": "修復",
       "linear": "線形",
+      "liquify": "ゆがみ",
       "luminance": "ルミナンス",
       "others": "その他",
       "quickErase": "クイック消去",
       "quickEraser": "クイック消しゴム",
       "radial": "円形",
+      "retouch": "レタッチ",
       "sky": "空",
       "subject": "被写体"
     }
@@ -1672,6 +1691,8 @@
       "livePreviewQualityDesc": "スライダーをドラッグしている間の画像の解像度と圧縮を制御します。低画質にすると、操作のレスポンスが大幅に向上します。",
       "livePreviews": "インタラクティブなリアルタイムプレビュー",
       "livePreviewsDesc": "スライダーのドラッグに合わせてプレビューを即座に更新します。調整中に操作が重く感じる場合は、これを無効にしてください。",
+      "mediumThumbnailRes": "エディターサムネイルの解像度",
+      "mediumThumbnailResDesc": "完全な画像がエディターに読み込まれる間に表示されるプレビューの解像度。",
       "modes": {
         "dynamic": "ダイナミック",
         "static": "固定解像度"
@@ -1720,6 +1741,8 @@
       "renderScaleDesc": "画面解像度に対する表示解像度の比率を調整します。高解像度ディスプレイで値を下げると、シャープネスがわずかに低下する代わりに動作が軽くなります。",
       "restartRequired": "処理エンジンの変更を有効にするには、アプリを再起動する必要があります。",
       "saveRelaunch": "保存して再起動",
+      "smallThumbnailRes": "グリッドサムネイルの解像度",
+      "smallThumbnailResDesc": "ライブラリのグリッドに表示されるサムネイルの解像度。",
       "staticDesc": "画像を固定の解像度でレンダリングします。このモードは最も軽量かつ安定しており、ズーム精度よりも軽快な動作を優先する低スペック環境に最適です。",
       "staticPreviewRes": "静的プレビュー解像度",
       "staticPreviewResDesc": "切り抜き、レンズ補正、変形ツールなどを使用する際のプレビュー解像度を設定します。メインエディタのプレビューには影響しません。",

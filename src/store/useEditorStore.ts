@@ -6,7 +6,7 @@ import { ImageDimensions } from '../hooks/useImageRenderSize';
 import { ToolType } from '../components/panel/right/Masks';
 import { OverlayMode } from '../components/panel/right/CropPanel';
 
-export interface InteractivePatch {
+interface InteractivePatch {
   url: string;
   normX: number;
   normY: number;
@@ -34,7 +34,6 @@ interface EditorState {
   // Previews & Overlays
   finalPreviewUrl: string | null;
   uncroppedAdjustedPreviewUrl: string | null;
-  transformedOriginalUrl: string | null;
   interactivePatch: InteractivePatch | null;
   showOriginal: boolean;
 
@@ -120,7 +119,6 @@ export const useEditorStore = create<EditorState>((set) => ({
   isRotationActive: false,
   overlayMode: 'thirds',
   overlayRotation: 0,
-  transformedOriginalUrl: null,
   isStraightenActive: false,
   isWbPickerActive: false,
   liveRotation: null,

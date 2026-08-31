@@ -1269,7 +1269,7 @@ fn generate_sub_mask_bitmap(
             scale,
             crop_offset,
         )),
-        "brush" | "clone" | "heal" | "liquify" => Some(generate_brush_bitmap(
+        "brush" | "clone" | "heal" | "liquify" | "retouch" => Some(generate_brush_bitmap(
             &sub_mask.parameters,
             width,
             height,

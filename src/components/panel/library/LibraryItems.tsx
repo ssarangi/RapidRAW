@@ -760,7 +760,7 @@ const ListItemComponent = ({
 };
 
 export const Thumbnail = React.memo(ThumbnailComponent);
-export const ListItem = React.memo(ListItemComponent);
+const ListItem = React.memo(ListItemComponent);
 
 const RowComponent = ({
   index,

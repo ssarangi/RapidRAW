@@ -6,7 +6,7 @@ import { invoke } from '@tauri-apps/api/core';
 import debounce from 'lodash.debounce';
 
 import { ImageDimensions, RenderSize, useImageRenderSize } from '../../hooks/useImageRenderSize';
-import { Adjustments, AiPatch, MaskContainer } from '../../utils/adjustments';
+import { Adjustments, AiPatch, MaskContainer, INITIAL_ADJUSTMENTS } from '../../utils/adjustments';
 import {
   calculateCenteredCrop,
   getOrientedDimensions,
@@ -23,6 +23,7 @@ import { useSettingsStore } from '../../store/useSettingsStore';
 import { useUIStore } from '../../store/useUIStore';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import { useAiMasking } from '../../hooks/useAiMasking';
+import { useEditorActions } from '../../hooks/useEditorActions';
 
 const parseRgb = (rgbStr: string): [number, number, number, number] => {
   const match = rgbStr.match(/[\d.]+/g);
@@ -93,7 +94,6 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
   const adjustmentsHistoryIndex = useEditorStore((s) => s.historyIndex);
   const finalPreviewUrl = useEditorStore((s) => s.finalPreviewUrl);
   const uncroppedAdjustedPreviewUrl = useEditorStore((s) => s.uncroppedAdjustedPreviewUrl);
-  const transformedOriginalUrl = useEditorStore((s) => s.transformedOriginalUrl);
   const interactivePatch = useEditorStore((s) => s.interactivePatch);
   const showOriginal = useEditorStore((s) => s.showOriginal);
   const isSliderDragging = useEditorStore((s) => s.isSliderDragging);
@@ -131,13 +131,17 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
         const prevAdjustments = state.adjustments;
         const newAdjustments = typeof value === 'function' ? value(prevAdjustments) : { ...prevAdjustments, ...value };
         debouncedSetHistory(newAdjustments);
-        return { adjustments: newAdjustments };
+        return {
+          adjustments: newAdjustments,
+          ...(state.showOriginal ? { showOriginal: false, previewOverride: null } : {}),
+        };
       });
     },
     [debouncedSetHistory, setEditor],
   );
 
-  const { handleGenerateAiMask, handleQuickErase, handleManualCleanup } = useAiMasking();
+  const { handleGenerateAiMask, handleQuickErase, handleDirectPatch } = useAiMasking();
+  const { toggleShowOriginal } = useEditorActions();
 
   const [crop, setCrop] = useState<Crop | null>(null);
   const prevCropParams = useRef<any>(null);
@@ -225,11 +229,6 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
       window.removeEventListener('blur', handleBlur);
     };
   }, []);
-
-  const toggleShowOriginal = useCallback(
-    () => setEditor((state) => ({ showOriginal: !state.showOriginal })),
-    [setEditor],
-  );
 
   const handleToggleFullScreen = useCallback(() => {
     const currentlyZoomed = targetZoom > 1.01;
@@ -666,6 +665,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
         activeSubMask?.type === Mask.Flow ||
         activeSubMask?.type === Mask.Clone ||
         activeSubMask?.type === Mask.Liquify ||
+        activeSubMask?.type === Mask.Retouch ||
         activeSubMask?.type === Mask.Heal ||
         activeSubMask?.type === Mask.AiSubject ||
         activeSubMask?.type === Mask.QuickEraser ||
@@ -1025,16 +1025,6 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
   );
 
   useEffect(() => {
-    if (isInitialMount.current) {
-      isInitialMount.current = false;
-      return;
-    }
-    if (showOriginal) {
-      setEditor({ showOriginal: false });
-    }
-  }, [adjustments, setEditor]);
-
-  useEffect(() => {
     if (!isMasking && !isAiEditing) {
       setIsMaskTouchInteracting(false);
     }
@@ -1302,7 +1292,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
         if (lastWgpuTransformRef.current !== hiddenTransform && !isInvoking) {
           lastWgpuTransformRef.current = hiddenTransform;
           isInvoking = true;
-          invoke('update_wgpu_transform', {
+          invoke(Invokes.UpdateWgpuTransform, {
             payload: {
               windowWidth,
               windowHeight,
@@ -1365,7 +1355,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
 
         const isZoomedIn = scale >= maxScaleRef.current - 0.5;
 
-        invoke('update_wgpu_transform', {
+        invoke(Invokes.UpdateWgpuTransform, {
           payload: {
             windowWidth,
             windowHeight,
@@ -2141,7 +2131,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
             onSelectAiPatchContainer={(id) => setEditor({ activeAiPatchContainerId: id })}
             onSelectMaskContainer={(id) => setEditor({ activeMaskContainerId: id })}
             onLiveMaskPreview={handleLiveMaskPreview}
-            onManualCleanup={handleManualCleanup}
+            onDirectPatch={handleDirectPatch}
             onQuickErase={handleQuickErase}
             onSelectAiSubMask={(id) => setEditor({ activeAiSubMaskId: id })}
             onSelectMask={(id) => setEditor({ activeMaskId: id })}
@@ -2151,7 +2141,6 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
             setIsMaskHovered={setIsMaskHovered}
             setIsMaskTouchInteracting={setIsMaskTouchInteracting}
             showOriginal={showOriginal}
-            transformedOriginalUrl={transformedOriginalUrl}
             uncroppedAdjustedPreviewUrl={uncroppedAdjustedPreviewUrl}
             updateSubMask={updateSubMaskLocal}
             isWbPickerActive={isWbPickerActive}

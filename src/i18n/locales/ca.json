@@ -366,11 +366,22 @@
       "generatingDepthMap": "S'està calculant el mapa de profunditat d'IA...",
       "generativeEditTitle": "Edició generativa",
       "inpaintingTitle": "Inpainting",
+      "liquify": {
+        "mode": "Mode Liquar",
+        "modes": {
+          "expand": "Expandir",
+          "pinch": "Pessigar",
+          "push": "Empènyer",
+          "twirl": "Girar"
+        }
+      },
       "manualCleanupTitle": "Neteja manual",
       "noImageSelected": "No s'ha seleccionat cap imatge.",
       "params": {
         "feather": "Esvaïment",
-        "grow": "Expandir"
+        "grow": "Expandir",
+        "intensity": "Intensitat",
+        "pressure": "Pressió"
       },
       "patches": {
         "aiEdit": "Edició IA {{count}}",
@@ -383,9 +394,13 @@
         "heal_one": "Corregir {{count}}",
         "heal_other": "Corregir {{count}}",
         "invertedName": "{{name}} Invertit",
+        "liquify": "Liquar {{count}}",
+        "liquify_one": "Liquar {{count}}",
+        "liquify_other": "Liquar {{count}}",
         "quickErase": "Esborrat ràpid {{count}}",
         "quickErase_one": "Esborrat ràpid {{count}}",
-        "quickErase_other": "Esborrat ràpid {{count}}"
+        "quickErase_other": "Esborrat ràpid {{count}}",
+        "retouch": "Retoc {{count}}"
       },
       "resetInpaintingTooltip": "Restablir Inpainting",
       "settings": {
@@ -406,7 +421,8 @@
         "quickEraseDesc": "Omplir la selecció per eliminar l'objecte.",
         "selectionPropertiesTitle": "Propietats de selecció",
         "useBasicInpaint": "Utilitzar inpainting bàsic"
-      }
+      },
+      "touchUpTitle": "Retocs"
     },
     "crop": {
       "aspectRatioHeading": "Relació d'aspecte",
@@ -555,6 +571,8 @@
         "switchToSubtract": "Canviar a Restar"
       },
       "addNewMask": "Afegir nova màscara",
+      "aiTitle": "Seleccions d'IA",
+      "basicTitle": "Eines bàsiques",
       "brush": {
         "brush": "Pinzell",
         "eraser": "Goma d'esborrar",
@@ -563,7 +581,6 @@
         "size": "Mida del pinzell"
       },
       "comingSoon": "Aviat disponible",
-      "createNewTitle": "Crear nova màscara",
       "depthRange": {
         "far": "Lluny",
         "near": "A prop",
@@ -587,6 +604,7 @@
         "maskName_one": "Màscara {{count}}",
         "maskName_other": "Màscara {{count}}"
       },
+      "rangeTitle": "Rangs i global",
       "resetMaskingTooltip": "Restablir emmascarament",
       "settings": {
         "aiModelDownloading": "S'està baixant el model d'IA: ",
@@ -609,8 +627,7 @@
       "tooltips": {
         "addToCurrent": "Afegir {{name}} a la màscara actual o crear-ne una de nova (Clic dret)",
         "createNew": "Crear nova màscara de {{name}}",
-        "selectNewSourcePoint": "{{modifier}} + Clic per seleccionar un nou punt d'origen",
-        "showMore": "Mostrar més tipus de màscares"
+        "selectNewSourcePoint": "{{modifier}} + Clic per seleccionar un nou punt d'origen"
       }
     },
     "metadata": {
@@ -1071,11 +1088,13 @@
       "foreground": "Primer pla",
       "heal": "Corregir",
       "linear": "Lineal",
+      "liquify": "Liquar",
       "luminance": "Luminància",
       "others": "Altres",
       "quickErase": "Esborrat ràpid",
       "quickEraser": "Goma d'esborrar ràpida",
       "radial": "Radial",
+      "retouch": "Retoc",
       "sky": "Cel",
       "subject": "Subjecte"
     }
@@ -1674,6 +1693,8 @@
       "livePreviewQualityDesc": "Controla la resolució i compressió de la imatge quan s'arrosseguen els controls lliscants. Una qualitat inferior millora significativament la resposta.",
       "livePreviews": "Vistes prèvies interactives en directe",
       "livePreviewsDesc": "Actualitza la vista prèvia de manera immediata mentre s'arrosseguen els controls lliscants. Desactiveu això si la interfície sembla lenta durant els ajustaments.",
+      "mediumThumbnailRes": "Resolució de la miniatura de l'editor",
+      "mediumThumbnailResDesc": "Resolució de la previsualització que es mostra mentre les imatges completes es carreguen a l'editor.",
       "modes": {
         "dynamic": "Dinàmica",
         "static": "Resolució fixa"
@@ -1722,6 +1743,8 @@
       "renderScaleDesc": "Escala la resolució de renderització respecte a la vostra pantalla. Valors més baixos milloren el rendiment en pantalles d'alta resolució a canvi d'una mica de pèrdua de nitidesa.",
       "restartRequired": "Els canvis al motor de processament requereixen reiniciar l'aplicació per fer efecte.",
       "saveRelaunch": "Desar i Reiniciar",
+      "smallThumbnailRes": "Resolució de les miniatures de la quadrícula",
+      "smallThumbnailResDesc": "Resolució de les miniatures que es mostren a la quadrícula de la biblioteca.",
       "staticDesc": "L'editor renderitza la imatge a una resolució fixa. Aquest mode és el més ràpid i consistent, la qual cosa el fa ideal per a maquinari de gamma baixa on es prioritza el rendiment suau per damunt d'un zoom amb píxels perfectes.",
       "staticPreviewRes": "Resolució de la vista prèvia estàtica",
       "staticPreviewResDesc": "Estableix la resolució per a les vistes prèvies estàtiques com ara el mode de retall, la correcció de l'objectiu i les eines de perspectiva. No afecta la vista prèvia principal de l'editor.",

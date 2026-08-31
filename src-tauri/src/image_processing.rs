@@ -332,16 +332,17 @@ pub fn downscale_f32_image(image: &DynamicImage, nwidth: u32, nheight: u32) -> D
                         let g = chunk[1].max(0.0);
                         let b = chunk[2].max(0.0);
 
-                        r_sum += r * r * w;
-                        g_sum += g * g * w;
-                        b_sum += b * b * w;
+                        r_sum += r * w;
+                        g_sum += g * w;
+                        b_sum += b * w;
                     }
                 }
 
                 let out_idx = x_out * 3;
-                row[out_idx] = r_sum.sqrt();
-                row[out_idx + 1] = g_sum.sqrt();
-                row[out_idx + 2] = b_sum.sqrt();
+
+                row[out_idx] = r_sum;
+                row[out_idx + 1] = g_sum;
+                row[out_idx + 2] = b_sum;
             }
         });
 

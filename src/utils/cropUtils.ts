@@ -89,7 +89,7 @@ export function calculateAreaPreservingCrop(
   return isCropWithinBounds(candidate, W, H, rotation) ? candidate : null;
 }
 
-export function rotateCropCenter(
+function rotateCropCenter(
   crop: Crop,
   orientedWidth: number,
   orientedHeight: number,

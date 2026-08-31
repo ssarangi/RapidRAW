@@ -465,6 +465,15 @@ fn process_image_for_export_pipeline(
 
 fn set_timestamps_from_exif(src: &Path, dst: &Path) {
     let capture_dt = exif_processing::get_creation_date_from_path(src);
+
+    if capture_dt.timestamp() <= 0 {
+        let now = filetime::FileTime::now();
+        if let Err(e) = filetime::set_file_times(dst, now, now) {
+            log::warn!("Could not set timestamps on '{}': {}", dst.display(), e);
+        }
+        return;
+    }
+
     let ft = filetime::FileTime::from_unix_time(
         capture_dt.timestamp(),
         capture_dt.timestamp_subsec_nanos(),

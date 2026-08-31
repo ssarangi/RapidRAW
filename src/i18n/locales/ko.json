@@ -366,11 +366,22 @@
       "generatingDepthMap": "AI 심도 맵 계산 중...",
       "generativeEditTitle": "생성형 편집",
       "inpaintingTitle": "인페인팅",
+      "liquify": {
+        "mode": "유동화 모드",
+        "modes": {
+          "expand": "볼록 도구",
+          "pinch": "오목 도구",
+          "push": "밀기",
+          "twirl": "소용돌이"
+        }
+      },
       "manualCleanupTitle": "수동 정리",
       "noImageSelected": "선택된 이미지가 없습니다.",
       "params": {
         "feather": "페더",
-        "grow": "확장"
+        "grow": "확장",
+        "intensity": "강도",
+        "pressure": "압력"
       },
       "patches": {
         "aiEdit": "AI 편집 {{count}}",
@@ -381,9 +392,13 @@
         "heal": "복구 {{count}}",
         "heal_other": "복구 {{count}}",
         "invertedName": "{{name}} 반전됨",
+        "liquify": "픽셀 유동화 {{count}}",
+        "liquify_one": "픽셀 유동화 {{count}}",
+        "liquify_other": "픽셀 유동화 {{count}}",
         "quickErase": "빠른 지우기 {{count}}",
         "quickErase_one": "빠른 지우기 {{count}}",
-        "quickErase_other": "빠른 지우기 {{count}}"
+        "quickErase_other": "빠른 지우기 {{count}}",
+        "retouch": "리터칭 {{count}}"
       },
       "resetInpaintingTooltip": "인페인팅 초기화",
       "settings": {
@@ -404,7 +419,8 @@
         "quickEraseDesc": "선택 영역을 채워 객체를 제거합니다.",
         "selectionPropertiesTitle": "선택 영역 속성",
         "useBasicInpaint": "기본 인페인팅 사용"
-      }
+      },
+      "touchUpTitle": "터치업"
     },
     "crop": {
       "aspectRatioHeading": "종횡비",
@@ -553,6 +569,8 @@
         "switchToSubtract": "빼기 모드로 전환"
       },
       "addNewMask": "새 마스크 추가",
+      "aiTitle": "AI 선택",
+      "basicTitle": "기본 도구",
       "brush": {
         "brush": "브러시",
         "eraser": "지우개",
@@ -561,7 +579,6 @@
         "size": "브러시 크기"
       },
       "comingSoon": "출시 예정",
-      "createNewTitle": "새 마스크 만들기",
       "depthRange": {
         "far": "멀리",
         "near": "가까이",
@@ -585,6 +602,7 @@
         "maskName_one": "마스크 {{count}}",
         "maskName_other": "마스크 {{count}}"
       },
+      "rangeTitle": "범위 및 글로벌",
       "resetMaskingTooltip": "마스킹 초기화",
       "settings": {
         "aiModelDownloading": "AI 모델 다운로드 중: ",
@@ -607,8 +625,7 @@
       "tooltips": {
         "addToCurrent": "{{name}}을(를) 현재 마스크에 추가하거나 새로 만들기 (우클릭)",
         "createNew": "새 {{name}} 마스크 만들기",
-        "selectNewSourcePoint": "{{modifier}} + 클릭하여 새 소스 포인트 선택",
-        "showMore": "더 많은 마스크 유형 표시"
+        "selectNewSourcePoint": "{{modifier}} + 클릭하여 새 소스 포인트 선택"
       }
     },
     "metadata": {
@@ -1069,11 +1086,13 @@
       "foreground": "전경",
       "heal": "복구",
       "linear": "선형",
+      "liquify": "픽셀 유동화",
       "luminance": "휘도",
       "others": "기타",
       "quickErase": "빠른 지우기",
       "quickEraser": "빠른 지우개",
       "radial": "원형",
+      "retouch": "리터칭",
       "sky": "하늘",
       "subject": "피사체"
     }
@@ -1672,6 +1691,8 @@
       "livePreviewQualityDesc": "슬라이더를 드래그하는 동안 이미지의 해상도와 압축을 제어합니다. 품질이 낮을수록 응답성이 크게 향상됩니다.",
       "livePreviews": "실시간 인터랙티브 미리보기",
       "livePreviewsDesc": "슬라이더를 드래그하는 동안 미리보기를 즉시 업데이트합니다. 조정 중에 인터페이스가 끊긴다고 느껴지면 비활성화하세요.",
+      "mediumThumbnailRes": "편집기 썸네일 해상도",
+      "mediumThumbnailResDesc": "전체 이미지가 편집기에 로드되는 동안 표시되는 미리보기의 해상도입니다.",
       "modes": {
         "dynamic": "동적",
         "static": "고정 해상도"
@@ -1720,6 +1741,8 @@
       "renderScaleDesc": "디스플레이를 기준으로 렌더 해상도를 조정합니다. 값이 낮을수록 약간의 선명도를 희생하여 고해상도 화면에서 성능이 향상됩니다.",
       "restartRequired": "처리 엔진 변경 사항을 적용하려면 애플리케이션을 다시 시작해야 합니다.",
       "saveRelaunch": "저장 및 다시 시작",
+      "smallThumbnailRes": "그리드 썸네일 해상도",
+      "smallThumbnailResDesc": "라이브러리 그리드에 표시되는 썸네일의 해상도입니다.",
       "staticDesc": "편집기가 고정된 해상도로 이미지를 렌더링합니다. 이 모드는 가장 빠르고 일관성이 있어, 픽셀 단위 정밀 확대보다 부드러운 성능이 우선시되는 저사양 하드웨어에 이상적입니다.",
       "staticPreviewRes": "정적 미리보기 해상도",
       "staticPreviewResDesc": "자르기 모드, 렌즈 보정, 원근 도구 등 정적 미리보기의 해상도를 설정합니다. 메인 편집기 미리보기에는 영향을 주지 않습니다.",

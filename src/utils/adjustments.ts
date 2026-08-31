@@ -103,7 +103,7 @@ export enum CreativeAdjustment {
   FlareAmount = 'flareAmount',
 }
 
-export enum TransformAdjustment {
+enum TransformAdjustment {
   TransformDistortion = 'transformDistortion',
   TransformVertical = 'transformVertical',
   TransformHorizontal = 'transformHorizontal',
@@ -121,7 +121,6 @@ export enum LensAdjustment {
   LensDistortionAmount = 'lensDistortionAmount',
   LensVignetteAmount = 'lensVignetteAmount',
   LensTcaAmount = 'lensTcaAmount',
-  LensDistortionParams = 'lensDistortionParams',
   LensDistortionEnabled = 'lensDistortionEnabled',
   LensTcaEnabled = 'lensTcaEnabled',
   LensVignetteEnabled = 'lensVignetteEnabled',
@@ -412,7 +411,7 @@ export const DEFAULT_PARAMETRIC_CURVE_SETTINGS: ParametricCurveSettings = {
   split3: 75,
 };
 
-export const getDefaultParametricCurve = (): ParametricCurve => ({
+const getDefaultParametricCurve = (): ParametricCurve => ({
   luma: { ...DEFAULT_PARAMETRIC_CURVE_SETTINGS },
   red: { ...DEFAULT_PARAMETRIC_CURVE_SETTINGS },
   green: { ...DEFAULT_PARAMETRIC_CURVE_SETTINGS },

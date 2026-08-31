@@ -60,20 +60,24 @@ RapidRAW is still in active development and isn't yet as polished as mature tool
 <details>
 <summary><strong>Recent Changes</strong></summary>
 
+- **2026-08-27:** Split thumbnail resolution settings into separate grid and editor preview sizes
+- **2026-08-26:** Introduced a retouch tool to effortlessly smooth skin
+- **2026-08-25:** Added a liquify tool to reshape and warp parts of an image
+- **2026-08-24:** New global shift+drag straighten shortcut & improved auto-crop calculation
 - **2026-08-20:** Add drag & drop image move system to quickly organize library
 - **2026-08-19:** Restored side panels on tablets
 - **2026-08-17:** Integrated built-in analog film emulations powered by Spektrafilm, featuring a scene-referred V-Log color pipeline in the WGSL shader
 - **2026-08-16:** Added native Camera Tethering with real-time Live View, exposure controls, ghost overlay, and direct library ingestion (macOS & Linux)
 - **2026-08-16:** Added Focus Stacking to merge multi-focus brackets into a single sharp image
 - **2026-08-14:** Export now preserves and writes full EXIF metadata
-- **2026-08-13:** Replaced local contrast sharpening with a high-quality multi-scale filter
-- **2026-08-11:** Added automatic canvas cropping for generative AI inpainting workflows
-- **2026-08-07:** Updated Lensfun database for latest camera bodies and lenses
-- **2026-08-06:** Added customizable keyboard shortcuts and visibility toggles for left, right, and bottom panels
 
 <details>
 <summary><strong>Expand further</strong></summary>
 
+- **2026-08-13:** Replaced local contrast sharpening with a high-quality multi-scale filter
+- **2026-08-11:** Added automatic canvas cropping for generative AI inpainting workflows
+- **2026-08-07:** Updated Lensfun database for latest camera bodies and lenses
+- **2026-08-06:** Added customizable keyboard shortcuts and visibility toggles for left, right, and bottom panels
 - **2026-08-05:** Added Catalan language support and folder tree shortcut
 - **2026-08-03:** Added support for image-based LUTs (.png, .jpg, .jpeg, .tiff) and batch importing multiple presets
 - **2026-08-01:** Implemented customizable workspace layout system with drag & drop panels

@@ -382,11 +382,22 @@
       "generatingDepthMap": "A calcular mapa de profundidade IA...",
       "generativeEditTitle": "Edição Generativa",
       "inpaintingTitle": "Preenchimento",
+      "liquify": {
+        "mode": "Modo Dissolver",
+        "modes": {
+          "expand": "Inchar",
+          "pinch": "Encolher",
+          "push": "Empurrar",
+          "twirl": "Redemoinho"
+        }
+      },
       "manualCleanupTitle": "Limpeza Manual",
       "noImageSelected": "Nenhuma imagem selecionada.",
       "params": {
         "feather": "Difusão",
-        "grow": "Expandir"
+        "grow": "Expandir",
+        "intensity": "Intensidade",
+        "pressure": "Pressão"
       },
       "patches": {
         "aiEdit": "Edição de IA {{count}}",
@@ -402,10 +413,14 @@
         "heal_one": "Restaurar {{count}}",
         "heal_other": "Restaurar {{count}}",
         "invertedName": "{{name}} Invertido",
+        "liquify": "Dissolver {{count}}",
+        "liquify_one": "Dissolver {{count}}",
+        "liquify_other": "Dissolver {{count}}",
         "quickErase": "Apagamento Rápido {{count}}",
         "quickErase_many": "Apagamento Rápido {{count}}",
         "quickErase_one": "Apagamento Rápido {{count}}",
-        "quickErase_other": "Apagamento Rápido {{count}}"
+        "quickErase_other": "Apagamento Rápido {{count}}",
+        "retouch": "Retoque {{count}}"
       },
       "resetInpaintingTooltip": "Redefinir Preenchimento",
       "settings": {
@@ -426,7 +441,8 @@
         "quickEraseDesc": "Preencher seleção para remover o objeto.",
         "selectionPropertiesTitle": "Propriedades da Seleção",
         "useBasicInpaint": "Usar preenchimento básico"
-      }
+      },
+      "touchUpTitle": "Retoques"
     },
     "crop": {
       "aspectRatioHeading": "Proporção de Tela",
@@ -575,6 +591,8 @@
         "switchToSubtract": "Mudar para Subtrair"
       },
       "addNewMask": "Adicionar Nova Máscara",
+      "aiTitle": "Seleções de IA",
+      "basicTitle": "Ferramentas Básicas",
       "brush": {
         "brush": "Pincel",
         "eraser": "Borracha",
@@ -583,7 +601,6 @@
         "size": "Tamanho do Pincel"
       },
       "comingSoon": "Em Breve",
-      "createNewTitle": "Criar Nova Máscara",
       "depthRange": {
         "far": "Longe",
         "near": "Perto",
@@ -608,6 +625,7 @@
         "maskName_one": "Máscara {{count}}",
         "maskName_other": "Máscara {{count}}"
       },
+      "rangeTitle": "Intervalos e Global",
       "resetMaskingTooltip": "Redefinir Mascaramento",
       "settings": {
         "aiModelDownloading": "Baixando Modelo de IA: ",
@@ -630,8 +648,7 @@
       "tooltips": {
         "addToCurrent": "Adicionar {{name}} à Máscara Atual ou Criar Nova (Botão Direito)",
         "createNew": "Criar Nova Máscara de {{name}}",
-        "selectNewSourcePoint": "{{modifier}} + Clique para selecionar um novo ponto de origem",
-        "showMore": "Mostrar Mais Tipos de Máscara"
+        "selectNewSourcePoint": "{{modifier}} + Clique para selecionar um novo ponto de origem"
       }
     },
     "metadata": {
@@ -1095,11 +1112,13 @@
       "foreground": "Primeiro Plano",
       "heal": "Restaurar",
       "linear": "Linear",
+      "liquify": "Dissolver",
       "luminance": "Luminância",
       "others": "Outros",
       "quickErase": "Apagamento Rápido",
       "quickEraser": "Borracha Rápida",
       "radial": "Radial",
+      "retouch": "Retoque",
       "sky": "Céu",
       "subject": "Motivo"
     }
@@ -1708,6 +1727,8 @@
       "livePreviewQualityDesc": "Controla a resolução e a compressão da imagem ao arrastar controles deslizantes. Qualidade mais baixa melhora significativamente a capacidade de resposta.",
       "livePreviews": "Visualizações Interativas ao Vivo",
       "livePreviewsDesc": "Atualize a visualização imediatamente ao arrastar os controles deslizantes. Desative isso se a interface parecer lenta durante os ajustes.",
+      "mediumThumbnailRes": "Resolução da miniatura do editor",
+      "mediumThumbnailResDesc": "Resolução da visualização exibida enquanto as imagens completas carregam no editor.",
       "modes": {
         "dynamic": "Dinâmico",
         "static": "Resolução Fixa"
@@ -1756,6 +1777,8 @@
       "renderScaleDesc": "Dimensiona a resolução de renderização em relação à sua tela. Valores mais baixos melhoram o desempenho em telas de alta resolução ao custo de alguma nitidez.",
       "restartRequired": "As alterações no mecanismo de processamento exigem uma reinicialização do aplicativo para entrarem em vigor.",
       "saveRelaunch": "Salvar e Reiniciar",
+      "smallThumbnailRes": "Resolução das miniaturas da grade",
+      "smallThumbnailResDesc": "Resolução das miniaturas exibidas na grade da biblioteca.",
       "staticDesc": "O editor renderiza a imagem em uma resolução fixa. Esse modo é o mais rápido e consistente, tornando-o ideal para hardware de baixo desempenho, onde o desempenho suave é priorizado sobre o zoom com pixels perfeitos.",
       "staticPreviewRes": "Resolução de Visualização Estática",
       "staticPreviewResDesc": "Define a resolução para visualizações estáticas como modo de corte, correção de lente e ferramentas de perspectiva. Não afeta a visualização principal do editor.",

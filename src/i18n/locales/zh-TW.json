@@ -366,11 +366,22 @@
       "generatingDepthMap": "正在計算 AI 深度圖...",
       "generativeEditTitle": "生成式編輯",
       "inpaintingTitle": "影像修復",
+      "liquify": {
+        "mode": "液化模式",
+        "modes": {
+          "expand": "膨脹",
+          "pinch": "縮攏",
+          "push": "推動",
+          "twirl": "旋轉扭曲"
+        }
+      },
       "manualCleanupTitle": "手動清理",
       "noImageSelected": "未選擇影像。",
       "params": {
         "feather": "羽化",
-        "grow": "擴張"
+        "grow": "擴張",
+        "intensity": "強度",
+        "pressure": "壓力"
       },
       "patches": {
         "aiEdit": "AI 編輯 {{count}}",
@@ -381,9 +392,13 @@
         "heal": "修復 {{count}}",
         "heal_other": "修復 {{count}}",
         "invertedName": "{{name}} 反轉",
+        "liquify": "液化 {{count}}",
+        "liquify_one": "液化 {{count}}",
+        "liquify_other": "液化 {{count}}",
         "quickErase": "快速擦除 {{count}}",
         "quickErase_one": "快速擦除 {{count}}",
-        "quickErase_other": "快速擦除 {{count}}"
+        "quickErase_other": "快速擦除 {{count}}",
+        "retouch": "修飾 {{count}}"
       },
       "resetInpaintingTooltip": "重置影像修復",
       "settings": {
@@ -404,7 +419,8 @@
         "quickEraseDesc": "填充選區以移除物件。",
         "selectionPropertiesTitle": "選區屬性",
         "useBasicInpaint": "使用基礎影像修復"
-      }
+      },
+      "touchUpTitle": "潤色"
     },
     "crop": {
       "aspectRatioHeading": "寬高比",
@@ -553,6 +569,8 @@
         "switchToSubtract": "切換到減去"
       },
       "addNewMask": "新增新遮色片",
+      "aiTitle": "AI 選擇",
+      "basicTitle": "基本工具",
       "brush": {
         "brush": "畫筆",
         "eraser": "橡皮擦",
@@ -561,7 +579,6 @@
         "size": "畫筆大小"
       },
       "comingSoon": "即將推出",
-      "createNewTitle": "建立新遮色片",
       "depthRange": {
         "far": "遠",
         "near": "近",
@@ -585,6 +602,7 @@
         "maskName_one": "遮色片 {{count}}",
         "maskName_other": "遮色片 {{count}}"
       },
+      "rangeTitle": "範圍與全域",
       "resetMaskingTooltip": "重置遮色片",
       "settings": {
         "aiModelDownloading": "AI 模型下載中：",
@@ -607,8 +625,7 @@
       "tooltips": {
         "addToCurrent": "將 {{name}} 新增到當前遮色片或建立新遮色片（右鍵單擊）",
         "createNew": "建立新 {{name}} 遮色片",
-        "selectNewSourcePoint": "{{modifier}} + 點擊選擇新的來源點",
-        "showMore": "顯示更多遮色片型別"
+        "selectNewSourcePoint": "{{modifier}} + 點擊選擇新的來源點"
       }
     },
     "metadata": {
@@ -1069,11 +1086,13 @@
       "foreground": "前景",
       "heal": "修復",
       "linear": "線性",
+      "liquify": "液化",
       "luminance": "亮度",
       "others": "其他",
       "quickErase": "快速擦除",
       "quickEraser": "快速橡皮擦",
       "radial": "徑向",
+      "retouch": "修飾",
       "sky": "天空",
       "subject": "主體"
     }
@@ -1672,6 +1691,8 @@
       "livePreviewQualityDesc": "控制拖動滑桿時影像的解析度和壓縮。較低的品質可顯著提高反應速度。",
       "livePreviews": "即時互動式預覽",
       "livePreviewsDesc": "拖動滑桿時立即更新預覽。如果介面在調整時感覺卡頓，請停用此選項。",
+      "mediumThumbnailRes": "編輯器縮圖解析度",
+      "mediumThumbnailResDesc": "在編輯器中載入完整影像時顯示的預覽解析度。",
       "modes": {
         "dynamic": "動態",
         "static": "固定解析度"
@@ -1720,6 +1741,8 @@
       "renderScaleDesc": "相對於顯示器縮放渲染解析度。較低的值可在高解析度螢幕上提高效能，但會犧牲一些清晰度。",
       "restartRequired": "處理引擎的更改需要重啟應用程式才能生效。",
       "saveRelaunch": "儲存並重新啟動",
+      "smallThumbnailRes": "網格縮圖解析度",
+      "smallThumbnailResDesc": "圖庫網格中顯示的縮圖解析度。",
       "staticDesc": "編輯器以固定解析度渲染影像。此模式最快且最一致，非常適合低端硬體，優先考慮流暢效能而非畫素完美的縮放。",
       "staticPreviewRes": "靜態預覽解析度",
       "staticPreviewResDesc": "設定靜態預覽的解析度，如裁剪模式、鏡頭校正和透視工具。不影響主編輯器預覽。",

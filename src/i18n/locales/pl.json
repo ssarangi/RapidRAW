@@ -398,11 +398,22 @@
       "generatingDepthMap": "Obliczanie mapy głębi AI...",
       "generativeEditTitle": "Edycja generatywna",
       "inpaintingTitle": "Inpainting",
+      "liquify": {
+        "mode": "Tryb Skraplania",
+        "modes": {
+          "expand": "Wzdęcie",
+          "pinch": "Marszczenie",
+          "push": "Wypychanie",
+          "twirl": "Zawirowanie"
+        }
+      },
       "manualCleanupTitle": "Ręczne czyszczenie",
       "noImageSelected": "Brak zaznaczonego obrazu.",
       "params": {
         "feather": "Wtapianie",
-        "grow": "Rozszerzanie"
+        "grow": "Rozszerzanie",
+        "intensity": "Intensywność",
+        "pressure": "Nacisk"
       },
       "patches": {
         "aiEdit": "Edycja AI {{count}}",
@@ -421,11 +432,15 @@
         "heal_one": "Naprawianie {{count}}",
         "heal_other": "Naprawianie {{count}}",
         "invertedName": "{{name}} odwrócone",
+        "liquify": "Skraplanie {{count}}",
+        "liquify_one": "Skraplanie {{count}}",
+        "liquify_other": "Skraplanie {{count}}",
         "quickErase": "Szybkie wymazanie {{count}}",
         "quickErase_few": "Szybkie wymazania {{count}}",
         "quickErase_many": "Szybkich wymazań {{count}}",
         "quickErase_one": "Szybkie wymazanie {{count}}",
-        "quickErase_other": "Szybkie wymazanie {{count}}"
+        "quickErase_other": "Szybkie wymazanie {{count}}",
+        "retouch": "Retusz {{count}}"
       },
       "resetInpaintingTooltip": "Resetuj Inpainting",
       "settings": {
@@ -446,7 +461,8 @@
         "quickEraseDesc": "Wypełnij zaznaczenie, aby usunąć obiekt.",
         "selectionPropertiesTitle": "Właściwości zaznaczenia",
         "useBasicInpaint": "Użyj podstawowego inpaintingu"
-      }
+      },
+      "touchUpTitle": "Poprawki"
     },
     "crop": {
       "aspectRatioHeading": "Proporcje",
@@ -595,6 +611,8 @@
         "switchToSubtract": "Przełącz na Odejmowanie"
       },
       "addNewMask": "Dodaj nową maskę",
+      "aiTitle": "Zaznaczenia AI",
+      "basicTitle": "Podstawowe narzędzia",
       "brush": {
         "brush": "Pędzel",
         "eraser": "Gumka",
@@ -603,7 +621,6 @@
         "size": "Rozmiar pędzla"
       },
       "comingSoon": "Wkrótce",
-      "createNewTitle": "Utwórz nową maskę",
       "depthRange": {
         "far": "Daleko",
         "near": "Blisko",
@@ -629,6 +646,7 @@
         "maskName_one": "Maska {{count}}",
         "maskName_other": "Maska {{count}}"
       },
+      "rangeTitle": "Zakresy i globalne",
       "resetMaskingTooltip": "Resetuj maskowanie",
       "settings": {
         "aiModelDownloading": "Pobieranie modelu AI: ",
@@ -651,8 +669,7 @@
       "tooltips": {
         "addToCurrent": "Dodaj {{name}} do bieżącej maski lub utwórz nową (Prawy przycisk)",
         "createNew": "Utwórz nową maskę {{name}}",
-        "selectNewSourcePoint": "{{modifier}} + Kliknij, aby wybrać nowy punkt źródłowy",
-        "showMore": "Pokaż więcej typów masek"
+        "selectNewSourcePoint": "{{modifier}} + Kliknij, aby wybrać nowy punkt źródłowy"
       }
     },
     "metadata": {
@@ -1119,11 +1136,13 @@
       "foreground": "Pierwszy plan",
       "heal": "Naprawianie",
       "linear": "Liniowy",
+      "liquify": "Skraplanie",
       "luminance": "Luminancja",
       "others": "Inne",
       "quickErase": "Szybkie wymazanie",
       "quickEraser": "Szybka gumka",
       "radial": "Radialny",
+      "retouch": "Retusz",
       "sky": "Niebo",
       "subject": "Temat"
     }
@@ -1742,6 +1761,8 @@
       "livePreviewQualityDesc": "Zarządza rozdzielczością i kompresją obrazu podczas przesuwania suwaków. Niższa jakość znacząco poprawia czas reakcji.",
       "livePreviews": "Interaktywny podgląd na żywo",
       "livePreviewsDesc": "Podgląd jest aktualizowany natychmiast podczas przesuwania suwaków. Wyłącz to ustawienie, jeśli interfejs zacina się w trakcie edycji.",
+      "mediumThumbnailRes": "Rozdzielczość miniatury edytora",
+      "mediumThumbnailResDesc": "Rozdzielczość podglądu wyświetlanego podczas ładowania pełnych obrazów w edytorze.",
       "modes": {
         "dynamic": "Dynamiczny",
         "static": "Stała rozdzielczość"
@@ -1790,6 +1811,8 @@
       "renderScaleDesc": "Skaluje rozdzielczość względem twojego ekranu. Niższe wartości poprawiają wydajność na ekranach o wysokiej rozdzielczości kosztem ostrości.",
       "restartRequired": "Zmiany w silniku przetwarzania wymagają ponownego uruchomienia aplikacji, aby odniosły skutek.",
       "saveRelaunch": "Zapisz i uruchom ponownie",
+      "smallThumbnailRes": "Rozdzielczość miniatur w siatce",
+      "smallThumbnailResDesc": "Rozdzielczość miniatur wyświetlanych w siatce biblioteki.",
       "staticDesc": "Edytor renderuje obraz w stałej rozdzielczości. Ten tryb jest najszybszy i najbardziej spójny, idealny dla słabszych komputerów, gdzie priorytetem jest płynne działanie a nie perfekcyjna jakość po zbliżeniu.",
       "staticPreviewRes": "Rozdzielczość statycznego podglądu",
       "staticPreviewResDesc": "Określa rozdzielczość dla statycznych podglądów, takich jak tryb kadrowania i narzędzia perspektywy. Nie wpływa to na podgląd głównego edytora.",

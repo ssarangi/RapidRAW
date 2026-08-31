@@ -382,11 +382,22 @@
       "generatingDepthMap": "Calcolo mappa di profondità IA...",
       "generativeEditTitle": "Modifica generativa",
       "inpaintingTitle": "Inpainting",
+      "liquify": {
+        "mode": "Modalità Fluidifica",
+        "modes": {
+          "expand": "Gonfia",
+          "pinch": "Contrai",
+          "push": "Spingi",
+          "twirl": "Vortice"
+        }
+      },
       "manualCleanupTitle": "Pulizia manuale",
       "noImageSelected": "Nessuna immagine selezionata.",
       "params": {
         "feather": "Sfumatura",
-        "grow": "Espandi"
+        "grow": "Espandi",
+        "intensity": "Intensità",
+        "pressure": "Pressione"
       },
       "patches": {
         "aiEdit": "Modifica AI {{count}}",
@@ -402,10 +413,14 @@
         "heal_one": "Ripara {{count}}",
         "heal_other": "Ripara {{count}}",
         "invertedName": "{{name}} Invertita",
+        "liquify": "Fluidifica {{count}}",
+        "liquify_one": "Fluidifica {{count}}",
+        "liquify_other": "Fluidifica {{count}}",
         "quickErase": "Cancellazione Rapida {{count}}",
         "quickErase_many": "Cancellazione Rapida {{count}}",
         "quickErase_one": "Cancellazione Rapida {{count}}",
-        "quickErase_other": "Cancellazione Rapida {{count}}"
+        "quickErase_other": "Cancellazione Rapida {{count}}",
+        "retouch": "Ritocco {{count}}"
       },
       "resetInpaintingTooltip": "Ripristina Inpainting",
       "settings": {
@@ -426,7 +441,8 @@
         "quickEraseDesc": "Riempi la selezione per rimuovere l'oggetto.",
         "selectionPropertiesTitle": "Proprietà Selezione",
         "useBasicInpaint": "Usa inpainting semplice"
-      }
+      },
+      "touchUpTitle": "Ritocchi"
     },
     "crop": {
       "aspectRatioHeading": "Proporzioni",
@@ -575,6 +591,8 @@
         "switchToSubtract": "Passa a Sottrai"
       },
       "addNewMask": "Aggiungi Nuova Maschera",
+      "aiTitle": "Selezioni IA",
+      "basicTitle": "Strumenti di base",
       "brush": {
         "brush": "Pennello",
         "eraser": "Gomma",
@@ -583,7 +601,6 @@
         "size": "Dimensione Pennello"
       },
       "comingSoon": "Prossimamente",
-      "createNewTitle": "Crea Nuova Maschera",
       "depthRange": {
         "far": "Lontano",
         "near": "Vicino",
@@ -608,6 +625,7 @@
         "maskName_one": "Maschera {{count}}",
         "maskName_other": "Maschera {{count}}"
       },
+      "rangeTitle": "Intervalli e Globale",
       "resetMaskingTooltip": "Ripristina Mascheratura",
       "settings": {
         "aiModelDownloading": "Download Modello AI: ",
@@ -630,8 +648,7 @@
       "tooltips": {
         "addToCurrent": "Aggiungi {{name}} alla Maschera Attuale o Crea Nuova (Tasto Destro)",
         "createNew": "Crea Nuova Maschera {{name}}",
-        "selectNewSourcePoint": "{{modifier}} + Clic per selezionare un nuovo punto di origine",
-        "showMore": "Mostra Più Tipi di Maschera"
+        "selectNewSourcePoint": "{{modifier}} + Clic per selezionare un nuovo punto di origine"
       }
     },
     "metadata": {
@@ -1095,11 +1112,13 @@
       "foreground": "Primo Piano",
       "heal": "Ripara",
       "linear": "Lineare",
+      "liquify": "Fluidifica",
       "luminance": "Luminanza",
       "others": "Altri",
       "quickErase": "Cancellazione Rapida",
       "quickEraser": "Gomma Rapida",
       "radial": "Radiale",
+      "retouch": "Ritocco",
       "sky": "Cielo",
       "subject": "Soggetto"
     }
@@ -1707,6 +1726,8 @@
       "livePreviewQualityDesc": "Controlla la risoluzione e la compressione dell'immagine mentre trascini i cursori. Una qualità inferiore migliora significativamente la reattività.",
       "livePreviews": "Anteprime Interattive dal Vivo",
       "livePreviewsDesc": "Aggiorna l'anteprima immediatamente mentre si trascinano i cursori. Disabilita se l'interfaccia risulta lenta durante le regolazioni.",
+      "mediumThumbnailRes": "Risoluzione della miniatura dell'editor",
+      "mediumThumbnailResDesc": "Risoluzione dell'anteprima mostrata mentre le immagini complete vengono caricate nell'editor.",
       "modes": {
         "dynamic": "Dinamica",
         "static": "Risoluzione Fissa"
@@ -1755,6 +1776,8 @@
       "renderScaleDesc": "Scala la risoluzione del render rispetto al tuo display. Valori inferiori migliorano le prestazioni sugli schermi ad alta risoluzione a scapito di una minore nitidezza.",
       "restartRequired": "Le modifiche al motore di elaborazione richiedono il riavvio dell'applicazione per avere effetto.",
       "saveRelaunch": "Salva e Riavvia",
+      "smallThumbnailRes": "Risoluzione delle miniature della griglia",
+      "smallThumbnailResDesc": "Risoluzione delle miniature mostrate nella griglia della libreria.",
       "staticDesc": "L'editor renderizza l'immagine a una risoluzione fissa. Questa modalità è la più veloce e coerente, rendendola ideale per hardware meno potenti dove si privilegia una prestazione fluida rispetto a uno zoom perfetto al pixel.",
       "staticPreviewRes": "Risoluzione Anteprima Statica",
       "staticPreviewResDesc": "Imposta la risoluzione per le anteprime statiche come la modalità ritaglio, la correzione obiettivo e gli strumenti di prospettiva. Non influisce sull'anteprima principale dell'editor.",

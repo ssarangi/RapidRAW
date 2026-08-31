@@ -5,68 +5,120 @@ LOCALES_DIR = Path("./locales")
 
 TRANSLATIONS = {
     "ca": {
-        "tethering": {
-            "triggerCapture": "Captura"
+        "editor": {
+            "masks": {
+                "aiTitle": "Seleccions d'IA",
+                "basicTitle": "Eines bàsiques",
+                "rangeTitle": "Rangs i global"
+            }
         }
     },
     "de": {
-        "tethering": {
-            "triggerCapture": "Aufnehmen"
+        "editor": {
+            "masks": {
+                "aiTitle": "KI-Auswahl",
+                "basicTitle": "Basis-Werkzeuge",
+                "rangeTitle": "Bereiche & Global"
+            }
         }
     },
     "en": {
-        "tethering": {
-            "triggerCapture": "Capture"
+        "editor": {
+            "masks": {
+                "aiTitle": "AI Selections",
+                "basicTitle": "Basic Tools",
+                "rangeTitle": "Ranges & Global"
+            }
         }
     },
     "es": {
-        "tethering": {
-            "triggerCapture": "Capturar"
+        "editor": {
+            "masks": {
+                "aiTitle": "Selecciones de IA",
+                "basicTitle": "Herramientas básicas",
+                "rangeTitle": "Rangos y global"
+            }
         }
     },
     "fr": {
-        "tethering": {
-            "triggerCapture": "Capturer"
+        "editor": {
+            "masks": {
+                "aiTitle": "Sélections IA",
+                "basicTitle": "Outils de base",
+                "rangeTitle": "Plages & Global"
+            }
         }
     },
     "it": {
-        "tethering": {
-            "triggerCapture": "Acquisisci"
+        "editor": {
+            "masks": {
+                "aiTitle": "Selezioni IA",
+                "basicTitle": "Strumenti di base",
+                "rangeTitle": "Intervalli e Globale"
+            }
         }
     },
     "ja": {
-        "tethering": {
-            "triggerCapture": "撮影"
+        "editor": {
+            "masks": {
+                "aiTitle": "AI選択",
+                "basicTitle": "基本ツール",
+                "rangeTitle": "範囲とグローバル"
+            }
         }
     },
     "ko": {
-        "tethering": {
-            "triggerCapture": "촬영"
+        "editor": {
+            "masks": {
+                "aiTitle": "AI 선택",
+                "basicTitle": "기본 도구",
+                "rangeTitle": "범위 및 글로벌"
+            }
         }
     },
     "pl": {
-        "tethering": {
-            "triggerCapture": "Zrób zdjęcie"
+        "editor": {
+            "masks": {
+                "aiTitle": "Zaznaczenia AI",
+                "basicTitle": "Podstawowe narzędzia",
+                "rangeTitle": "Zakresy i globalne"
+            }
         }
     },
     "pt": {
-        "tethering": {
-            "triggerCapture": "Capturar"
+        "editor": {
+            "masks": {
+                "aiTitle": "Seleções de IA",
+                "basicTitle": "Ferramentas Básicas",
+                "rangeTitle": "Intervalos e Global"
+            }
         }
     },
     "ru": {
-        "tethering": {
-            "triggerCapture": "Съемка"
+        "editor": {
+            "masks": {
+                "aiTitle": "Выделения ИИ",
+                "basicTitle": "Базовые инструменты",
+                "rangeTitle": "Диапазоны и глобальные"
+            }
         }
     },
     "zh-CN": {
-        "tethering": {
-            "triggerCapture": "拍摄"
+        "editor": {
+            "masks": {
+                "aiTitle": "AI 选择",
+                "basicTitle": "基本工具",
+                "rangeTitle": "范围与全局"
+            }
         }
     },
     "zh-TW": {
-        "tethering": {
-            "triggerCapture": "拍攝"
+        "editor": {
+            "masks": {
+                "aiTitle": "AI 選擇",
+                "basicTitle": "基本工具",
+                "rangeTitle": "範圍與全域"
+            }
         }
     }
 }
@@ -100,7 +152,16 @@ def update_json_file(file_path: Path, trans: dict):
         print(f"Error parsing JSON in {file_path.name}. Skipping.")
         return
 
+    # 1. Merge new translations
     deep_merge(data, trans)
+
+    # 2. Clean up removed keys from the diff
+    if "editor" in data and "masks" in data["editor"]:
+        data["editor"]["masks"].pop("createNewTitle", None)
+        if "tooltips" in data["editor"]["masks"]:
+            data["editor"]["masks"]["tooltips"].pop("showMore", None)
+
+    # 3. Sort alphabetically
     sorted_data = sort_dict_recursively(data)
 
     with open(file_path, "w", encoding="utf-8") as f:
@@ -114,7 +175,7 @@ def main():
         print(f"Error: Locales directory '{LOCALES_DIR}' does not exist.")
         return
 
-    print("Starting translation updates for tethering capture button...")
+    print("Starting translation updates for Mask Panel sections...")
     for lang, trans in TRANSLATIONS.items():
         file_path = LOCALES_DIR / f"{lang}.json"
         update_json_file(file_path, trans)

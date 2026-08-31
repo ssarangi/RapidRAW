@@ -366,11 +366,22 @@
       "generatingDepthMap": "KI-Tiefenkarte wird berechnet...",
       "generativeEditTitle": "Generative Bearbeitung",
       "inpaintingTitle": "Reparieren",
+      "liquify": {
+        "mode": "Verflüssigen-Modus",
+        "modes": {
+          "expand": "Aufblasen",
+          "pinch": "Zusammenziehen",
+          "push": "Verschieben",
+          "twirl": "Strudel"
+        }
+      },
       "manualCleanupTitle": "Manuelle Bereinigung",
       "noImageSelected": "Kein Bild ausgewählt.",
       "params": {
         "feather": "Weiche Kante",
-        "grow": "Erweitern"
+        "grow": "Erweitern",
+        "intensity": "Intensität",
+        "pressure": "Druck"
       },
       "patches": {
         "aiEdit": "KI-Bearbeitung {{count}}",
@@ -383,9 +394,13 @@
         "heal_one": "Reparieren {{count}}",
         "heal_other": "Reparieren {{count}}",
         "invertedName": "{{name}} umgekehrt",
+        "liquify": "Verflüssigen {{count}}",
+        "liquify_one": "Verflüssigen {{count}}",
+        "liquify_other": "Verflüssigen {{count}}",
         "quickErase": "Schnelles Löschen {{count}}",
         "quickErase_one": "Schnelles Löschen {{count}}",
-        "quickErase_other": "Schnelles Löschen {{count}}"
+        "quickErase_other": "Schnelles Löschen {{count}}",
+        "retouch": "Retusche {{count}}"
       },
       "resetInpaintingTooltip": "Reparieren zurücksetzen",
       "settings": {
@@ -406,7 +421,8 @@
         "quickEraseDesc": "Auswahl füllen, um das Objekt zu entfernen.",
         "selectionPropertiesTitle": "Auswahleigenschaften",
         "useBasicInpaint": "Einfaches Reparieren verwenden"
-      }
+      },
+      "touchUpTitle": "Ausbessern"
     },
     "crop": {
       "aspectRatioHeading": "Seitenverhältnis",
@@ -555,6 +571,8 @@
         "switchToSubtract": "Zu Subtrahieren wechseln"
       },
       "addNewMask": "Neue Maske hinzufügen",
+      "aiTitle": "KI-Auswahl",
+      "basicTitle": "Basis-Werkzeuge",
       "brush": {
         "brush": "Pinsel",
         "eraser": "Radierer",
@@ -563,7 +581,6 @@
         "size": "Pinselgröße"
       },
       "comingSoon": "Demnächst",
-      "createNewTitle": "Neue Maske erstellen",
       "depthRange": {
         "far": "Fern",
         "near": "Nah",
@@ -587,6 +604,7 @@
         "maskName_one": "Maske {{count}}",
         "maskName_other": "Maske {{count}}"
       },
+      "rangeTitle": "Bereiche & Global",
       "resetMaskingTooltip": "Maskierung zurücksetzen",
       "settings": {
         "aiModelDownloading": "KI-Modell wird heruntergeladen: ",
@@ -609,8 +627,7 @@
       "tooltips": {
         "addToCurrent": "{{name}} zur aktuellen Maske hinzufügen oder neu erstellen (Rechtsklick)",
         "createNew": "Neue {{name}}-Maske erstellen",
-        "selectNewSourcePoint": "{{modifier}} + Klicken, um einen neuen Quellpunkt auszuwählen",
-        "showMore": "Mehr Maskenarten anzeigen"
+        "selectNewSourcePoint": "{{modifier}} + Klicken, um einen neuen Quellpunkt auszuwählen"
       }
     },
     "metadata": {
@@ -1071,11 +1088,13 @@
       "foreground": "Vordergrund",
       "heal": "Reparieren",
       "linear": "Linear",
+      "liquify": "Verflüssigen",
       "luminance": "Luminanz",
       "others": "Andere",
       "quickErase": "Schnelles Löschen",
       "quickEraser": "Schnell-Radierer",
       "radial": "Radial",
+      "retouch": "Retuschieren",
       "sky": "Himmel",
       "subject": "Motiv"
     }
@@ -1674,6 +1693,8 @@
       "livePreviewQualityDesc": "Steuert die Auflösung beim Ziehen von Reglern. Niedrigere Qualität verbessert die Reaktionsfähigkeit erheblich.",
       "livePreviews": "Interaktive Live-Vorschauen",
       "livePreviewsDesc": "Aktualisiert die Vorschau sofort beim Ziehen von Reglern. Deaktivieren, wenn die Oberfläche beim Anpassen träge ist.",
+      "mediumThumbnailRes": "Editor-Miniaturbild-Auflösung",
+      "mediumThumbnailResDesc": "Auflösung der Vorschau, die während des Ladens von vollständigen Bildern im Editor angezeigt wird.",
       "modes": {
         "dynamic": "Dynamisch",
         "static": "Feste Auflösung"
@@ -1722,6 +1743,8 @@
       "renderScaleDesc": "Skaliert die Renderauflösung relativ zu Ihrem Display. Niedrigere Werte verbessern die Leistung auf hochauflösenden Bildschirmen.",
       "restartRequired": "Änderungen an der Verarbeitungs-Engine erfordern einen Neustart der Anwendung.",
       "saveRelaunch": "Speichern & Neu starten",
+      "smallThumbnailRes": "Raster-Miniaturbild-Auflösung",
+      "smallThumbnailResDesc": "Auflösung der Miniaturbilder, die im Bibliotheksraster angezeigt werden.",
       "staticDesc": "Der Editor rendert das Bild in einer festen Auflösung. Dieser Modus ist am schnellsten und am besten für schwächere Hardware geeignet.",
       "staticPreviewRes": "Statische Vorschauauflösung",
       "staticPreviewResDesc": "Legt die Auflösung für statische Vorschauen wie Zuschnitt und Perspektive fest. Beeinflusst nicht die Hauptvorschau.",

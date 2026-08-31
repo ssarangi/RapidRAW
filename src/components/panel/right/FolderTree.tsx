@@ -63,8 +63,8 @@ export interface FolderTree {
   path: string;
   imageCount?: number;
   hasSubdirs?: boolean;
-  modified?: number;
-  created?: number;
+  modified?: number | null;
+  created?: number | null;
 }
 
 interface FolderTreeProps {
@@ -856,7 +856,7 @@ export default function FolderTree({
       const hasBaseResults = filteredTrees && filteredTrees.length > 0;
       const hasAlbumResults = filteredAlbumTree && filteredAlbumTree.length > 0;
 
-      let newSections = [...openSections];
+      const newSections = [...openSections];
       let changed = false;
 
       if (hasPinnedResults && !newSections.includes('pinned')) {

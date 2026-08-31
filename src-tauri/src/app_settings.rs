@@ -410,7 +410,9 @@ pub struct AppSettings {
     pub pinned_folders: Vec<String>,
     pub editor_preview_resolution: Option<u32>,
     #[serde(default)]
-    pub thumbnail_resolution: Option<u32>,
+    pub small_thumbnail_resolution: Option<u32>,
+    #[serde(default)]
+    pub medium_thumbnail_resolution: Option<u32>,
     #[serde(default)]
     pub enable_zoom_hifi: Option<bool>,
     #[serde(default)]
@@ -547,7 +549,8 @@ impl Default for AppSettings {
             last_root_path: None,
             root_folders: Vec::new(),
             pinned_folders: Vec::new(),
-            thumbnail_resolution: Some(720),
+            small_thumbnail_resolution: Some(480),
+            medium_thumbnail_resolution: Some(1280),
             #[cfg(target_os = "android")]
             editor_preview_resolution: Some(1280),
             #[cfg(not(target_os = "android"))]
