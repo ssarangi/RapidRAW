@@ -41,10 +41,13 @@ fn parse_flash_candidate(model_name: &str) -> Option<(u32, u32, bool, bool)> {
     Some((major, minor, is_lite, !is_preview))
 }
 
-/// Looks up the newest available flash/lite Gemini model instead of hardcoding
-/// an id, so this doesn't 404 the moment Google renames or retires whatever
-/// was current when this was written.
-async fn resolve_flash_model(api_key: &str) -> Result<String, String> {
+/// Looks up available flash/lite Gemini models instead of hardcoding an id
+/// (so this doesn't 404 the moment Google renames or retires whatever was
+/// current when this was written), sorted best-first. Callers try them in
+/// order and fall through to the next one on a retryable error (e.g. a 503
+/// while Google's infra is overloaded), rather than failing the whole
+/// critique because one specific model instance is temporarily down.
+async fn resolve_flash_models(api_key: &str) -> Result<Vec<String>, String> {
     let client = reqwest::Client::new();
     let url = format!("https://generativelanguage.googleapis.com/v1beta/models?key={api_key}");
     let response = client
@@ -65,7 +68,7 @@ async fn resolve_flash_model(api_key: &str) -> Result<String, String> {
         .as_array()
         .ok_or_else(|| "Gemini's model list response was missing 'models'".to_string())?;
 
-    let mut best: Option<(String, (u32, u32, bool, bool))> = None;
+    let mut candidates: Vec<(String, (u32, u32, bool, bool))> = Vec::new();
     for model in models {
         let Some(name) = model["name"].as_str() else { continue };
         let supports_generate = model["supportedGenerationMethods"]
@@ -75,13 +78,14 @@ async fn resolve_flash_model(api_key: &str) -> Result<String, String> {
             continue;
         }
         let Some(key) = parse_flash_candidate(name) else { continue };
-        if best.as_ref().is_none_or(|(_, best_key)| key > *best_key) {
-            best = Some((name.rsplit('/').next().unwrap_or(name).to_string(), key));
-        }
+        candidates.push((name.rsplit('/').next().unwrap_or(name).to_string(), key));
     }
 
-    best.map(|(name, _)| name)
-        .ok_or_else(|| "No flash/lite Gemini model available for this API key".to_string())
+    if candidates.is_empty() {
+        return Err("No flash/lite Gemini model available for this API key".to_string());
+    }
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    Ok(candidates.into_iter().map(|(name, _)| name).collect())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,7 +173,17 @@ fn build_request_body(image_base64: &str) -> serde_json::Value {
     })
 }
 
-async fn call_gemini(api_key: &str, model: &str, image_base64: &str) -> Result<GeminiCritiqueResponse, String> {
+/// A failed call against one specific model. Retryable means the model
+/// itself is likely fine but temporarily unavailable/overloaded (503, 429,
+/// other 5xx) or otherwise worth trying a different model for - the caller
+/// should fall through to the next candidate rather than giving up. Fatal
+/// covers things another model won't fix (bad request, invalid key).
+enum GeminiCallError {
+    Retryable(String),
+    Fatal(String),
+}
+
+async fn call_gemini(api_key: &str, model: &str, image_base64: &str) -> Result<GeminiCritiqueResponse, GeminiCallError> {
     let client = reqwest::Client::new();
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
@@ -179,25 +193,33 @@ async fn call_gemini(api_key: &str, model: &str, image_base64: &str) -> Result<G
         .json(&build_request_body(image_base64))
         .send()
         .await
-        .map_err(|error| format!("Could not reach Gemini: {error}"))?;
+        .map_err(|error| GeminiCallError::Retryable(format!("Could not reach Gemini: {error}")))?;
 
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(format!("Gemini returned HTTP {status}: {body}"));
+        let message = format!("Gemini ({model}) returned HTTP {status}: {body}");
+        // 429 (rate limited/quota) and any 5xx (503 overloaded, 500 internal
+        // error, etc.) are about this model instance's current state, not a
+        // reason to believe every flash/lite model is unusable.
+        return Err(if status.as_u16() == 429 || status.is_server_error() {
+            GeminiCallError::Retryable(message)
+        } else {
+            GeminiCallError::Fatal(message)
+        });
     }
 
     let payload: serde_json::Value = response
         .json()
         .await
-        .map_err(|error| format!("Could not parse Gemini's response: {error}"))?;
+        .map_err(|error| GeminiCallError::Fatal(format!("Could not parse Gemini's response: {error}")))?;
 
     let text = payload["candidates"][0]["content"]["parts"][0]["text"]
         .as_str()
-        .ok_or_else(|| "Gemini's response did not contain the expected text part".to_string())?;
+        .ok_or_else(|| GeminiCallError::Fatal("Gemini's response did not contain the expected text part".to_string()))?;
 
     serde_json::from_str(text)
-        .map_err(|error| format!("Could not parse Gemini's critique JSON: {error}"))
+        .map_err(|error| GeminiCallError::Fatal(format!("Could not parse Gemini's critique JSON: {error}")))
 }
 
 #[tauri::command]
@@ -251,8 +273,24 @@ pub async fn get_or_generate_gemini_critique(
         .map_err(|error| error.to_string())?;
     let image_base64 = general_purpose::STANDARD.encode(buf.into_inner());
 
-    let model = resolve_flash_model(&api_key).await?;
-    let critique = call_gemini(&api_key, &model, &image_base64).await?;
+    let candidate_models = resolve_flash_models(&api_key).await?;
+    let mut last_error: Option<String> = None;
+    let mut succeeded: Option<(String, GeminiCritiqueResponse)> = None;
+    for model in &candidate_models {
+        match call_gemini(&api_key, model, &image_base64).await {
+            Ok(critique) => {
+                succeeded = Some((model.clone(), critique));
+                break;
+            }
+            Err(GeminiCallError::Retryable(message)) => {
+                last_error = Some(message);
+            }
+            Err(GeminiCallError::Fatal(message)) => return Err(message),
+        }
+    }
+    let (model, critique) = succeeded.ok_or_else(|| {
+        last_error.unwrap_or_else(|| "No Gemini model produced a critique".to_string())
+    })?;
 
     let response_json = serde_json::to_string(&critique).map_err(|error| error.to_string())?;
     {
