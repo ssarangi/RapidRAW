@@ -3750,11 +3750,12 @@ fn run_catalog_thumbnail_generation_impl(
             &settings,
         );
 
-        if let Some((thumbnail_path, rating, is_edited)) = result {
+        if let Some((small_path, medium_path, rating, is_edited)) = result {
             crate::file_management::emit_thumbnail_generated(
                 app,
                 &path_str,
-                &thumbnail_path,
+                &small_path,
+                &medium_path,
                 rating,
                 is_edited,
             );
