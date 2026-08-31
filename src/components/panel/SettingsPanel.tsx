@@ -553,6 +553,8 @@ export default function SettingsPanel({
 
   const [aiProvider, setAiProvider] = useState(appSettings?.aiProvider || 'cpu');
   const [aiConnectorAddress, setAiConnectorAddress] = useState<string>(appSettings?.aiConnectorAddress || '');
+  const [geminiApiKey, setGeminiApiKey] = useState<string>(appSettings?.geminiApiKey || '');
+  const [geminiTestStatus, setGeminiTestStatus] = useState<TestStatus>({ message: '', success: null, testing: false });
   const [newShortcut, setNewShortcut] = useState('');
   const [newAiTag, setNewAiTag] = useState('');
 
@@ -624,7 +626,24 @@ export default function SettingsPanel({
         directory: libraryDirectory,
       });
       setLibraryInfo(created);
-      await onSettingsChange({ ...appSettings, activeLibraryDbPath: created.dbPath });
+      // A brand new library has no roots yet, so any persisted
+      // "LibraryFolder:<oldRootId>:..." session from a previous catalog is
+      // now dangling. Clearing lastFolderState alone isn't enough - a
+      // watcher in useAppInitialization.ts reactively re-persists
+      // lastFolderState from the LIVE useLibraryStore navigation fields
+      // whenever they disagree with what's saved, so unless those are also
+      // reset, it immediately reconstructs and re-saves the exact stale
+      // state we just cleared, and Continue Session ends up right back at
+      // "load a root id that doesn't exist in this library."
+      useLibraryStore.getState().setLibrary({
+        librarySource: { type: 'filesystem' },
+        catalogRoots: [],
+        activeCatalogRootId: null,
+        imageList: [],
+        imageRatings: {},
+        currentFolderPath: null,
+      });
+      await onSettingsChange({ ...appSettings, activeLibraryDbPath: created.dbPath, lastFolderState: null });
       await refreshLibraryState();
       setLibraryMessage(`Created library "${created.name}". Add a photo folder to start indexing.`);
     } catch (err) {
@@ -667,7 +686,20 @@ export default function SettingsPanel({
       setLibraryMessage(`Opening library database at ${selected}...`);
       const opened = await invoke<LibraryInfo>(Invokes.OpenLibrary, { path: selected });
       setLibraryInfo(opened);
-      await onSettingsChange({ ...appSettings, activeLibraryDbPath: opened.dbPath });
+      // Switching to a different library invalidates any persisted
+      // "LibraryFolder:<rootId>:..." session from whichever catalog was
+      // active before - that root id belongs to a different database. Also
+      // reset the LIVE navigation state, not just the persisted setting -
+      // see the comment in handleCreateLibrary for why both are required.
+      useLibraryStore.getState().setLibrary({
+        librarySource: { type: 'filesystem' },
+        catalogRoots: [],
+        activeCatalogRootId: null,
+        imageList: [],
+        imageRatings: {},
+        currentFolderPath: null,
+      });
+      await onSettingsChange({ ...appSettings, activeLibraryDbPath: opened.dbPath, lastFolderState: null });
       await refreshLibraryState();
       setLibraryMessage(`Opened library "${opened.name}".`);
     } catch (err) {
@@ -682,7 +714,13 @@ export default function SettingsPanel({
     setLibraryMessage('Closing the active library...');
     try {
       await invoke(Invokes.CloseLibrary);
-      await onSettingsChange({ ...appSettings, activeLibraryDbPath: null });
+      // Live store reset must happen BEFORE the settings change, not after:
+      // useAppInitialization.ts watches these live fields and reactively
+      // re-persists lastFolderState whenever they disagree with what's
+      // saved. `await`ing onSettingsChange first yields to React in between
+      // the two calls, long enough for that watcher to see live=stale
+      // still disagreeing with persisted=null and re-save the stale state
+      // right back before this function's next line ever runs.
       useLibraryStore.getState().setLibrary({
         librarySource: { type: 'filesystem' },
         catalogRoots: [],
@@ -691,6 +729,7 @@ export default function SettingsPanel({
         imageRatings: {},
         currentFolderPath: null,
       });
+      await onSettingsChange({ ...appSettings, activeLibraryDbPath: null, lastFolderState: null });
       await refreshLibraryState();
       setLibraryMessage('Returned to folder browsing mode.');
     } catch (err) {
@@ -706,7 +745,7 @@ export default function SettingsPanel({
     setLibraryMessage(`Deleting library "${libraryInfo.name}"...`);
     try {
       await invoke(Invokes.DeleteLibrary);
-      await onSettingsChange({ ...appSettings, activeLibraryDbPath: null });
+      // Order matters here - see the comment in handleCloseLibrary.
       useLibraryStore.getState().setLibrary({
         librarySource: { type: 'filesystem' },
         catalogRoots: [],
@@ -715,6 +754,7 @@ export default function SettingsPanel({
         imageRatings: {},
         currentFolderPath: null,
       });
+      await onSettingsChange({ ...appSettings, activeLibraryDbPath: null, lastFolderState: null });
       setLibraryInfo(null);
       setCatalogRoots([]);
       setCatalogMetrics(null);
@@ -900,6 +940,9 @@ export default function SettingsPanel({
     }
     if (appSettings?.aiProvider !== aiProvider) {
       setAiProvider(appSettings?.aiProvider || 'cpu');
+    }
+    if (appSettings?.geminiApiKey !== geminiApiKey) {
+      setGeminiApiKey(appSettings?.geminiApiKey || '');
     }
     setProcessingSettings({
       editorPreviewResolution: appSettings?.editorPreviewResolution || 1920,
@@ -1203,6 +1246,21 @@ export default function SettingsPanel({
       console.error('AI Connector connection test failed:', err);
     } finally {
       setTimeout(() => setTestStatus({ testing: false, message: '', success: null }), EXECUTE_TIMEOUT);
+    }
+  };
+
+  const handleTestGeminiKey = async () => {
+    if (!geminiApiKey.trim()) {
+      return;
+    }
+    setGeminiTestStatus({ testing: true, message: 'Checking key...', success: null });
+    try {
+      const message = await invoke<string>(Invokes.TestGeminiApiKey, { apiKey: geminiApiKey.trim() });
+      setGeminiTestStatus({ testing: false, message, success: true });
+    } catch (err) {
+      setGeminiTestStatus({ testing: false, message: String(err), success: false });
+    } finally {
+      setTimeout(() => setGeminiTestStatus({ testing: false, message: '', success: null }), EXECUTE_TIMEOUT);
     }
   };
 
@@ -2305,6 +2363,52 @@ export default function SettingsPanel({
 
               {activeCategory === 'visual-ai' && (
                 <motion.div key="visual-ai" initial={{ opacity: 0, x: 10 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -10 }} transition={{ duration: 0.2 }}>
+                  <div className="mb-8 space-y-4">
+                    <div>
+                      <Text variant={TextVariants.heading}>AI Photo Critique (Gemini)</Text>
+                      <Text className="mt-1">
+                        Optional: adds a rich, natural-language critique for culling finalists (composition,
+                        distractions, framing) beyond the local sharpness/duplicate/eye-state signals. Only the
+                        small number of finalists you select are ever sent - not your whole library. Your key is
+                        stored locally in this app's settings file.
+                      </Text>
+                    </div>
+                    <SettingItem
+                      label="Gemini API key"
+                      description="From Google AI Studio. Leave blank to keep using local-only culling signals."
+                    >
+                      <div className="flex items-center gap-2">
+                        <Input
+                          className="grow"
+                          id="gemini-api-key"
+                          onBlur={() => onSettingsChange({ ...appSettings, geminiApiKey: geminiApiKey.trim() || undefined })}
+                          onChange={(e: any) => setGeminiApiKey(e.target.value)}
+                          onKeyDown={(e: any) => e.stopPropagation()}
+                          placeholder="AIza..."
+                          type="password"
+                          value={geminiApiKey}
+                          bgClassName="bg-bg-primary"
+                        />
+                        <Button
+                          className="w-32"
+                          disabled={geminiTestStatus.testing || !geminiApiKey.trim()}
+                          onClick={handleTestGeminiKey}
+                        >
+                          {geminiTestStatus.testing ? 'Testing...' : 'Test key'}
+                        </Button>
+                      </div>
+                      {geminiTestStatus.message && (
+                        <Text
+                          color={geminiTestStatus.success ? TextColors.success : TextColors.error}
+                          className="mt-2 flex items-center gap-2"
+                        >
+                          {geminiTestStatus.success === true && <Wifi size={16} />}
+                          {geminiTestStatus.success === false && <WifiOff size={16} />}
+                          {geminiTestStatus.message}
+                        </Text>
+                      )}
+                    </SettingItem>
+                  </div>
                   <VisualModelsSettings onOpenExternal={shellOpen} />
                 </motion.div>
               )}

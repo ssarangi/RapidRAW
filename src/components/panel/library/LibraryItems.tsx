@@ -142,13 +142,17 @@ const ThumbnailComponent = ({
     });
   }, []);
 
+  // No hover-driven styling here on purpose - only real, state-driven
+  // active/selected rings. Pure CSS :hover effects on these tiles (scale,
+  // ring) were removed at the user's request after they became a suspect in
+  // an unresolved grid-flicker bug and were also just visually noisy.
   const ringClass = isActive
     ? 'ring-2 ring-inset ring-accent'
     : isSelected
       ? 'ring-2 ring-inset ring-gray-400'
       : isForcedHover
         ? 'ring-2 ring-inset ring-hover-color'
-        : 'group-hover:ring-2 group-hover:ring-inset group-hover:ring-hover-color';
+        : '';
 
   const colorTag = tags?.find((t: string) => t.startsWith('color:'))?.substring(6);
   const colorLabel = COLOR_LABELS.find((c: Color) => c.name === colorTag);
@@ -195,9 +199,8 @@ const ThumbnailComponent = ({
                 <img
                   alt={path.split(/[\\/]/).pop()}
                   className={clsx(
-                    'w-full h-full transition-transform duration-300 will-change-transform relative',
+                    'w-full h-full relative',
                     thumbnailAspectRatio === ThumbnailAspectRatio.Contain ? 'object-contain' : 'object-cover',
-                    isForcedHover ? 'scale-[1.02]' : 'group-hover:scale-[1.02]',
                   )}
                   decoding="async"
                   loading="lazy"

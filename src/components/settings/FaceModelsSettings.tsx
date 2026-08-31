@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { CheckCircle2, Download, ExternalLink, Loader2, RotateCcw, ShieldCheck } from 'lucide-react';
 import Button from '../ui/Button';
+import Checkbox from '../ui/Checkbox';
 import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
 import { FaceModelPack, FaceModelPackStatus, Invokes } from '../ui/AppProperties';
@@ -229,22 +230,19 @@ export default function FaceModelsSettings({ onOpenExternal }: FaceModelsSetting
                       </button>
                     </div>
                     {status.pack.licenseAcknowledgementRequired && !status.installed && (
-                      <label className="mt-3 flex items-start gap-2 text-xs text-text-secondary cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={acceptedLicenses.has(status.pack.id)}
-                          onChange={(event) => {
-                            setAcceptedLicenses((current) => {
-                              const next = new Set(current);
-                              if (event.target.checked) next.add(status.pack.id);
-                              else next.delete(status.pack.id);
-                              return next;
-                            });
-                          }}
-                          className="mt-0.5 accent-[var(--color-accent)]"
-                        />
-                        I reviewed and accept the upstream license for this model pack.
-                      </label>
+                      <Checkbox
+                        className="mt-3"
+                        checked={acceptedLicenses.has(status.pack.id)}
+                        onChange={(checked) => {
+                          setAcceptedLicenses((current) => {
+                            const next = new Set(current);
+                            if (checked) next.add(status.pack.id);
+                            else next.delete(status.pack.id);
+                            return next;
+                          });
+                        }}
+                        label="I reviewed and accept the upstream license for this model pack."
+                      />
                     )}
                   </div>
                   <div className="shrink-0 flex items-start">

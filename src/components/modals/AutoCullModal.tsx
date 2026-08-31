@@ -307,6 +307,9 @@ export default function AutoCullModal() {
     <div className="flex flex-col items-center justify-center min-h-56">
       <Loader2 className="w-12 h-12 text-accent animate-spin" />
       <p className="mt-4 text-text-primary">{progress?.stage || fallbackLabel}</p>
+      {progress?.currentItem && (
+        <p className="mt-1 text-xs text-text-secondary font-mono truncate max-w-full">{progress.currentItem}</p>
+      )}
       {progress && progress.total > 0 && (
         <div className="w-full bg-surface rounded-full h-2.5 mt-2">
           <div

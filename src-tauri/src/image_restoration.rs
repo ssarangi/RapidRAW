@@ -30,7 +30,10 @@ impl Default for RestorationRecipe {
             // Finish-stage adjustments are deliberately never applied here.
             microcontrast_strength: 0.0,
             detail_recovery: 0.0,
-            tile_size: 768,
+            // rawnind-utnet2-bayer's ONNX graph has a static 512x512 input and
+            // Bayer tiling halves tile_size before feeding the model, so the
+            // default (model_id above) needs 1024, not nafnet-sidd-rgb's 768.
+            tile_size: 1024,
             tile_overlap: 64,
         }
     }

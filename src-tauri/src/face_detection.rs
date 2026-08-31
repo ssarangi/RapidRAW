@@ -35,10 +35,15 @@ pub(crate) struct FacePoseEstimate {
     pub frame_fraction: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct CullingFaceAnalysis {
     pub face_count: usize,
     pub best_pose: Option<FacePoseEstimate>,
+    /// Eye openness for the SAME face `best_pose` was computed from (the
+    /// most frontal/prominent detected face), not an average across every
+    /// face in frame - a background bystander blinking shouldn't affect the
+    /// primary subject's verdict.
+    pub eye_openness: Option<crate::eye_state::EyeOpennessEstimate>,
 }
 
 fn estimate_face_pose(
@@ -247,6 +252,7 @@ pub(crate) fn load_local_face_detector(
 
 pub(crate) fn analyze_faces_for_culling(
     detector: &LocalFaceDetector,
+    eye_classifier: Option<&crate::eye_state::EyeStateClassifier>,
     path: &Path,
     app_handle: &AppHandle,
 ) -> Result<CullingFaceAnalysis, String> {
@@ -256,18 +262,27 @@ pub(crate) fn analyze_faces_for_culling(
         .lock()
         .map_err(|_| "Face detector session lock was poisoned".to_string())?;
     let detections = detect_yunet(&image, &mut session)?;
-    let best_pose = detections
+    let best = detections
         .iter()
         .filter_map(|detection| {
             estimate_face_pose(detection.landmarks, detection.width, detection.height)
+                .map(|pose| (detection, pose))
         })
-        .max_by(|left, right| {
+        .max_by(|(_, left), (_, right)| {
             (left.frontal_score * 0.8 + left.frame_fraction * 0.2)
                 .total_cmp(&(right.frontal_score * 0.8 + right.frame_fraction * 0.2))
         });
+    let best_pose = best.map(|(_, pose)| pose);
+    let eye_openness = match (best, eye_classifier) {
+        (Some((detection, _)), Some(classifier)) => {
+            crate::eye_state::classify_face_eye_state(classifier, &image, detection.landmarks)
+        }
+        _ => None,
+    };
     Ok(CullingFaceAnalysis {
         face_count: detections.len(),
         best_pose,
+        eye_openness,
     })
 }
 

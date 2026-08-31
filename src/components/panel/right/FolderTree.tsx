@@ -897,6 +897,24 @@ export default function FolderTree({
   const hasVisibleCatalogRoots = librarySource.type === 'catalog' && catalogRoots.length > 0 && !isSearching;
   const showAlbumsSection = hasVisibleAlbums || (!isSearching && albumTree.length === 0);
 
+  // The currently-open image's folder can come from somewhere the tree
+  // doesn't already show it - e.g. opened via "Open with RapidRAW" or the
+  // external-editor protocol, which selects an image without first
+  // navigating the tree to its folder. When that happens, surface it here
+  // instead of silently leaving Sources pointed at whatever was last browsed.
+  const adHocCurrentFolder = useMemo(() => {
+    if (!selectedPath || isSearching) return null;
+    if (selectedPath.startsWith('LibraryFolder:') || selectedPath.startsWith('Library: ')) return null;
+    const knownRootPaths = [...folderTrees, ...pinnedFolderTrees].map((tree: any) => tree.path as string);
+    const alreadyVisible = knownRootPaths.some(
+      (rootPath) => selectedPath === rootPath || selectedPath.startsWith(`${rootPath}/`) || selectedPath.startsWith(`${rootPath}\\`),
+    );
+    if (alreadyVisible) return null;
+    const separator = selectedPath.includes('/') ? '/' : '\\';
+    const name = selectedPath.split(separator).filter(Boolean).pop() || selectedPath;
+    return { path: selectedPath, name };
+  }, [selectedPath, isSearching, folderTrees, pinnedFolderTrees]);
+
   const loadCatalogFolderTree = async (root: CatalogRoot) => {
     const cachedTree = catalogFolderTrees[root.id];
     if (cachedTree && cachedTree.imageCount === root.imageCount) return;
@@ -1137,6 +1155,23 @@ export default function FolderTree({
 
         <LayoutGroup id="folder-tree">
           <div className="flex-1 overflow-y-auto" onContextMenu={handleEmptyAreaContextMenu}>
+            {adHocCurrentFolder && (
+              <div>
+                <SectionHeader title={t('library.folders.sections.currentFolder', 'Current Folder')} isOpen={true} onToggle={() => {}} />
+                <div className="pt-1 pb-2">
+                  <div
+                    onClick={() => onFolderSelect(adHocCurrentFolder.path)}
+                    onContextMenu={(e) => onContextMenu(e, adHocCurrentFolder.path, false, false)}
+                    className="group flex items-center gap-2 px-2 py-1.5 mx-1 rounded-md bg-card-active text-text-primary cursor-pointer"
+                    data-tooltip={adHocCurrentFolder.path}
+                  >
+                    <Folder size={16} className="shrink-0 text-accent" />
+                    <span className="truncate text-sm">{adHocCurrentFolder.name}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {showPinnedSection && (
               <>
                 <div>

@@ -426,3 +426,32 @@ pub async fn test_ai_connector_connection(address: String) -> Result<(), String>
         Err(e) => Err(e.to_string()),
     }
 }
+
+/// Validates a Gemini API key by listing available models - the cheapest
+/// authenticated call the API offers, so this doesn't burn any real quota
+/// just to confirm the key works.
+#[tauri::command]
+pub async fn test_gemini_api_key(api_key: String) -> Result<String, String> {
+    let trimmed = api_key.trim();
+    if trimmed.is_empty() {
+        return Err("Enter an API key first".to_string());
+    }
+    let client = reqwest::Client::new();
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models?key={}",
+        trimmed
+    );
+    let response = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|error| format!("Could not reach Gemini: {error}"))?;
+
+    if response.status().is_success() {
+        Ok("Gemini API key is valid.".to_string())
+    } else if response.status().as_u16() == 400 || response.status().as_u16() == 403 {
+        Err("Gemini rejected this key - double check it was copied correctly.".to_string())
+    } else {
+        Err(format!("Gemini returned an unexpected error (HTTP {})", response.status()))
+    }
+}

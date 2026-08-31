@@ -338,11 +338,7 @@ export default function MainLibrary(props: MainLibraryProps) {
     checkVersion();
   }, []);
 
-  if ((!props.rootPaths || props.rootPaths.length === 0) && libraryDisplayMode === LibraryDisplayMode.Cull) {
-    return <CullingView {...props} />;
-  }
-
-  if (!props.rootPaths || props.rootPaths.length === 0) {
+  if (libraryDisplayMode !== LibraryDisplayMode.Cull && (!props.rootPaths || props.rootPaths.length === 0)) {
     if (!props.appSettings) {
       return (
         <div className="flex-1 flex h-full p-2 bg-transparent">
@@ -547,14 +543,18 @@ export default function MainLibrary(props: MainLibraryProps) {
   }
 
   return (
-    <div className="relative z-20 flex-1 flex flex-col h-full min-w-0 bg-bg-secondary rounded-lg overflow-visible">
+    <div className="relative z-20 flex-1 flex flex-col h-full min-h-0 min-w-0 bg-bg-secondary rounded-lg overflow-visible">
       <header
         className="p-3 shrink-0 flex justify-between items-center border-b border-surface gap-4"
         onMouseEnter={() => setIsProgressHovered(true)}
         onMouseLeave={() => setIsProgressHovered(false)}
       >
         <div className="min-w-0">
-          <Text variant={TextVariants.headline}>{t('library.header.title')}</Text>
+          <Text variant={TextVariants.headline}>
+            {libraryDisplayMode === LibraryDisplayMode.Cull
+              ? t('library.viewMode.culling', { defaultValue: 'Culling View' })
+              : t('library.header.title')}
+          </Text>
           {!props.isAndroid && (
             <div className="flex items-center gap-2">
               {displayFolderPath ? (
@@ -615,37 +615,41 @@ export default function MainLibrary(props: MainLibraryProps) {
           <DisplayModeSwitch displayMode={libraryDisplayMode} setDisplayMode={setLibraryDisplayMode} t={t} />
 
           <div className="flex items-center bg-surface p-1 rounded-lg gap-1 border border-border-color/20">
-            <SearchInput indexingProgress={props.indexingProgress} isIndexing={props.isIndexing} />
-            <CatalogSearchDropdown />
-            <SmartCollectionsDropdown />
-            <CatalogAiTaggingButton />
-            <CatalogRamPlusTaggingButton />
-            <CatalogAiTagReviewButton />
-            <CatalogSpeciesReviewButton />
-            <CatalogEnhanceMenu />
-            <ViewOptionsDropdown
-              libraryViewMode={props.libraryViewMode}
-              onSelectSize={props.onThumbnailSizeChange}
-              onSelectAspectRatio={props.onThumbnailAspectRatioChange}
-              onLibraryRefresh={props.onLibraryRefresh}
-              setLibraryViewMode={props.setLibraryViewMode}
-              thumbnailSize={props.thumbnailSize}
-              thumbnailAspectRatio={props.thumbnailAspectRatio}
-              thumbnailSizeOptions={translatedThumbnailSizeOptions}
-              thumbnailAspectRatioOptions={translatedThumbnailAspectRatioOptions}
-              ratingFilterOptions={translatedRatingFilterOptions}
-              rawStatusOptions={translatedRawStatusOptions}
-              editedStatusOptions={translatedEditedStatusOptions}
-              sortOptions={translatedSortOptions}
-            />
-            {!props.isAndroid && (
-              <Button
-                className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center"
-                onClick={props.onNavigateToCommunity}
-                data-tooltip={t('library.tooltips.communityPresets')}
-              >
-                <Users className="w-5 h-5" />
-              </Button>
+            {libraryDisplayMode !== LibraryDisplayMode.Cull && (
+              <>
+                <SearchInput indexingProgress={props.indexingProgress} isIndexing={props.isIndexing} />
+                <CatalogSearchDropdown />
+                <SmartCollectionsDropdown />
+                <CatalogAiTaggingButton />
+                <CatalogRamPlusTaggingButton />
+                <CatalogAiTagReviewButton />
+                <CatalogSpeciesReviewButton />
+                <CatalogEnhanceMenu />
+                <ViewOptionsDropdown
+                  libraryViewMode={props.libraryViewMode}
+                  onSelectSize={props.onThumbnailSizeChange}
+                  onSelectAspectRatio={props.onThumbnailAspectRatioChange}
+                  onLibraryRefresh={props.onLibraryRefresh}
+                  setLibraryViewMode={props.setLibraryViewMode}
+                  thumbnailSize={props.thumbnailSize}
+                  thumbnailAspectRatio={props.thumbnailAspectRatio}
+                  thumbnailSizeOptions={translatedThumbnailSizeOptions}
+                  thumbnailAspectRatioOptions={translatedThumbnailAspectRatioOptions}
+                  ratingFilterOptions={translatedRatingFilterOptions}
+                  rawStatusOptions={translatedRawStatusOptions}
+                  editedStatusOptions={translatedEditedStatusOptions}
+                  sortOptions={translatedSortOptions}
+                />
+                {!props.isAndroid && (
+                  <Button
+                    className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center"
+                    onClick={props.onNavigateToCommunity}
+                    data-tooltip={t('library.tooltips.communityPresets')}
+                  >
+                    <Users className="w-5 h-5" />
+                  </Button>
+                )}
+              </>
             )}
             <Button
               className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center"

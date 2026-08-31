@@ -468,25 +468,25 @@ export function useTauriListeners({
       }),
       listen('auto-cull-plan-progress', (event: any) => {
         if (isEffectActive) {
-          useUIStore
-            .getState()
-            .setUI((state) => {
-              const previous = state.cullWorkspaceProgress;
-              const next = event.payload;
-              return {
-                cullWorkspaceProgress: {
+          useUIStore.getState().setUI((state) => {
+            const previous = state.cullWorkspaceProgress;
+            const next = event.payload;
+            const isSameStage = previous && previous.stage === next.stage && previous.total === next.total;
+            const current = isSameStage ? Math.max(next.current ?? 0, previous.current ?? 0) : (next.current ?? 0);
+            return {
+              cullWorkspaceProgress: {
+                ...next,
+                current,
+              },
+              autoCullModalState: {
+                ...state.autoCullModalState,
+                progress: {
                   ...next,
-                  current: Math.max(next.current ?? 0, previous?.current ?? 0),
+                  current,
                 },
-                autoCullModalState: {
-                  ...state.autoCullModalState,
-                  progress: {
-                    ...next,
-                    current: Math.max(next.current ?? 0, previous?.current ?? 0),
-                  },
-                },
-              };
-            });
+              },
+            };
+          });
         }
       }),
     ];

@@ -1006,7 +1006,11 @@ export function CatalogEnhanceMenu() {
         // restoration derivative.
         microcontrastStrength: 0,
         detailRecovery: 0,
-        tileSize: 768,
+        // rawnind-utnet2-bayer's ONNX graph has a static 512x512 input, and the
+        // Bayer tiling code halves tileSize before feeding the model, so this
+        // must be exactly 1024 for that model; nafnet-sidd-rgb's graph is
+        // static at 768x768 and takes tileSize directly.
+        tileSize: operationKind === 'raw_denoise' ? 1024 : 768,
         tileOverlap: 64,
       };
       await invoke('start_image_restoration', {

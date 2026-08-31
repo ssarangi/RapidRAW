@@ -63,7 +63,9 @@ import { TEXT_COLOR_KEYS, TextColors, TextVariants, TextWeights } from '../../..
 import { useUser, useAuth } from '@clerk/react';
 import { useSettingsStore } from '../../../store/useSettingsStore';
 import { useEditorStore } from '../../../store/useEditorStore';
+import { useLibraryStore } from '../../../store/useLibraryStore';
 import { useProcessStore } from '../../../store/useProcessStore';
+import GeminiCritiquePanel from '../editor/GeminiCritiquePanel';
 import { useUIStore } from '../../../store/useUIStore';
 import { useEditorActions } from '../../../hooks/useEditorActions';
 import { useAiMasking } from '../../../hooks/useAiMasking';
@@ -327,8 +329,13 @@ export default function AIPanel() {
   const isGeneratingAiMask = useEditorStore((s) => s.isGeneratingAiMask);
   const selectedImage = useEditorStore((s) => s.selectedImage);
   const setEditor = useEditorStore((s) => s.setEditor);
+  const catalogImageId = useLibraryStore((s) => {
+    if (!selectedImage) return null;
+    return s.imageList.find((img) => img.path === selectedImage.path)?.catalog_image_id ?? null;
+  });
 
   const aiModelDownloadStatus = useProcessStore((s) => s.aiModelDownloadStatus);
+  const liveThumbnailUrl = useProcessStore((s) => (selectedImage ? s.thumbnails[selectedImage.path] : undefined));
   const setCustomEscapeHandler = useUIStore((s) => s.setCustomEscapeHandler);
 
   const { setAdjustments } = useEditorActions();
@@ -1088,6 +1095,16 @@ export default function AIPanel() {
             </div>
           ) : (
             <>
+              <div className="mb-6">
+                <GeminiCritiquePanel
+                  imagePath={selectedImage.path}
+                  catalogImageId={catalogImageId}
+                  imageWidth={selectedImage.width}
+                  imageHeight={selectedImage.height}
+                  previewUrl={liveThumbnailUrl || selectedImage.thumbnailUrl}
+                />
+              </div>
+
               <AnimatePresence mode="wait">
                 {(adjustments.aiPatches || []).length === 0 ? (
                   <motion.div

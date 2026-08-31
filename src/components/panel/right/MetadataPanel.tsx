@@ -251,6 +251,62 @@ export default function MetadataPanel() {
     return state.imageList.find((img) => img.path === selectedImage.path)?.tags ?? EMPTY_TAGS;
   });
   const liveThumbnailUrl = selectedImage ? thumbnails[selectedImage.path] : undefined;
+  const catalogImageId = useLibraryStore((state) => {
+    if (!selectedImage) return null;
+    return state.imageList.find((img) => img.path === selectedImage.path)?.catalog_image_id ?? null;
+  });
+
+  const [aiProvenance, setAiProvenance] = useState<{
+    aiTags: Array<{ id: number; name: string; confidence: number; reviewState: string }>;
+    species: Array<{ id: number; commonName?: string | null; scientificName: string; confidence: number; reviewState: string }>;
+  } | null>(null);
+
+  useEffect(() => {
+    if (!catalogImageId) {
+      setAiProvenance(null);
+      return;
+    }
+    let active = true;
+    invoke(Invokes.GetImageProvenance, { imageId: catalogImageId })
+      .then((evidence: any) => {
+        if (active) setAiProvenance({ aiTags: evidence.aiTags ?? [], species: evidence.species ?? [] });
+      })
+      .catch(() => { if (active) setAiProvenance(null); });
+    return () => { active = false; };
+  }, [catalogImageId]);
+
+  const aiSuggestedTags = useMemo(() => {
+    if (!aiProvenance) return [];
+    const speciesChips = aiProvenance.species
+      .filter((item) => item.reviewState !== 'rejected')
+      .map((item) => ({ id: item.id, label: item.commonName || item.scientificName, kind: 'species' as const }));
+    const aiTagChips = aiProvenance.aiTags
+      .filter((item) => item.reviewState !== 'rejected')
+      .map((item) => ({ id: item.id, label: item.name, kind: 'ai' as const }));
+    return [...speciesChips, ...aiTagChips];
+  }, [aiProvenance]);
+
+  const handleRejectAiSuggestion = async (item: { id: number; kind: 'ai' | 'species' }) => {
+    setAiProvenance((current) => {
+      if (!current) return current;
+      return item.kind === 'species'
+        ? { ...current, species: current.species.filter((s) => s.id !== item.id) }
+        : { ...current, aiTags: current.aiTags.filter((t) => t.id !== item.id) };
+    });
+    try {
+      await invoke(item.kind === 'species' ? Invokes.ReviewSpecies : Invokes.ReviewAiTag, {
+        id: item.id,
+        reviewState: 'rejected',
+      });
+    } catch (err) {
+      console.error('Failed to reject AI suggestion:', err);
+      if (catalogImageId) {
+        invoke(Invokes.GetImageProvenance, { imageId: catalogImageId })
+          .then((evidence: any) => setAiProvenance({ aiTags: evidence.aiTags ?? [], species: evidence.species ?? [] }))
+          .catch(() => {});
+      }
+    }
+  };
 
   const targetPaths = multiSelectedPaths?.length > 0 ? multiSelectedPaths : selectedImage ? [selectedImage.path] : [];
   const getPathsToUpdate = () => {
@@ -466,6 +522,38 @@ export default function MetadataPanel() {
                 </div>
               </div>
             </div>
+
+            {aiSuggestedTags.length > 0 && (
+              <div>
+                <Text variant={TextVariants.heading} className="mb-3">
+                  {t('editor.metadata.organization.aiSuggested')}
+                </Text>
+                <div className="flex flex-wrap gap-1.5">
+                  <AnimatePresence>
+                    {aiSuggestedTags.map((item) => (
+                      <motion.button
+                        key={`${item.kind}-${item.id}`}
+                        layout
+                        initial={{ opacity: 0, scale: 0.8 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.8 }}
+                        onClick={() => void handleRejectAiSuggestion(item)}
+                        data-tooltip={t('editor.metadata.organization.removeAiSuggestion')}
+                        className={clsx(
+                          'group flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium cursor-pointer transition-colors',
+                          item.kind === 'species'
+                            ? 'bg-cyan-400/15 text-cyan-200 hover:bg-cyan-400/25'
+                            : 'bg-accent/15 text-accent hover:bg-accent/25',
+                        )}
+                      >
+                        {item.label}
+                        <X size={10} className="opacity-50 group-hover:opacity-100" />
+                      </motion.button>
+                    ))}
+                  </AnimatePresence>
+                </div>
+              </div>
+            )}
 
             <div>
               <Text variant={TextVariants.heading} className="mb-3">

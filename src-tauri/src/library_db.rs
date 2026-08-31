@@ -153,6 +153,7 @@ pub struct CullSessionDecision {
     pub final_status: String,
     pub quality_score: f64,
     pub reason: String,
+    pub decision_factors: Vec<crate::auto_cull::CullDecisionFactor>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -196,6 +197,7 @@ pub struct ImageProvenance {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageAiTagDetail {
+    pub id: i64,
     pub name: String,
     pub confidence: f64,
     pub review_state: String,
@@ -205,6 +207,7 @@ pub struct ImageAiTagDetail {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct SpeciesDetail {
+    pub id: i64,
     pub scientific_name: String,
     pub common_name: Option<String>,
     pub taxon_rank: Option<String>,
@@ -514,7 +517,7 @@ pub(crate) fn replace_ai_tags_for_model(
     tx.commit().map_err(|error| error.to_string())
 }
 
-fn open_connection(path: &Path) -> Result<Connection, String> {
+pub(crate) fn open_connection(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
     conn.busy_timeout(Duration::from_secs(30))
         .map_err(|e| e.to_string())?;
@@ -848,6 +851,16 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         );
         CREATE INDEX IF NOT EXISTS idx_species_classifications_image ON species_classifications(image_id, review_state);
         CREATE INDEX IF NOT EXISTS idx_species_classifications_name ON species_classifications(scientific_name, common_name);
+
+        -- One row per image: caches the on-demand Gemini vision critique so a
+        -- photo is never re-billed on repeat views. response_json is the raw
+        -- structured JSON Gemini returned (overallSummary + regions).
+        CREATE TABLE IF NOT EXISTS gemini_critiques (
+          image_id INTEGER PRIMARY KEY REFERENCES images(id) ON DELETE CASCADE,
+          model TEXT NOT NULL,
+          response_json TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
 
         CREATE TABLE IF NOT EXISTS image_derivatives (
           id INTEGER PRIMARY KEY,
@@ -2011,6 +2024,66 @@ fn default_library_dir(app_handle: &AppHandle, library_id: &str) -> Result<PathB
         .app_data_dir()
         .map_err(|e| e.to_string())?;
     Ok(data_dir.join("libraries").join(library_id))
+}
+
+/// Culling a plain folder (no catalog open) still needs somewhere to persist
+/// cull sessions/decisions so "Culling History" isn't silently a no-op for
+/// that flow. If no catalog is already active, this opens (creating on first
+/// use) a small per-folder database under the app data dir - keyed
+/// deterministically by folder path so repeat cull runs on the same folder
+/// accumulate into the same history - and adopts it as the active library
+/// for the duration of the session. It never scans or imports the folder's
+/// images into this database; it's purely a home for cull_sessions.
+pub(crate) fn ensure_cull_history_library(
+    app_handle: &AppHandle,
+    state: &tauri::State<'_, crate::AppState>,
+    folder_path: &str,
+) -> Result<PathBuf, String> {
+    if let Some(existing) = state.active_library_path.lock().unwrap().clone() {
+        return Ok(existing);
+    }
+
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    folder_path.hash(&mut hasher);
+    let library_id = format!("folder-cull-{:x}", hasher.finish());
+
+    let dir = default_library_dir(app_handle, &library_id)?;
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let db_path = dir.join("rapidraw-library.db");
+
+    let conn = open_connection(&db_path)?;
+    migrate(&conn)?;
+
+    let has_library_row: i64 = conn
+        .query_row("SELECT COUNT(*) FROM libraries", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    if has_library_row == 0 {
+        let name = Path::new(folder_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Folder culling history");
+        let library_id_value = Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO libraries(id, name, created_at, updated_at) VALUES(?1, ?2, ?3, ?3)",
+            params![library_id_value, name, now_secs()],
+        )
+        .map_err(|e| e.to_string())?;
+
+        // record_cull_session looks up a collection_roots row whose
+        // absolute_path the culled scope path starts with, and silently
+        // records nothing at all if none matches - without this row, every
+        // session for a plain folder would vanish into thin air.
+        conn.execute(
+            "INSERT INTO collection_roots(library_id, label, absolute_path, is_available) VALUES(?1, ?2, ?3, 1)",
+            params![library_id_value, name, folder_path],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    *state.active_library_path.lock().unwrap() = Some(db_path.clone());
+    Ok(db_path)
 }
 
 /// Creates a catalog at an explicit database path without requiring a Tauri
@@ -3227,6 +3300,39 @@ pub fn start_catalog_scan(
                     None,
                 );
                 let _ = app_for_task.emit("catalog-scan-complete", scan);
+
+                // Genre/subject tags (RAM++, plus the BioCLIP species pass
+                // that rides along in the same job) were previously
+                // catalog-only-manual: a user had to notice and click the
+                // "RAM++ tagging" button themselves after every scan, so a
+                // freshly-scanned library always started out completely
+                // untagged. Reuse the exact same job this button already
+                // starts, so newly-added photos get tagged without a
+                // separate manual step - still governed by the existing
+                // "Enable AI tagging" setting for anyone who'd rather opt
+                // out (e.g. no GPU, or prefers to tag on demand).
+                if settings.enable_ai_tagging.unwrap_or(false) {
+                    let tagging_app_handle = app_for_task.clone();
+                    let tagging_state = tagging_app_handle.state::<crate::AppState>();
+                    if let Err(error) =
+                        crate::tagging::start_catalog_ram_plus_tagging(tagging_app_handle.clone(), tagging_state)
+                    {
+                        eprintln!("Failed to auto-start RAM++ tagging after catalog scan: {error}");
+                    }
+
+                    // Face detection has its own model (YuNet/SFace) which may not be
+                    // installed yet, so this fails open rather than surfacing an error
+                    // for users who haven't downloaded it.
+                    let face_app_handle = app_for_task.clone();
+                    let face_state = face_app_handle.state::<crate::AppState>();
+                    if let Err(error) = crate::face_detection::start_face_detection(
+                        Some(root_id),
+                        face_app_handle.clone(),
+                        face_state,
+                    ) {
+                        eprintln!("Failed to auto-start face detection after catalog scan: {error}");
+                    }
+                }
             }
             Err(err) => {
                 let state = if err == "Catalog scan cancelled" {
@@ -5221,6 +5327,27 @@ pub fn list_cull_sessions(
         .map_err(|error| error.to_string())
 }
 
+/// Like `list_cull_sessions`, but for checking a specific folder from the
+/// culling settings screen *before* any plan has been run in this process.
+/// A plain (non-catalog) folder's history only lives in the lightweight
+/// per-folder database `ensure_cull_history_library` creates as a side
+/// effect of actually running a cull - without opening it here too, this
+/// check would only ever succeed if a plan had already been planned earlier
+/// in the same app session, making history invisible after every restart.
+/// A no-op when a real catalog is already open.
+#[tauri::command]
+pub fn list_cull_sessions_for_folder(
+    folder_path: String,
+    app_handle: AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<CullSessionSummary>, String> {
+    if let Err(error) = ensure_cull_history_library(&app_handle, &state, &folder_path) {
+        eprintln!("Failed to open culling-history database for {folder_path}: {error}");
+        return Ok(Vec::new());
+    }
+    list_cull_sessions(state)
+}
+
 #[tauri::command]
 pub fn list_cull_session_decisions(
     session_id: i64,
@@ -5228,10 +5355,11 @@ pub fn list_cull_session_decisions(
 ) -> Result<Vec<CullSessionDecision>, String> {
     let connection = open_connection(&active_library_path(&state)?)?;
     let mut statement = connection
-        .prepare("SELECT id, representative_path, proposed_status, final_status, quality_score, reason FROM cull_decisions WHERE session_id = ?1 ORDER BY quality_score DESC")
+        .prepare("SELECT id, representative_path, proposed_status, final_status, quality_score, reason, factors_json FROM cull_decisions WHERE session_id = ?1 ORDER BY quality_score DESC")
         .map_err(|error| error.to_string())?;
     statement
         .query_map([session_id], |row| {
+            let factors_json: String = row.get(6)?;
             Ok(CullSessionDecision {
                 id: row.get(0)?,
                 representative_path: row.get(1)?,
@@ -5239,11 +5367,33 @@ pub fn list_cull_session_decisions(
                 final_status: row.get(3)?,
                 quality_score: row.get(4)?,
                 reason: row.get(5)?,
+                decision_factors: serde_json::from_str(&factors_json).unwrap_or_default(),
             })
         })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+/// Deletes one or more cull sessions and, via ON DELETE CASCADE, their
+/// decisions. This only affects the currently active library's database -
+/// the same one list_cull_sessions reads from - so it can't reach across to
+/// unrelated folders' history.
+#[tauri::command]
+pub fn delete_cull_sessions(
+    session_ids: Vec<i64>,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    if session_ids.is_empty() {
+        return Ok(());
+    }
+    let connection = open_connection(&active_library_path(&state)?)?;
+    let placeholders = session_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!("DELETE FROM cull_sessions WHERE id IN ({placeholders})");
+    connection
+        .execute(&sql, rusqlite::params_from_iter(session_ids.iter()))
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -6124,7 +6274,7 @@ pub fn get_image_provenance(
 
     let mut ai_tag_stmt = conn
         .prepare(
-            "SELECT t.name, iat.confidence, iat.review_state, iat.model_id
+            "SELECT iat.rowid, t.name, iat.confidence, iat.review_state, iat.model_id
              FROM image_ai_tags iat
              JOIN tags t ON t.id = iat.tag_id
              WHERE iat.image_id = ?1
@@ -6135,10 +6285,11 @@ pub fn get_image_provenance(
     let ai_tags = ai_tag_stmt
         .query_map([image_id], |row| {
             Ok(ImageAiTagDetail {
-                name: row.get(0)?,
-                confidence: row.get(1)?,
-                review_state: row.get(2)?,
-                model_id: row.get(3)?,
+                id: row.get(0)?,
+                name: row.get(1)?,
+                confidence: row.get(2)?,
+                review_state: row.get(3)?,
+                model_id: row.get(4)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -6149,7 +6300,7 @@ pub fn get_image_provenance(
 
     let mut species_stmt = conn
         .prepare(
-            "SELECT scientific_name, common_name, taxon_rank, confidence, review_state, model_id
+            "SELECT id, scientific_name, common_name, taxon_rank, confidence, review_state, model_id
              FROM species_classifications
              WHERE image_id = ?1
              ORDER BY confidence DESC",
@@ -6159,12 +6310,13 @@ pub fn get_image_provenance(
     let species = species_stmt
         .query_map([image_id], |row| {
             Ok(SpeciesDetail {
-                scientific_name: row.get(0)?,
-                common_name: row.get(1)?,
-                taxon_rank: row.get(2)?,
-                confidence: row.get(3)?,
-                review_state: row.get(4)?,
-                model_id: row.get(5)?,
+                id: row.get(0)?,
+                scientific_name: row.get(1)?,
+                common_name: row.get(2)?,
+                taxon_rank: row.get(3)?,
+                confidence: row.get(4)?,
+                review_state: row.get(5)?,
+                model_id: row.get(6)?,
             })
         })
         .map_err(|e| e.to_string())?

@@ -4,9 +4,81 @@ import { exit } from '@tauri-apps/plugin-process';
 
 import { useProcessStore } from '../store/useProcessStore';
 import { useEditorStore } from '../store/useEditorStore';
-import { Invokes } from '../components/ui/AppProperties';
+import { useLibraryStore } from '../store/useLibraryStore';
+import { useSettingsStore } from '../store/useSettingsStore';
+import { ImageFile, Invokes, LibraryViewMode } from '../components/ui/AppProperties';
 import { ExportSettings, Status } from '../components/ui/ExportImportProperties';
 import { debouncedSave } from './useEditorActions';
+
+function parentFolderOf(filePath: string): string {
+  const separator = filePath.includes('/') ? '/' : '\\';
+  return filePath.substring(0, filePath.lastIndexOf(separator));
+}
+
+/**
+ * A file opened via "Open with RapidRAW" or the external-editor protocol
+ * selects an image directly, without going through the normal tree-click
+ * navigation that would otherwise set currentFolderPath/librarySource to
+ * match it - so Sources is left pointed at whatever catalog or pinned folder
+ * was last browsed. This resolves the image's real folder before opening it:
+ * if it falls under an already-open catalog's root, browse that catalog
+ * folder; otherwise treat it as an ad-hoc filesystem folder (surfaced by
+ * FolderTree's "Current Folder" section) the same way "Browse folder..." does.
+ */
+async function attributeSourceForFile(filePath: string): Promise<void> {
+  const folderPath = parentFolderOf(filePath);
+  const { librarySource, catalogRoots } = useLibraryStore.getState();
+
+  if (librarySource.type === 'catalog') {
+    const matchingRoot = catalogRoots.find(
+      (root) => folderPath === root.absolutePath || folderPath.startsWith(`${root.absolutePath}/`) || folderPath.startsWith(`${root.absolutePath}\\`),
+    );
+    if (matchingRoot) {
+      const relativePath =
+        folderPath === matchingRoot.absolutePath
+          ? '.'
+          : folderPath.slice(matchingRoot.absolutePath.length + 1).replace(/\\/g, '/');
+      useLibraryStore.getState().setLibrary({ isViewLoading: true });
+      try {
+        const recursive = useSettingsStore.getState().appSettings?.libraryViewMode === LibraryViewMode.Recursive;
+        const files = await invoke<ImageFile[]>(Invokes.ListCatalogImages, {
+          rootId: matchingRoot.id,
+          recursive,
+          folderPath: relativePath,
+        });
+        const initialRatings: Record<string, number> = {};
+        files.forEach((file) => { initialRatings[file.path] = file.rating || 0; });
+        useLibraryStore.getState().setLibrary({
+          rootPaths: [matchingRoot.absolutePath],
+          currentFolderPath: `LibraryFolder:${matchingRoot.id}:${relativePath}`,
+          activeAlbumId: null,
+          activeCatalogRootId: matchingRoot.id,
+          imageList: files,
+          imageRatings: initialRatings,
+          multiSelectedPaths: [],
+          libraryActivePath: null,
+        });
+      } catch (error) {
+        console.error('Failed to attribute catalog folder for opened file:', error);
+      } finally {
+        useLibraryStore.getState().setLibrary({ isViewLoading: false });
+      }
+      return;
+    }
+  }
+
+  // Not part of the open catalog (or no catalog open) - fall back to a plain
+  // filesystem folder view, same as browsing a non-library folder.
+  useLibraryStore.getState().setLibrary({ currentFolderPath: folderPath });
+  try {
+    const recursive = useSettingsStore.getState().appSettings?.libraryViewMode === LibraryViewMode.Recursive;
+    const command = recursive ? Invokes.ListImagesRecursive : Invokes.ListImagesInDir;
+    const files = await invoke<ImageFile[]>(command, { path: folderPath });
+    useLibraryStore.getState().setLibrary({ imageList: files });
+  } catch (error) {
+    console.error('Failed to attribute filesystem folder for opened file:', error);
+  }
+}
 
 /**
  * Handles files handed to the app from outside (OS "open with" and the
@@ -28,7 +100,9 @@ export function useExternalEditSession(handleImageSelect: (path: string) => void
   useEffect(() => {
     if (!initialFileToOpen) return;
     useProcessStore.getState().setProcess({ initialFileToOpen: null });
-    handleImageSelectRef.current(initialFileToOpen);
+    void attributeSourceForFile(initialFileToOpen).then(() => {
+      handleImageSelectRef.current(initialFileToOpen);
+    });
   }, [initialFileToOpen]);
 
   useEffect(() => {

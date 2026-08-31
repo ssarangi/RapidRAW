@@ -43,6 +43,15 @@ impl Default for CullingSettings {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub struct BlurRegion {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 #[derive(Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageAnalysisResult {
@@ -56,6 +65,10 @@ pub struct ImageAnalysisResult {
     pub exposure_metric: f64,
     pub width: u32,
     pub height: u32,
+    /// Normalized (0-1) bounding box of the softest-focus region with enough
+    /// texture to judge sharpness on, for pointing a "here's the blurry
+    /// part" overlay at something real - see `find_blurriest_region`.
+    pub blurry_region: Option<BlurRegion>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -146,6 +159,62 @@ fn calculate_laplacian_variance(image: &GrayImage) -> f64 {
         / laplacian_values.len() as f64
 }
 
+/// Finds the region most likely responsible for a "blurry" verdict: divides
+/// the image into a coarse grid, scores each cell's local sharpness
+/// (Laplacian variance) and texture (intensity std-dev), and returns the
+/// softest cell among those with enough texture to judge focus on at all.
+/// A flat sky or wall always has near-zero Laplacian variance without being
+/// an out-of-focus subject, so uniformly flat cells are excluded rather than
+/// reported as "the blurry part." Returns `None` for images too small to
+/// grid meaningfully, or where every cell is too flat to judge.
+fn find_blurriest_region(image: &GrayImage) -> Option<BlurRegion> {
+    const GRID: u32 = 4;
+    const MIN_TEXTURE_STDDEV: f64 = 4.0;
+
+    let (width, height) = image.dimensions();
+    if width < GRID * 4 || height < GRID * 4 {
+        return None;
+    }
+
+    let cell_w = width / GRID;
+    let cell_h = height / GRID;
+    let mut softest: Option<(f64, u32, u32)> = None;
+
+    for row in 0..GRID {
+        for col in 0..GRID {
+            let x = col * cell_w;
+            let y = row * cell_h;
+            let w = if col == GRID - 1 { width - x } else { cell_w };
+            let h = if row == GRID - 1 { height - y } else { cell_h };
+            let cell = imageops::crop_imm(image, x, y, w, h).to_image();
+
+            let pixels: Vec<f64> = cell.pixels().map(|p| p[0] as f64).collect();
+            if pixels.is_empty() {
+                continue;
+            }
+            let mean = pixels.iter().sum::<f64>() / pixels.len() as f64;
+            let variance =
+                pixels.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / pixels.len() as f64;
+            if variance.sqrt() < MIN_TEXTURE_STDDEV {
+                continue;
+            }
+
+            let sharpness = calculate_laplacian_variance(&cell);
+            let is_softer = softest.map(|(best, _, _)| sharpness < best).unwrap_or(true);
+            if is_softer {
+                softest = Some((sharpness, col, row));
+            }
+        }
+    }
+
+    softest.map(|(_, col, row)| BlurRegion {
+        x: (col * cell_w) as f64 / width as f64,
+        y: (row * cell_h) as f64 / height as f64,
+        width: cell_w as f64 / width as f64,
+        height: cell_h as f64 / height as f64,
+    })
+}
+
 /// Laplacian variance restricted to pixels the subject mask marks as
 /// foreground, rather than a fixed center crop. `mask` must have the same
 /// dimensions as `image` (caller runs the mask model on the same thumbnail
@@ -190,6 +259,45 @@ fn calculate_masked_laplacian_variance(image: &GrayImage, mask: &GrayImage) -> O
             .sum::<f64>()
             / laplacian_values.len() as f64,
     )
+}
+
+/// Subject-aware exposure: measures clipping only within the detected
+/// foreground, so a legitimately dark background (very common in wildlife/bird
+/// photography - shadowed foliage, night perches) doesn't tank the score for a
+/// well-exposed subject. Falls back to None (whole-frame metric) when the mask
+/// is too small/ambiguous to trust, mirroring calculate_masked_laplacian_variance.
+fn calculate_masked_exposure_metric(image: &GrayImage, mask: &GrayImage) -> Option<f64> {
+    let (width, height) = image.dimensions();
+    if mask.dimensions() != (width, height) {
+        return None;
+    }
+
+    let clip_threshold_dark = 5u8;
+    let clip_threshold_bright = 250u8;
+    let mut subject_pixels = 0usize;
+    let mut dark_pixels = 0usize;
+    let mut bright_pixels = 0usize;
+    for (pixel, mask_pixel) in image.pixels().zip(mask.pixels()) {
+        if mask_pixel[0] < SUBJECT_MASK_THRESHOLD {
+            continue;
+        }
+        subject_pixels += 1;
+        let value = pixel[0];
+        if value < clip_threshold_dark {
+            dark_pixels += 1;
+        } else if value >= clip_threshold_bright {
+            bright_pixels += 1;
+        }
+    }
+
+    if subject_pixels < MIN_SUBJECT_PIXELS {
+        return None;
+    }
+
+    let dark_clip_ratio = dark_pixels as f64 / subject_pixels as f64;
+    let bright_clip_ratio = bright_pixels as f64 / subject_pixels as f64;
+    let penalty = (dark_clip_ratio * 5.0) + (bright_clip_ratio * 5.0);
+    Some((1.0f64 - penalty).max(0.0))
 }
 
 /// Returns a conservative composition cue derived from the existing saliency
@@ -295,7 +403,8 @@ pub(crate) fn analyze_image(
     let gray_thumbnail = thumbnail.to_luma8();
 
     let sharpness_metric = calculate_laplacian_variance(&gray_thumbnail);
-    let exposure_metric = calculate_exposure_metric(&gray_thumbnail);
+    let whole_frame_exposure_metric = calculate_exposure_metric(&gray_thumbnail);
+    let blurry_region = find_blurriest_region(&gray_thumbnail);
 
     let (thumb_w, thumb_h) = gray_thumbnail.dimensions();
     let center_crop = imageops::crop_imm(
@@ -319,11 +428,19 @@ pub(crate) fn analyze_image(
         let mask = run_u2netp_model(&thumbnail, session).ok()?;
         let focus = calculate_masked_laplacian_variance(&gray_thumbnail, &mask)?;
         let (composition, edge_contact) = calculate_subject_composition_metrics(&mask)?;
-        Some((focus, composition, edge_contact))
+        let exposure = calculate_masked_exposure_metric(&gray_thumbnail, &mask);
+        Some((focus, composition, edge_contact, exposure))
     });
     let subject_focus_metric = subject_metrics.map(|metrics| metrics.0);
     let subject_composition_metric = subject_metrics.map(|metrics| metrics.1);
     let subject_edge_contact_ratio = subject_metrics.map(|metrics| metrics.2);
+    // Prefer exposure measured within the detected subject over the
+    // whole-frame reading, so a legitimately dark/bright background doesn't
+    // tank the score (or the "why this decision" text) for a well-exposed
+    // subject. Falls back to the whole-frame metric when there's no usable mask.
+    let exposure_metric = subject_metrics
+        .and_then(|metrics| metrics.3)
+        .unwrap_or(whole_frame_exposure_metric);
 
     let normalized_sharpness = ((sharpness_metric + 1.0).log10() / 3.5).min(1.0);
     let focus_metric_for_score = subject_focus_metric.unwrap_or(center_focus_metric);
@@ -354,6 +471,7 @@ pub(crate) fn analyze_image(
             exposure_metric,
             width,
             height,
+            blurry_region,
         },
     })
 }

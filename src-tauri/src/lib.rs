@@ -19,11 +19,13 @@ mod culling;
 mod denoising;
 mod exif_processing;
 mod export_processing;
+mod eye_state;
 pub mod face_detection;
 pub mod face_model_registry;
 mod file_management;
 mod focus_stacking;
 mod formats;
+mod gemini_critique;
 mod gpu_processing;
 mod hdr_deghosting;
 mod image_loader;
@@ -105,7 +107,7 @@ use crate::cache_utils::{
 use crate::file_management::{parse_virtual_path, read_file_mapped};
 use crate::formats::is_raw_file;
 use crate::hdr_deghosting::{align_hdr_frames, assert_uniform_dimensions, load_hdr_frames};
-use crate::image_loader::{composite_patches_on_image, load_and_composite};
+use crate::image_loader::composite_patches_on_image;
 use crate::image_processing::{
     Crop, GeometryParams, RenderRequest, apply_coarse_rotation, apply_cpu_default_raw_processing,
     apply_flip, apply_geometry_warp, apply_linear_to_srgb, downscale_f32_image,
@@ -1570,33 +1572,59 @@ async fn generate_preview_for_path(
         let is_raw = is_raw_file(&source_path_str);
         let settings = load_settings(app_handle.clone()).unwrap_or_default();
 
-        let base_image = match read_file_mapped(&source_path) {
-            Ok(mmap) => load_and_composite(
-                &mmap,
-                &source_path_str,
-                &js_adjustments,
-                false,
-                &settings,
-                None,
-            )
-            .map_err(|e| e.to_string())?,
-            Err(e) => {
-                log::warn!(
-                    "Failed to memory-map file '{}': {}. Falling back to standard read.",
-                    source_path_str,
-                    e
-                );
-                let bytes = fs::read(&source_path).map_err(|io_err| io_err.to_string())?;
-                load_and_composite(
-                    &bytes,
-                    &source_path_str,
-                    &js_adjustments,
-                    false,
-                    &settings,
-                    None,
-                )
-                .map_err(|e| e.to_string())?
-            }
+        // Culling/inspection clicks re-open the same handful of images
+        // repeatedly in quick succession; without this cache every single
+        // one paid for a full from-scratch RAW demosaic (the same cost the
+        // main editor's load_image avoids via this exact cache).
+        let cached_decode = state
+            .decoded_image_cache
+            .lock()
+            .unwrap()
+            .get(&source_path_str);
+
+        let base_image = if let Some((cached_img, _cached_exif)) = cached_decode {
+            composite_patches_on_image(&cached_img, &js_adjustments).map_err(|e| e.to_string())?
+        } else {
+            let (decoded_image, exif_data) = match read_file_mapped(&source_path) {
+                Ok(mmap) => {
+                    let decoded = crate::image_loader::load_base_image_from_bytes(
+                        &mmap,
+                        &source_path_str,
+                        false,
+                        &settings,
+                        None,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    let exif = crate::exif_processing::read_exif_data(&source_path_str, &mmap);
+                    (decoded, exif)
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to memory-map file '{}': {}. Falling back to standard read.",
+                        source_path_str,
+                        e
+                    );
+                    let bytes = fs::read(&source_path).map_err(|io_err| io_err.to_string())?;
+                    let decoded = crate::image_loader::load_base_image_from_bytes(
+                        &bytes,
+                        &source_path_str,
+                        false,
+                        &settings,
+                        None,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    let exif = crate::exif_processing::read_exif_data(&source_path_str, &bytes);
+                    (decoded, exif)
+                }
+            };
+
+            let arc_image = std::sync::Arc::new(decoded_image);
+            state.decoded_image_cache.lock().unwrap().insert(
+                source_path_str.clone(),
+                arc_image.clone(),
+                exif_data,
+            );
+            composite_patches_on_image(&arc_image, &js_adjustments).map_err(|e| e.to_string())?
         };
 
         let (transformed_image, unscaled_crop_offset) =
@@ -2379,6 +2407,8 @@ pub fn run() {
             ai_commands::generate_ai_depth_mask,
             ai_commands::check_ai_connector_status,
             ai_commands::test_ai_connector_connection,
+            ai_commands::test_gemini_api_key,
+            gemini_critique::get_or_generate_gemini_critique,
             ai_commands::generate_full_image_depth_map,
             inpainting::invoke_generative_replace_with_mask_def,
             inpainting::generate_manual_cleanup_patch,
@@ -2467,7 +2497,9 @@ pub fn run() {
             library_db::save_smart_collection,
             library_db::delete_smart_collection,
             library_db::list_cull_sessions,
+            library_db::list_cull_sessions_for_folder,
             library_db::list_cull_session_decisions,
+            library_db::delete_cull_sessions,
             library_db::update_cull_session_decision,
             library_db::list_catalog_faces,
             library_db::list_catalog_face_review_items_for_path,

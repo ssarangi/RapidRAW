@@ -219,7 +219,7 @@ export interface AutoCullModalState {
   isOpen: boolean;
   folderPath: string | null;
   stage: AutoCullStage;
-  progress: { current: number; total: number; stage: string } | null;
+  progress: { current: number; total: number; stage: string; currentItem?: string } | null;
   plan: AutoCullPlan | null;
   result: AutoCullResult | null;
   error: string | null;
@@ -282,7 +282,7 @@ interface UIState {
   cullingModalState: CullingModalState;
   autoCullModalState: AutoCullModalState;
   cullWorkspaceFolderPath: string | null;
-  cullWorkspaceProgress: { current: number; total: number; stage: string } | null;
+  cullWorkspaceProgress: { current: number; total: number; stage: string; currentItem?: string } | null;
   collageModalState: CollageModalState;
   libraryDisplayMode: LibraryDisplayMode;
 

@@ -106,6 +106,8 @@ export enum Invokes {
   SaveFocusStack = 'save_focus_stack',
   MergeHdr = 'merge_hdr',
   TestAIConnectorConnection = 'test_ai_connector_connection',
+  TestGeminiApiKey = 'test_gemini_api_key',
+  GetOrGenerateGeminiCritique = 'get_or_generate_gemini_critique',
   UpdateWgpuTransform = 'update_wgpu_transform',
   UpdateExifFields = 'update_exif_fields',
   FetchCommunityPresets = 'fetch_community_presets',
@@ -121,7 +123,9 @@ export enum Invokes {
   SaveSmartCollection = 'save_smart_collection',
   DeleteSmartCollection = 'delete_smart_collection',
   ListCullSessions = 'list_cull_sessions',
+  ListCullSessionsForFolder = 'list_cull_sessions_for_folder',
   ListCullSessionDecisions = 'list_cull_session_decisions',
+  DeleteCullSessions = 'delete_cull_sessions',
   UpdateCullSessionDecision = 'update_cull_session_decision',
   ListCatalogFaces = 'list_catalog_faces',
   ListCatalogFaceReviewItemsForPath = 'list_catalog_face_review_items_for_path',
@@ -146,6 +150,7 @@ export enum Invokes {
   ListSuggestedAiTags = 'list_suggested_ai_tags',
   ReviewAiTag = 'review_ai_tag',
   ReviewAiTags = 'review_ai_tags',
+  ReviewSpecies = 'review_species',
   GenerateAllCommunityPreviews = 'generate_all_community_previews',
   SaveCommunityPreset = 'save_community_preset',
   SaveTempFile = 'save_temp_file',
@@ -251,6 +256,7 @@ export type GroupingMode = 'off' | GroupPreference;
 export interface AppSettings {
   aiConnectorAddress?: string;
   aiProvider?: string;
+  geminiApiKey?: string;
   decorations?: any;
   editorPreviewResolution?: number;
   enableZoomHifi?: boolean;
@@ -662,6 +668,28 @@ export interface CullDecisionFactor {
   impact: 'reject' | 'supporting' | 'context';
 }
 
+export interface GeminiCritiqueRegion {
+  label: string;
+  positive: boolean;
+  note: string;
+  /** [x, y, width, height], each normalized 0-1 with origin at top-left. */
+  box: [number, number, number, number];
+}
+
+export interface GeminiCritique {
+  imageId: number;
+  overallSummary: string;
+  regions: GeminiCritiqueRegion[];
+  cached: boolean;
+}
+
+export interface BlurRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface AutoCullPlanItem {
   representativePath: string;
   backingPaths: string[];
@@ -669,6 +697,7 @@ export interface AutoCullPlanItem {
   reason: string;
   qualityScore: number;
   decisionFactors: CullDecisionFactor[];
+  blurryRegion?: BlurRegion | null;
   hasConflict: boolean;
 }
 
@@ -716,6 +745,7 @@ export interface CullSessionDecision {
   finalStatus: 'pending' | 'keep' | 'reject' | 'skipped';
   qualityScore: number;
   reason: string;
+  decisionFactors: CullDecisionFactor[];
 }
 
 export interface KeybindHandler {

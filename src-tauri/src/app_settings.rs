@@ -64,6 +64,14 @@ pub struct LastFolderState {
     pub active_album_id: Option<String>,
     #[serde(default)]
     pub expanded_album_groups: Vec<String>,
+    /// The frontend has always sent this alongside current_folder_path for a
+    /// catalog-sourced folder, but this struct never had a matching field -
+    /// serde silently drops unknown JSON keys by default, so this value was
+    /// discarded on every settings save/reload. Continue Session for a
+    /// catalog subfolder degraded silently (falls back to "no folder", not
+    /// an error) rather than actually resuming where you left off.
+    #[serde(default)]
+    pub active_catalog_root_id: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -421,6 +429,13 @@ pub struct AppSettings {
     pub decorations: Option<bool>,
     #[serde(alias = "comfyuiAddress")]
     pub ai_connector_address: Option<String>,
+    /// User-supplied Gemini API key for the optional vision-critique pass on
+    /// culling finalists (rich, natural-language critique beyond the local
+    /// sharpness/duplicate/eye-state signals). Stored as plain text in the
+    /// local settings file, same as every other setting here - there is no
+    /// OS keychain integration in this app today.
+    #[serde(default)]
+    pub gemini_api_key: Option<String>,
     pub last_folder_state: Option<LastFolderState>,
     pub ui_visibility: Option<Value>,
     pub enable_ai_tagging: Option<bool>,
@@ -547,6 +562,7 @@ impl Default for AppSettings {
             font_family: None,
             decorations: Some(false),
             ai_connector_address: None,
+            gemini_api_key: None,
             last_folder_state: None,
             ui_visibility: None,
             enable_ai_tagging: Some(false),

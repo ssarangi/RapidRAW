@@ -229,7 +229,31 @@ export const useAppInitialization = ({
                 catalogRoots,
               });
             })
-            .catch((err) => console.error('Failed to reopen active library:', err));
+            .catch((err) => {
+              // The persisted path is stale (e.g. that library was deleted
+              // and a new one created) - previously this just logged and
+              // left activeLibraryDbPath pointing at the dead file, so
+              // every future launch silently failed to reopen it the same
+              // way, and "Continue Session" (which assumes a library is
+              // already open) would fail too, with a generic "folder may
+              // have been moved" toast that had nothing to do with the
+              // real cause. Clear the stale reference - and any
+              // last-session folder path that pointed into that catalog -
+              // so the app falls back to a clean, working state instead of
+              // repeating the same failure forever.
+              console.error('Failed to reopen active library, clearing stale reference:', err);
+              const currentSettings = useSettingsStore.getState().appSettings || settings;
+              const staleFolderPath = currentSettings?.lastFolderState?.currentFolderPath;
+              const pointsIntoDeadCatalog =
+                typeof staleFolderPath === 'string' &&
+                (staleFolderPath.startsWith('Library:') || staleFolderPath.startsWith('LibraryFolder:'));
+              handleSettingsChange({
+                ...currentSettings,
+                activeLibraryDbPath: null,
+                ...(pointsIntoDeadCatalog ? { lastFolderState: null } : {}),
+              });
+              setLibrary({ librarySource: { type: 'filesystem' }, catalogRoots: [] });
+            });
         }
 
         const activePinnedFolders = settings?.pinnedFolders || [];

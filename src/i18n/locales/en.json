@@ -656,6 +656,8 @@
       },
       "organization": {
         "addTagPlaceholder": "Add tag...",
+        "aiSuggested": "AI Suggested",
+        "removeAiSuggestion": "Remove suggestion (won't show again)",
         "colorLabel": "Color Label",
         "noTags": "No tags",
         "none": "None",
@@ -914,6 +916,7 @@
       "searchPlaceholder": "Search folders...",
       "sections": {
         "albums": "Albums",
+        "currentFolder": "Current Folder",
         "folders": "Folders",
         "pinned": "Pinned"
       },
@@ -1781,7 +1784,7 @@
       "addShortcutTooltip": "Add Shortcut",
       "addShortcutsPlaceholder": "Add shortcuts (comma separated)...",
       "aiTagging": "AI Tagging",
-      "aiTaggingDesc": "Enables automatic image tagging using an AI (CLIP) model. This will download an additional model and impact performance while browsing folders. Tags are used for searching a folder.",
+      "aiTaggingDesc": "Enables automatic image tagging. When browsing a plain folder, this uses a CLIP model. For a catalog library, this also automatically runs RAM++ tagging (plus BioCLIP species suggestions) and face detection right after a folder scan completes, so newly-added photos are tagged and their faces indexed without a separate manual step. This will download additional models and impact performance. Tags are used for searching and for genre detection during culling.",
       "amount": "Amount",
       "automaticAiTagging": "Automatic AI Tagging",
       "clearAiTagsButton": "Clear",

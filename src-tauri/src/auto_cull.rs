@@ -2,7 +2,7 @@ use crate::ai_processing::get_or_init_ai_models;
 use crate::app_settings::load_settings;
 use crate::app_state::AppState;
 use crate::culling::{
-    CullingSettings, ImageAnalysisData, ImageAnalysisResult, analyze_image,
+    CullingSettings, CullingSuggestions, ImageAnalysisData, ImageAnalysisResult, analyze_image,
     build_culling_suggestions,
 };
 use crate::file_management::{AutoCullCandidate, resolve_auto_cull_candidates};
@@ -15,12 +15,26 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tauri::{AppHandle, Emitter, Manager};
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 struct AutoCullProgress {
     current: usize,
     total: usize,
     stage: String,
+    /// Filename of the specific image most recently finished (or, for the
+    /// per-image people/wildlife passes, currently starting) - shown in the
+    /// UI so a long analysis run doesn't look stalled with nothing but a
+    /// slowly-ticking counter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    current_item: Option<String>,
+}
+
+fn file_name_for_progress(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+        .to_string()
 }
 
 #[derive(Clone)]
@@ -129,6 +143,10 @@ fn load_catalog_cull_cache(
                     exposure_metric,
                     width,
                     height,
+                    // Not persisted in cull_analysis_cache; a cached entry
+                    // just won't have a blur-region overlay until the image
+                    // is re-analyzed.
+                    blurry_region: None,
                 },
             },
         );
@@ -180,6 +198,11 @@ async fn collect_profile_subject_factors(
 
         if subject_mode == "people" {
             let detector = crate::face_detection::load_local_face_detector(&app_handle)?;
+            // Best-effort: the eye-state model pack is a separate, optional
+            // download (visual_model_registry, "ocec-eye-state"). If it
+            // isn't installed, culling still runs on pose/framing alone
+            // exactly as before - this never blocks the people-mode path.
+            let eye_classifier = crate::eye_state::load_eye_state_classifier(&app_handle).ok();
             for (index, path) in paths.into_iter().enumerate() {
                 if let Some(job) = job.as_ref() {
                     if !tauri::async_runtime::block_on(job.control.wait_until_runnable()) {
@@ -190,11 +213,13 @@ async fn collect_profile_subject_factors(
                     current: completed_before + index + 1,
                     total: completed_before + total,
                     stage: "Detecting people...".to_string(),
+                    current_item: Some(file_name_for_progress(&path)),
                 });
                 let result = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned());
                 let face_analysis = result.ok().and_then(|permit| {
                     let analysis = crate::face_detection::analyze_faces_for_culling(
                         &detector,
+                        eye_classifier.as_ref(),
                         Path::new(&path),
                         &app_handle,
                     );
@@ -227,7 +252,7 @@ async fn collect_profile_subject_factors(
                         id: "face_pose".to_string(),
                         label: "Face pose and framing".to_string(),
                         detail: format!(
-                            "YuNet landmark estimate: {:.0}% frontal, {:.0} degree roll, face covers {:.0}% of frame. Blink and expression are not evaluated by this model.",
+                            "YuNet landmark estimate: {:.0}% frontal, {:.0} degree roll, face covers {:.0}% of frame.",
                             pose.frontal_score * 100.0,
                             pose.roll_degrees,
                             pose.frame_fraction * 100.0,
@@ -235,16 +260,53 @@ async fn collect_profile_subject_factors(
                         impact: "context".to_string(),
                     });
                 }
+                let eye_openness = face_analysis.as_ref().and_then(|analysis| analysis.eye_openness);
+                if let Some(eyes) = eye_openness {
+                    image_factors.push(CullDecisionFactor {
+                        id: "eye_state".to_string(),
+                        label: format!("Eyes: {}", eyes.state.label()),
+                        detail: {
+                            let openness_pct = (eyes.prob_open * 100.0).round();
+                            match eyes.state {
+                                crate::eye_state::EyeState::Open => {
+                                    format!("The primary subject's eyes look open ({openness_pct:.0}% open confidence).")
+                                }
+                                crate::eye_state::EyeState::SemiClosed => {
+                                    format!("The primary subject's eyes look partially closed - possibly mid-blink ({openness_pct:.0}% open confidence).")
+                                }
+                                crate::eye_state::EyeState::Closed => {
+                                    format!("The primary subject's eyes look closed ({openness_pct:.0}% open confidence). This is a strong signal, not a hard rule - review before rejecting a one-of-a-kind shot.")
+                                }
+                            }
+                        },
+                        impact: match eyes.state {
+                            crate::eye_state::EyeState::Open => "context".to_string(),
+                            crate::eye_state::EyeState::SemiClosed => "supporting".to_string(),
+                            crate::eye_state::EyeState::Closed => "reject".to_string(),
+                        },
+                    });
+                }
                 let pose_adjustment = face_analysis
                     .as_ref()
                     .and_then(|analysis| analysis.best_pose)
                     .map(|pose| ((pose.frontal_score as f64 - 0.5) * 0.08).clamp(-0.04, 0.04))
                     .unwrap_or_default();
+                // A closed eye is a much stronger, more specific signal than
+                // framing, so it gets a bigger tie-breaking nudge - enough
+                // to reliably lose to an open-eyed duplicate/burst frame,
+                // but per the pose comment below, this only ever nudges the
+                // continuous quality score. It can never by itself turn a
+                // unique (non-duplicate) photo into a reject.
+                let eye_adjustment = match eye_openness.map(|eyes| eyes.state) {
+                    Some(crate::eye_state::EyeState::Closed) => -0.15,
+                    Some(crate::eye_state::EyeState::SemiClosed) => -0.05,
+                    _ => 0.0,
+                };
                 factors.insert(
                     path,
                     SubjectAnalysis {
                         factors: image_factors,
-                        quality_adjustment: pose_adjustment,
+                        quality_adjustment: (pose_adjustment + eye_adjustment).clamp(-0.2, 0.04),
                     },
                 );
             }
@@ -271,6 +333,7 @@ async fn collect_profile_subject_factors(
                 } else {
                     "Identifying wildlife and animals...".to_string()
                 },
+                current_item: Some(file_name_for_progress(&path)),
             });
             let image =
                 crate::face_detection::load_image_for_face_ai(Path::new(&path), &app_handle);
@@ -382,6 +445,7 @@ fn collect_catalog_subject_factors(
                 current: completed_before + index + 1,
                 total: completed_before + total,
                 stage: "Reading catalog subject analysis...".to_string(),
+                current_item: Some(file_name_for_progress(&path)),
             },
         );
         let Some(image_id) = image_ids.get(&path).copied() else {
@@ -536,6 +600,11 @@ pub struct AutoCullPlanItem {
     pub reason: String,
     pub quality_score: f64,
     pub decision_factors: Vec<CullDecisionFactor>,
+    /// Normalized (0-1) bounding box of the region responsible for a
+    /// "blurry" verdict, when one could be identified - see
+    /// `culling::find_blurriest_region`. `None` for non-blurry items or when
+    /// no textured region could be scored.
+    pub blurry_region: Option<crate::culling::BlurRegion>,
     /// True if a file with the same name already exists in the destination
     /// folder (e.g. left over from a previous auto-cull run on this same
     /// folder). Computed at plan time so the preview/apply flow can ask how
@@ -573,6 +642,12 @@ pub async fn plan_auto_cull(
     app_handle: AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<AutoCullPlan, String> {
+    if let Err(error) =
+        crate::library_db::ensure_cull_history_library(&app_handle, &state, &folder_path)
+    {
+        eprintln!("Failed to prepare a culling-history database for {folder_path}: {error}");
+    }
+
     let job = crate::library_db::active_library_path(&state)
         .ok()
         .and_then(|database_path| {
@@ -652,6 +727,58 @@ pub async fn plan_auto_cull(
     result
 }
 
+/// Minimum BioCLIP cosine similarity for a hash-flagged duplicate pairing to
+/// survive the veto. Not derived from a labeled validation set - tune this
+/// if it turns out to reject too many genuine bursts (too low) or let too
+/// many false positives through (too high).
+const MIN_BIOCLIP_DUPLICATE_SIMILARITY: f32 = 0.75;
+
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
+    dot / (norm_a * norm_b)
+}
+
+/// Cross-checks each hash-based duplicate/burst group against BioCLIP
+/// embeddings, dropping any member whose actual visual/species content is
+/// too dissimilar from the group's representative to plausibly be the same
+/// subject. Fails open: if BioCLIP isn't installed, or a specific image
+/// can't be embedded, the hash-based grouping for that image is left as-is
+/// rather than losing a real duplicate to a transient failure.
+fn verify_duplicate_groups_with_bioclip(suggestions: &mut CullingSuggestions, app_handle: &AppHandle) {
+    let Ok(bioclip) = crate::tagging::load_bioclip_models(app_handle) else {
+        return;
+    };
+
+    let mut embedding_cache: HashMap<String, Vec<f32>> = HashMap::new();
+    let mut embedding_for = |path: &str| -> Option<Vec<f32>> {
+        if let Some(cached) = embedding_cache.get(path) {
+            return Some(cached.clone());
+        }
+        let image = crate::face_detection::load_image_for_local_ai(Path::new(path)).ok()?;
+        let embedding = crate::tagging::bioclip_embedding(&image, &bioclip).ok()?;
+        embedding_cache.insert(path.to_string(), embedding.clone());
+        Some(embedding)
+    };
+
+    for group in &mut suggestions.similar_groups {
+        let Some(representative_embedding) = embedding_for(&group.representative.path) else {
+            continue;
+        };
+        group.duplicates.retain(|duplicate| {
+            let Some(duplicate_embedding) = embedding_for(&duplicate.path) else {
+                return true;
+            };
+            cosine_similarity(&representative_embedding, &duplicate_embedding)
+                >= MIN_BIOCLIP_DUPLICATE_SIMILARITY
+        });
+    }
+    suggestions
+        .similar_groups
+        .retain(|group| !group.duplicates.is_empty());
+}
+
 async fn plan_auto_cull_inner(
     folder_path: String,
     include_subfolders: bool,
@@ -700,6 +827,7 @@ async fn plan_auto_cull_inner(
             current: 0,
             total: progress_total,
             stage: "Preparing culling analysis...".to_string(),
+            ..Default::default()
         },
     );
 
@@ -715,6 +843,7 @@ async fn plan_auto_cull_inner(
                 current: 0,
                 total: progress_total,
                 stage: "Loading subject detection model...".to_string(),
+                ..Default::default()
             },
         );
         Some(
@@ -757,6 +886,7 @@ async fn plan_auto_cull_inner(
                 current: successful.len(),
                 total: progress_total,
                 stage: format!("Reused cached analysis for {} images...", successful.len()),
+                ..Default::default()
             },
         );
     }
@@ -776,6 +906,18 @@ async fn plan_auto_cull_inner(
                         ));
                     }
                 }
+                let item_name = file_name_for_progress(&candidate.representative_path);
+                let data_res = match analyze_image(
+                    &candidate.representative_path,
+                    &hasher,
+                    &app_settings,
+                    ai_models.as_ref(),
+                    0,
+                ) {
+                    Ok(data) => Ok((candidate, data)),
+                    Err(e) => Err((candidate.representative_path.clone(), e)),
+                };
+
                 let n = completed.fetch_add(1, Ordering::Relaxed) + 1;
                 report_auto_cull_progress(
                     &app_handle,
@@ -784,19 +926,11 @@ async fn plan_auto_cull_inner(
                         current: n,
                         total: progress_total,
                         stage: "Analyzing images...".to_string(),
+                        current_item: Some(item_name),
                     },
                 );
 
-                match analyze_image(
-                    &candidate.representative_path,
-                    &hasher,
-                    &app_settings,
-                    ai_models.as_ref(),
-                    n,
-                ) {
-                    Ok(data) => Ok((candidate, data)),
-                    Err(e) => Err((candidate.representative_path.clone(), e)),
-                }
+                data_res
             })
             .collect();
 
@@ -892,6 +1026,7 @@ async fn plan_auto_cull_inner(
             current: progress_total,
             total: progress_total,
             stage: "Grouping and scoring...".to_string(),
+            ..Default::default()
         },
     );
 
@@ -917,7 +1052,21 @@ async fn plan_auto_cull_inner(
         .collect();
     let analyses: Vec<ImageAnalysisData> = successful.into_iter().map(|(_, data)| data).collect();
 
-    let suggestions = build_culling_suggestions(analyses, failed_paths.clone(), &settings);
+    let mut suggestions = build_culling_suggestions(analyses, failed_paths.clone(), &settings);
+
+    // DoubleGradient perceptual hashing (see culling.rs) compares coarse
+    // brightness-gradient layout, not subject identity - two photos with a
+    // similar composition (e.g. a bird silhouette in a similar spot against
+    // a similarly bright sky) can hash as "duplicates" even though the
+    // actual subjects are completely different animals. Where BioCLIP is
+    // already relevant (wildlife/birds), cross-check each hash-based
+    // grouping against it and drop pairings it doesn't corroborate, rather
+    // than trusting the hash alone.
+    if settings.use_subject_detection
+        && matches!(settings.subject_mode.as_str(), "wildlife" | "birds")
+    {
+        verify_duplicate_groups_with_bioclip(&mut suggestions, &app_handle);
+    }
 
     let mut reject_reasons: HashMap<String, String> = HashMap::new();
     let mut representative_paths: HashSet<String> = HashSet::new();
@@ -1038,6 +1187,12 @@ async fn plan_auto_cull_inner(
                         .unwrap_or(false)
                 });
 
+            let blurry_region = if reason == "blurry" {
+                analysis.and_then(|item| item.blurry_region)
+            } else {
+                None
+            };
+
             AutoCullPlanItem {
                 representative_path: candidate.representative_path,
                 backing_paths: candidate.backing_paths,
@@ -1045,6 +1200,7 @@ async fn plan_auto_cull_inner(
                 reason,
                 quality_score,
                 decision_factors,
+                blurry_region,
                 has_conflict,
             }
         })
@@ -1362,6 +1518,7 @@ mod tests {
                 exposure_metric: 0.9,
                 width: 4,
                 height: 4,
+                blurry_region: None,
             },
         };
 
@@ -1391,6 +1548,7 @@ mod tests {
             reason: "Blurry background".to_string(),
             quality_score: 0.35,
             decision_factors: Vec::new(),
+            blurry_region: None,
             has_conflict: false,
         };
 

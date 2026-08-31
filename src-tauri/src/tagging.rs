@@ -266,10 +266,15 @@ fn bioclip_input(image: &image::DynamicImage) -> ndarray::Array<f32, ndarray::Di
     input
 }
 
-pub(crate) fn run_bioclip_inference(
+/// Runs BioCLIP's vision encoder and returns the raw image embedding, before
+/// any taxonomy lookup. Exposed separately from `run_bioclip_inference` so
+/// callers that just want "how visually/taxonomically similar are these two
+/// images" (e.g. vetoing a perceptual-hash duplicate match) don't have to go
+/// through species classification to get there.
+pub(crate) fn bioclip_embedding(
     image: &image::DynamicImage,
     models: &BioClipModels,
-) -> Result<(BioClipTaxon, f32), String> {
+) -> Result<Vec<f32>, String> {
     let input =
         ort::value::Tensor::from_array(bioclip_input(image)).map_err(|error| error.to_string())?;
     let mut session = models.session.lock().unwrap();
@@ -293,7 +298,14 @@ pub(crate) fn run_bioclip_inference(
             img_emb.len()
         ));
     }
+    Ok(img_emb)
+}
 
+pub(crate) fn run_bioclip_inference(
+    image: &image::DynamicImage,
+    models: &BioClipModels,
+) -> Result<(BioClipTaxon, f32), String> {
+    let img_emb = bioclip_embedding(image, models)?;
     let norm_img: f32 = img_emb.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
 
     let mut best_idx = 0;

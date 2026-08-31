@@ -170,6 +170,7 @@ function App() {
     activePanel,
     activeLayoutDragItem,
     isSettingsOpen,
+    libraryDisplayMode,
     setUI,
     setPanel,
     setLayoutDragItem,
@@ -846,6 +847,31 @@ function App() {
     }
   };
 
+  const handleDragCancel = () => {
+    setLayoutDragItem(null);
+    setActiveImageDragItem(null);
+  };
+
+  // Safety net independent of dnd-kit's own end/cancel callbacks: if the
+  // mouse button isn't down, there is no active drag, full stop. Without
+  // this, a drag whose source tile unmounts mid-flight (e.g. an image
+  // getting reclassified into a different filter bucket while dragging it)
+  // can leave dnd-kit's internal state "active" with nothing to end it,
+  // which keeps the DragOverlay following the cursor - showing that stale
+  // image - on every later hover with no button held at all.
+  useEffect(() => {
+    const clearStuckDragState = () => {
+      setActiveImageDragItem(null);
+      setLayoutDragItem(null);
+    };
+    window.addEventListener('pointerup', clearStuckDragState);
+    window.addEventListener('pointercancel', clearStuckDragState);
+    return () => {
+      window.removeEventListener('pointerup', clearStuckDragState);
+      window.removeEventListener('pointercancel', clearStuckDragState);
+    };
+  }, [setLayoutDragItem]);
+
   const ActiveOverlayIcon = activeLayoutDragItem ? PANEL_ICONS[activeLayoutDragItem] : null;
   const effectiveLeftWidth = uiVisibility.leftPanel ? leftPanelWidth : 48;
   const effectiveRightWidth = uiVisibility.rightPanel ? rightPanelWidth : 48;
@@ -889,6 +915,7 @@ function App() {
             sensors={layoutSensors}
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
+            onDragCancel={handleDragCancel}
             collisionDetection={pointerWithin}
             measuring={{
               droppable: {
@@ -897,7 +924,7 @@ function App() {
             }}
           >
             <div className="flex flex-row grow h-full min-h-0">
-              {!shouldHideFolderTree && hasMainContent && (
+              {!shouldHideFolderTree && hasMainContent && !isCullingMode && (
                 <SidePanelArea
                   side="left"
                   width={effectiveLeftWidth}

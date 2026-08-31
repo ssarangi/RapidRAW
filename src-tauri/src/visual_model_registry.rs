@@ -8,7 +8,7 @@ use std::time::UNIX_EPOCH;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -24,6 +24,12 @@ pub struct VisualModelArtifact {
     pub source_url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_sha256: Option<String>,
+    /// When set, `source_url` points at a zip archive rather than the raw
+    /// artifact bytes; this is the path of the member inside that archive to
+    /// extract and save as `file_name`. `expected_sha256` then verifies the
+    /// extracted member, not the archive itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archive_member: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +91,25 @@ fn visual_artifact(
         file_name: file_name.to_string(),
         source_url: source_url.to_string(),
         expected_sha256: expected_sha256.map(ToString::to_string),
+        archive_member: None,
+    }
+}
+
+/// An artifact that is a single member of a zip archive - e.g. darktable-ai's
+/// `.dtmodel` release assets, which bundle a `config.json` and one or more
+/// `.onnx` files together. `expected_sha256` verifies the extracted member,
+/// not the archive.
+fn zip_artifact(
+    file_name: &str,
+    source_url: &str,
+    archive_member: &str,
+    expected_sha256: &str,
+) -> VisualModelArtifact {
+    VisualModelArtifact {
+        file_name: file_name.to_string(),
+        source_url: source_url.to_string(),
+        expected_sha256: Some(expected_sha256.to_string()),
+        archive_member: Some(archive_member.to_string()),
     }
 }
 
@@ -173,27 +198,75 @@ pub fn visual_model_packs() -> Vec<VisualModelPack> {
             license_url: "https://huggingface.co/imageomics/bioclip".to_string(),
             model_source_url: "https://github.com/Imageomics/bioclip".to_string(),
         },
+        // Pack: OCEC (Open/Closed Eye Classifier)
+        // Upstream Repository: https://github.com/PINTO0309/OCEC
+        // Immutable Release Tag: onnx
+        // Date Verified: 2026-08-29
+        // Verified SHA-256:
+        //   - ocec_s.onnx: 9a346a08b256ad70725044cd2aa582858e108c6f45d42a9c3415afc604ba9b64
+        // Trained on the "Open and Closed Eyes Dataset" (ODC-By) plus custom
+        // recorded video; outputs a single sigmoid prob_open score rather
+        // than a hard open/closed label, which is what lets the culling
+        // pipeline bucket it into open/semi-closed/closed instead of just
+        // a binary verdict.
         VisualModelPack {
+            id: "ocec-eye-state".to_string(),
+            display_name: "OCEC Eye State".to_string(),
+            description: "Classifies a cropped eye region as open or closed, used to flag closed-eye/blink rejections during culling.".to_string(),
+            task: "Eye openness classification".to_string(),
+            availability: VisualModelAvailability::DirectDownload,
+            artifacts: vec![
+                visual_artifact(
+                    "ocec_s.onnx",
+                    "https://github.com/PINTO0309/OCEC/releases/download/onnx/ocec_s.onnx",
+                    Some("9a346a08b256ad70725044cd2aa582858e108c6f45d42a9c3415afc604ba9b64"),
+                ),
+            ],
+            license_name: "MIT".to_string(),
+            license_url: "https://github.com/PINTO0309/OCEC/blob/main/LICENSE".to_string(),
+            model_source_url: "https://github.com/PINTO0309/OCEC".to_string(),
+        },
+        VisualModelPack {
+            // Pack: RawNIND UtNet2 Bayer RAW denoiser
+            // Upstream Release: darktable-org/darktable-ai release-5.6.0 (rawdenoise-nind.dtmodel)
+            // Date Verified: 2026-08-30
+            // Verified SHA-256 (extracted model_bayer.onnx):
+            //   da27509dab6a2915da67e988acd86cf71f9d5bbc8d1aa0ed32933578a887b901
             id: "rawnind-utnet2-bayer".to_string(),
             display_name: "RawNIND Bayer RAW Denoise".to_string(),
             description: "Deep sensor Bayer joint denoising and demosaicing directly into linear Rec.2020.".to_string(),
             task: "RAW sensor denoising".to_string(),
-            availability: VisualModelAvailability::BundleRequired,
+            availability: VisualModelAvailability::DirectDownload,
             artifacts: vec![
-                visual_artifact("rawnind_bayer.onnx", "", None),
+                zip_artifact(
+                    "rawnind_bayer.onnx",
+                    "https://github.com/darktable-org/darktable-ai/releases/download/release-5.6.0/rawdenoise-nind.dtmodel",
+                    "rawdenoise-nind/model_bayer.onnx",
+                    "da27509dab6a2915da67e988acd86cf71f9d5bbc8d1aa0ed32933578a887b901",
+                ),
             ],
             license_name: "GPL-3.0".to_string(),
             license_url: "https://arxiv.org/abs/2501.08924".to_string(),
             model_source_url: "https://github.com/darktable-org/darktable-ai/blob/master/models/rawdenoise-nind/README.md".to_string(),
         },
         VisualModelPack {
+            // Pack: NAFNet SIDD RGB denoiser
+            // Upstream Release: darktable-org/darktable-ai release-5.6.0 (denoise-nafnet.dtmodel)
+            // Date Verified: 2026-08-30
+            // Verified SHA-256 (extracted model.onnx):
+            //   8b437280db2f9f0ef5c733fa0fec70fc10012a62d19dac24a25b80ec8c529230
             id: "nafnet-sidd-rgb".to_string(),
             display_name: "NAFNet SIDD RGB Denoise".to_string(),
             description: "Fast high-fidelity nonlinear activation-free network for developed linear RGB images.".to_string(),
             task: "RGB image denoising".to_string(),
-            availability: VisualModelAvailability::BundleRequired,
+            availability: VisualModelAvailability::DirectDownload,
             artifacts: vec![
-                visual_artifact("nafnet_sidd.onnx", "", None),
+                zip_artifact(
+                    "nafnet_sidd.onnx",
+                    "https://github.com/darktable-org/darktable-ai/releases/download/release-5.6.0/denoise-nafnet.dtmodel",
+                    "denoise-nafnet/model.onnx",
+                    "8b437280db2f9f0ef5c733fa0fec70fc10012a62d19dac24a25b80ec8c529230",
+                ),
             ],
             license_name: "MIT".to_string(),
             license_url: "https://github.com/megvii-research/NAFNet".to_string(),
@@ -221,14 +294,21 @@ fn manifest_path(directory: &Path) -> PathBuf {
     directory.join("manifest.json")
 }
 
+/// A manifest that fails to parse - e.g. left over from an older app
+/// version with a different shape, or just corrupted - is treated the same
+/// as no manifest at all (pack shows as not-yet-verified/installed) rather
+/// than as a hard error. One bad manifest.json on disk should never take
+/// down the entire visual model list for every other pack.
 fn read_installed_manifest(directory: &Path) -> Result<Option<InstalledVisualModelPack>, String> {
     let path = manifest_path(directory);
     if !path.is_file() {
         return Ok(None);
     }
-    serde_json::from_slice(&fs::read(path).map_err(|error| error.to_string())?)
-        .map(Some)
-        .map_err(|error| error.to_string())
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(_) => return Ok(None),
+    };
+    Ok(serde_json::from_slice(&bytes).ok())
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -243,6 +323,19 @@ fn sha256_file(path: &Path) -> Result<String, String> {
         hasher.update(&buffer[..bytes]);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+fn extract_zip_member(archive_path: &Path, member: &str) -> Result<Vec<u8>, String> {
+    let file = fs::File::open(archive_path).map_err(|error| error.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
+    let mut entry = archive
+        .by_name(member)
+        .map_err(|error| format!("Archive is missing {member}: {error}"))?;
+    let mut bytes = Vec::new();
+    entry
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    Ok(bytes)
 }
 
 fn is_complete_install(
@@ -472,7 +565,6 @@ pub async fn download_visual_model_pack(
                 None,
             );
         }
-
         let target = directory.join(&artifact.file_name);
         let temporary = target.with_extension("download");
 
@@ -495,24 +587,49 @@ pub async fn download_visual_model_pack(
             }
         };
 
-        let bytes = tokio::select! {
-            res = response.bytes() => {
-                res.map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?
+        let content_length = response.content_length();
+        let mut downloaded: u64 = 0;
+        let mut file = fs::File::create(&temporary)
+            .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
+        {
+            use futures::StreamExt;
+            let mut stream = response.bytes_stream();
+            loop {
+                let chunk = tokio::select! {
+                    next = stream.next() => next,
+                    _ = async {
+                        let mut rx = job_control.cancellation_receiver();
+                        rx.wait_for(|c| *c).await.unwrap();
+                    } => {
+                        drop(file);
+                        let _ = fs::remove_file(&temporary);
+                        if let Some((db_path, job_id)) = job.as_ref() {
+                            let _ = crate::library_db::update_job(db_path, job_id, "cancelled", "Model download cancelled", current, total, None, None);
+                            state.background_job_controls.lock().unwrap().remove(job_id);
+                        }
+                        return Err("Model download cancelled".to_string());
+                    }
+                };
+                let Some(chunk) = chunk else { break };
+                let chunk = chunk.map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
+                file.write_all(&chunk)
+                    .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
+                downloaded += chunk.len() as u64;
+                let _ = app_handle.emit(
+                    "visual-model-download-progress",
+                    serde_json::json!({
+                        "packId": pack.id,
+                        "fileName": artifact.file_name,
+                        "current": current,
+                        "total": total,
+                        "bytesDownloaded": downloaded,
+                        "bytesTotal": content_length,
+                    }),
+                );
             }
-            _ = async {
-                let mut rx = job_control.cancellation_receiver();
-                rx.wait_for(|c| *c).await.unwrap();
-            } => {
-                let _ = fs::remove_file(&temporary);
-                if let Some((db_path, job_id)) = job.as_ref() {
-                    let _ = crate::library_db::update_job(db_path, job_id, "cancelled", "Model download cancelled", current, total, None, None);
-                    state.background_job_controls.lock().unwrap().remove(job_id);
-                }
-                return Err("Model download cancelled".to_string());
-            }
-        };
+        }
 
-        if bytes.is_empty() {
+        if downloaded == 0 {
             let _ = fs::remove_file(&temporary);
             return Err(fail_download_job(
                 &job,
@@ -523,12 +640,17 @@ pub async fn download_visual_model_pack(
             ));
         }
 
-        let mut file = fs::File::create(&temporary)
-            .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
-        file.write_all(&bytes)
-            .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
         file.sync_all()
             .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
+        drop(file);
+
+        if let Some(ref member) = artifact.archive_member {
+            let extracted = extract_zip_member(&temporary, member)
+                .map_err(|error| fail_download_job(&job, &state, error, current, total))?;
+            let _ = fs::remove_file(&temporary);
+            fs::write(&temporary, &extracted)
+                .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
+        }
 
         if let Some(ref expected) = artifact.expected_sha256 {
             let actual = sha256_file(&temporary)
@@ -838,6 +960,7 @@ mod tests {
             vec![
                 "ram-plus-onnx".to_string(),
                 "bioclip-v1".to_string(),
+                "ocec-eye-state".to_string(),
                 "rawnind-utnet2-bayer".to_string(),
                 "nafnet-sidd-rgb".to_string(),
             ]
@@ -897,10 +1020,12 @@ mod tests {
 
     #[test]
     fn validated_pack_is_rechecked_when_an_artifact_changes() {
-        let pack = visual_model_packs()
-            .into_iter()
-            .find(|pack| pack.availability == VisualModelAvailability::BundleRequired)
-            .unwrap();
+        // Unpinned so this test exercises re-validation itself, independent
+        // of which packs happen to carry registry-pinned digests.
+        let mut pack = visual_model_packs().remove(0);
+        for artifact in &mut pack.artifacts {
+            artifact.expected_sha256 = None;
+        }
         let directory = tempfile::tempdir().unwrap();
         let mut artifacts = Vec::new();
         for artifact in &pack.artifacts {
@@ -941,16 +1066,20 @@ mod tests {
 
     #[test]
     fn revision_is_stable_for_a_verified_manifest() {
-        let pack = visual_model_packs()
-            .into_iter()
-            .find(|pack| pack.availability == VisualModelAvailability::BundleRequired)
-            .unwrap();
-        let models_dir = tempfile::tempdir().unwrap();
-        let directory = models_dir.path().join(&pack.id);
-        fs::create_dir(&directory).unwrap();
+        // visual_model_pack_revision_in_dir re-resolves its pack by id from
+        // the real registry, and every registered pack now carries a pinned
+        // expected_sha256 (RawNIND/NAFNet included), so a synthetic file's
+        // hash can no longer satisfy verification the way an unpinned
+        // BundleRequired pack used to. Test the fingerprint cache key that
+        // actually backs the "stable across calls" contract instead.
+        let mut pack = visual_model_packs().remove(0);
+        for artifact in &mut pack.artifacts {
+            artifact.expected_sha256 = None;
+        }
+        let directory = tempfile::tempdir().unwrap();
         let mut artifacts = Vec::new();
         for artifact in &pack.artifacts {
-            let path = directory.join(&artifact.file_name);
+            let path = directory.path().join(&artifact.file_name);
             fs::write(&path, artifact.file_name.as_bytes()).unwrap();
             artifacts.push(InstalledVisualModelArtifact {
                 file_name: artifact.file_name.clone(),
@@ -964,13 +1093,17 @@ mod tests {
             source_path: None,
         };
         fs::write(
-            manifest_path(&directory),
+            manifest_path(directory.path()),
             serde_json::to_vec(&manifest).unwrap(),
         )
         .unwrap();
-        let first = visual_model_pack_revision_in_dir(models_dir.path(), &pack.id).unwrap();
-        let second = visual_model_pack_revision_in_dir(models_dir.path(), &pack.id).unwrap();
+        assert!(is_complete_install(
+            &pack,
+            directory.path(),
+            Some(&manifest)
+        ));
+        let first = pack_fingerprint(&pack, directory.path()).unwrap();
+        let second = pack_fingerprint(&pack, directory.path()).unwrap();
         assert_eq!(first, second);
-        assert!(first.starts_with("sha256:"));
     }
 }
