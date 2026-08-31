@@ -599,6 +599,8 @@ export default function SettingsPanel({
   const [logPathLoading, setLogPathLoading] = useState(true);
   const [logPathError, setLogPathError] = useState(false);
   const [dpr, setDpr] = useState(() => (typeof window !== 'undefined' ? window.devicePixelRatio : 1));
+  const [removeRootId, setRemoveRootId] = useState<number | null>(null);
+  const [defaultLibraryBaseDir, setDefaultLibraryBaseDir] = useState<string | null>(null);
 
   const refreshLibraryState = async () => {
     const active = await invoke<LibraryInfo | null>(Invokes.GetActiveLibrary);
@@ -831,6 +833,30 @@ export default function SettingsPanel({
     }
   };
 
+  const handleRemoveLibraryRoot = async (root: CatalogRoot) => {
+    setLibraryBusy(true);
+    setLibraryMessage(`Removing ${root.absolutePath} from the library...`);
+    try {
+      await invoke(Invokes.RemoveLibraryRoot, { rootId: root.id });
+      if (useLibraryStore.getState().activeCatalogRootId === root.id) {
+        useLibraryStore.getState().setLibrary({
+          activeCatalogRootId: null,
+          imageList: [],
+          currentFolderPath: null,
+          multiSelectedPaths: [],
+          libraryActivePath: null,
+        });
+      }
+      await refreshLibraryState();
+      setLibraryMessage(`Removed ${root.absolutePath} from the library.`);
+    } catch (err) {
+      setLibraryMessage(`Failed to remove collection: ${err}`);
+    } finally {
+      setLibraryBusy(false);
+      setRemoveRootId(null);
+    }
+  };
+
   const handleBrowseCatalogRoot = async (root: CatalogRoot) => {
     setLibraryBusy(true);
     setLibraryMessage(`Loading catalog images from ${root.absolutePath}...`);
@@ -861,6 +887,7 @@ export default function SettingsPanel({
 
   useEffect(() => {
     refreshLibraryState().catch((err) => setLibraryMessage(`Failed to load library state: ${err}`));
+    invoke<string>(Invokes.GetDefaultLibraryBaseDir).then(setDefaultLibraryBaseDir).catch(() => {});
   }, []);
 
   const settingCategories = useMemo(
@@ -2103,6 +2130,14 @@ export default function SettingsPanel({
                             {libraryInfo ? (
                               <>
                                 <Button
+                                  onClick={() => void invoke(Invokes.ShowInFinder, { path: libraryInfo.dbPath })}
+                                  disabled={libraryBusy}
+                                  className="bg-bg-primary text-text-primary border border-border-color hover:bg-card-active shadow-none"
+                                >
+                                  <FolderOpen size={16} />
+                                  Show in File Manager
+                                </Button>
+                                <Button
                                   onClick={handleOpenLibrary}
                                   disabled={libraryBusy}
                                   className="bg-bg-primary text-text-primary border border-border-color hover:bg-card-active shadow-none"
@@ -2156,8 +2191,13 @@ export default function SettingsPanel({
                             <div className="rounded-md border border-border-color bg-surface p-3">
                               <Text variant={TextVariants.label}>Database Location</Text>
                               <Text variant={TextVariants.small} className="break-all mt-1">
-                                {libraryDirectory || 'Default RapidRAW app data folder'}
+                                {libraryDirectory || defaultLibraryBaseDir || 'Default RapidRAW app data folder'}
                               </Text>
+                              {!libraryDirectory && defaultLibraryBaseDir && (
+                                <Text variant={TextVariants.small} className="mt-0.5">
+                                  Each new library gets its own subfolder here.
+                                </Text>
+                              )}
                               <div className="flex flex-wrap gap-2 mt-3">
                                 <Button
                                   onClick={handleChooseLibraryDirectory}
@@ -2178,6 +2218,16 @@ export default function SettingsPanel({
                                   >
                                     <X size={16} />
                                     Use Default
+                                  </Button>
+                                )}
+                                {(libraryDirectory || defaultLibraryBaseDir) && (
+                                  <Button
+                                    onClick={() => void shellOpen((libraryDirectory || defaultLibraryBaseDir)!)}
+                                    disabled={libraryBusy}
+                                    className="bg-bg-primary text-text-primary border border-border-color hover:bg-card-active shadow-none"
+                                  >
+                                    <FolderOpen size={16} />
+                                    Open in File Manager
                                   </Button>
                                 )}
                               </div>
@@ -2286,26 +2336,55 @@ export default function SettingsPanel({
                                   {root.imageCount}
                                 </Text>
                                 <div className="flex flex-wrap gap-2 min-[900px]:justify-end">
-                                  <Button
-                                    onClick={() => handleBrowseCatalogRoot(root)}
-                                    disabled={libraryBusy}
-                                    className="px-3 shrink-0"
-                                  >
-                                    <ImageIcon size={16} />
-                                    Browse
-                                  </Button>
-                                  <Button
-                                    onClick={() => handleScanLibraryRoot(root)}
-                                    disabled={libraryBusy || catalogScan.isActive}
-                                    className="bg-bg-primary text-text-primary border border-border-color hover:bg-card-active shadow-none px-3 shrink-0"
-                                  >
-                                    {isScanningRoot ? (
-                                      <Loader2 size={16} className="animate-spin" />
-                                    ) : (
-                                      <RefreshCw size={16} />
-                                    )}
-                                    {isScanningRoot ? 'Scanning' : 'Scan'}
-                                  </Button>
+                                  {removeRootId === root.id ? (
+                                    <>
+                                      <Button
+                                        onClick={() => void handleRemoveLibraryRoot(root)}
+                                        disabled={libraryBusy}
+                                        className="bg-red-600 text-white px-3 shrink-0"
+                                      >
+                                        Confirm
+                                      </Button>
+                                      <Button
+                                        onClick={() => setRemoveRootId(null)}
+                                        disabled={libraryBusy}
+                                        className="bg-bg-primary text-text-primary border border-border-color hover:bg-card-active shadow-none px-3 shrink-0"
+                                      >
+                                        Cancel
+                                      </Button>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Button
+                                        onClick={() => handleBrowseCatalogRoot(root)}
+                                        disabled={libraryBusy}
+                                        className="px-3 shrink-0"
+                                      >
+                                        <ImageIcon size={16} />
+                                        Browse
+                                      </Button>
+                                      <Button
+                                        onClick={() => handleScanLibraryRoot(root)}
+                                        disabled={libraryBusy || catalogScan.isActive}
+                                        className="bg-bg-primary text-text-primary border border-border-color hover:bg-card-active shadow-none px-3 shrink-0"
+                                      >
+                                        {isScanningRoot ? (
+                                          <Loader2 size={16} className="animate-spin" />
+                                        ) : (
+                                          <RefreshCw size={16} />
+                                        )}
+                                        {isScanningRoot ? 'Scanning' : 'Scan'}
+                                      </Button>
+                                      <button
+                                        onClick={() => setRemoveRootId(root.id)}
+                                        disabled={libraryBusy || isScanningRoot}
+                                        className="p-2 text-red-300 hover:bg-red-500/10 rounded-md disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                                        data-tooltip={`Remove ${root.absolutePath} from the library (files on disk are untouched)`}
+                                      >
+                                        <Trash2 size={16} />
+                                      </button>
+                                    </>
+                                  )}
                                 </div>
                                 </div>
                               );

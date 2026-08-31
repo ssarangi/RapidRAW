@@ -2026,6 +2026,21 @@ fn default_library_dir(app_handle: &AppHandle, library_id: &str) -> Result<PathB
     Ok(data_dir.join("libraries").join(library_id))
 }
 
+/// The exact final path of a new library isn't knowable before creation
+/// (it's keyed by a freshly-generated UUID), but this base folder - where
+/// every new library gets its own subfolder - is, so the "Create New
+/// Library" screen can show and open it before anything exists yet.
+#[tauri::command]
+pub fn get_default_library_base_dir(app_handle: AppHandle) -> Result<String, String> {
+    let data_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?;
+    let dir = data_dir.join("libraries");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.to_string_lossy().into_owned())
+}
+
 /// Culling a plain folder (no catalog open) still needs somewhere to persist
 /// cull sessions/decisions so "Culling History" isn't silently a no-op for
 /// that flow. If no catalog is already active, this opens (creating on first
@@ -2325,6 +2340,26 @@ pub fn add_library_root(
         .map_err(|e| e.to_string())?;
 
     get_root(&conn, id)
+}
+
+/// Removes a collection root from the active library, deleting its indexed
+/// images/folders and everything derived from them (faces, tags, cull
+/// history, etc.) via ON DELETE CASCADE. This only removes the root from the
+/// catalog - it never touches the actual files on disk.
+#[tauri::command]
+pub fn remove_library_root(
+    root_id: i64,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let db_path = active_library_path(&state)?;
+    let conn = open_connection(&db_path)?;
+    let changed = conn
+        .execute("DELETE FROM collection_roots WHERE id = ?1", params![root_id])
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("Collection root was not found".to_string());
+    }
+    Ok(())
 }
 
 /// Adds a collection root to a catalog without an active desktop library.

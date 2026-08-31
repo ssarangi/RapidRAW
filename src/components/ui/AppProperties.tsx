@@ -161,6 +161,8 @@ export enum Invokes {
   DeleteLibrary = 'delete_library',
   GetActiveLibrary = 'get_active_library',
   AddLibraryRoot = 'add_library_root',
+  RemoveLibraryRoot = 'remove_library_root',
+  GetDefaultLibraryBaseDir = 'get_default_library_base_dir',
   ListLibraryRoots = 'list_library_roots',
   ListCatalogFolderTree = 'list_catalog_folder_tree',
   ScanLibraryRoot = 'scan_library_root',

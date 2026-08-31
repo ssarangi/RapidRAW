@@ -2424,6 +2424,8 @@ pub fn run() {
             library_db::delete_library,
             library_db::get_active_library,
             library_db::add_library_root,
+            library_db::remove_library_root,
+            library_db::get_default_library_base_dir,
             library_db::list_library_roots,
             library_db::list_catalog_folder_tree,
             library_db::scan_library_root,
