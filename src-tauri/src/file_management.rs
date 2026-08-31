@@ -1993,7 +1993,24 @@ pub fn generate_thumbnail_data(
 
     if adjustments.is_null() {
         let tm_override = crate::image_processing::resolve_tonemapper_override(&settings, is_raw);
-        let use_agx = tm_override == Some(1);
+        // resolve_tonemapper_override only returns Some when the user has
+        // explicitly enabled tonemapper_override_enabled - which almost no
+        // one has. Treating "None" as "never use AGX" (as opposed to
+        // consulting the plain default-tonemapper setting, same as every
+        // other adjustments path does) meant brand-new/unedited RAW
+        // thumbnails silently lost their brightening tonemap for virtually
+        // every user after this codepath was refactored.
+        let use_agx = match tm_override {
+            Some(flag) => flag == 1,
+            None => {
+                let default_tm = if is_raw {
+                    settings.default_raw_tonemapper.as_deref().unwrap_or("agx")
+                } else {
+                    settings.default_non_raw_tonemapper.as_deref().unwrap_or("basic")
+                };
+                default_tm == "agx"
+            }
+        };
 
         if use_agx {
             if !is_raw {
