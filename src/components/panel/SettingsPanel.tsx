@@ -40,6 +40,7 @@ import Switch from '../ui/Switch';
 import Input from '../ui/Input';
 import Slider from '../ui/Slider';
 import { ThemeProps, THEMES, DEFAULT_THEME_ID } from '../../utils/themes';
+import { addLibraryCollection } from '../../utils/libraryCollections';
 import { useTranslation } from 'react-i18next';
 import {
   CatalogMetrics,
@@ -551,7 +552,9 @@ export default function SettingsPanel({
   const [hasInteractedWithLivePreview, setHasInteractedWithLivePreview] = useState(false);
   const [recordingAction, setRecordingAction] = useState<string | null>(null);
   const [libraryInfo, setLibraryInfo] = useState<LibraryInfo | null>(null);
-  const [catalogRoots, setCatalogRoots] = useState<CatalogRoot[]>([]);
+  // Sourced from the shared library store (not local state) so this list can
+  // never drift from what's added via the Sources sidebar's own "+" button.
+  const catalogRoots = useLibraryStore((s) => s.catalogRoots);
   const [libraryName, setLibraryName] = useState('RapidRAW Library');
   const [libraryDirectory, setLibraryDirectory] = useState<string | null>(null);
   const [libraryMessage, setLibraryMessage] = useState('');
@@ -608,14 +611,12 @@ export default function SettingsPanel({
     if (active) {
       const roots = await invoke<CatalogRoot[]>(Invokes.ListLibraryRoots);
       const metrics = await invoke<CatalogMetrics>(Invokes.GetCatalogMetrics);
-      setCatalogRoots(roots);
       setCatalogMetrics(metrics);
       useLibraryStore.getState().setLibrary({
         librarySource: { type: 'catalog', libraryId: active.id, dbPath: active.dbPath, name: active.name },
         catalogRoots: roots,
       });
     } else {
-      setCatalogRoots([]);
       setCatalogMetrics(null);
       useLibraryStore.getState().setLibrary({
         librarySource: { type: 'filesystem' },
@@ -768,7 +769,6 @@ export default function SettingsPanel({
       });
       await onSettingsChange({ ...appSettings, activeLibraryDbPath: null, lastFolderState: null });
       setLibraryInfo(null);
-      setCatalogRoots([]);
       setCatalogMetrics(null);
       setLibraryMessage('Library database deleted. Photo files and sidecars were not removed.');
     } catch (err) {
@@ -796,22 +796,12 @@ export default function SettingsPanel({
     setLibraryBusy(true);
     setLibraryMessage('Choose a photo folder to add to the library...');
     try {
-      const selected = await openDialog({ directory: true, multiple: false, title: 'Add Photo Folder to Library' });
-      if (typeof selected !== 'string') {
+      const { root, cancelled } = await addLibraryCollection();
+      if (cancelled || !root) {
         setLibraryMessage('No photo folder was selected.');
         return;
       }
-      setLibraryMessage(`Adding ${selected} to the library database...`);
-      const root = await invoke<CatalogRoot>(Invokes.AddLibraryRoot, { path: selected, label: null });
-      const nextRoots = catalogRoots.some((existing) => existing.id === root.id)
-        ? catalogRoots.map((existing) => (existing.id === root.id ? root : existing))
-        : [...catalogRoots, root];
-      setCatalogRoots(nextRoots);
-      useLibraryStore.getState().setLibrary({ catalogRoots: nextRoots });
-      setLibraryMessage(`Scanning and indexing images in ${selected}...`);
-      await waitForNextPaint();
-      await invoke(Invokes.StartCatalogScan, { rootId: root.id, recursive: true });
-      setLibraryMessage(`Catalog scan started for ${selected}. Progress is shown in the bottom status bar.`);
+      setLibraryMessage(`Catalog scan started for ${root.absolutePath}. Progress is shown in the bottom status bar.`);
     } catch (err) {
       setLibraryMessage(`Failed to add folder: ${err}`);
     } finally {

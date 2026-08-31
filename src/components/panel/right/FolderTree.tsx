@@ -30,6 +30,7 @@ import {
 import clsx from 'clsx';
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
 import { useState, useMemo, useEffect, useRef } from 'react';
+import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { useDroppable } from '@dnd-kit/core';
@@ -55,6 +56,7 @@ import {
   SortDirection,
   SmartCollection,
 } from '../../ui/AppProperties';
+import { addLibraryCollection } from '../../../utils/libraryCollections';
 
 export interface FolderTree {
   children: FolderTree[];
@@ -307,33 +309,38 @@ function SectionHeader({
   isOpen,
   isLoading = false,
   onToggle,
+  action,
 }: {
   title: string;
   isOpen: boolean;
   isLoading?: boolean;
   onToggle: () => void;
+  action?: ReactNode;
 }) {
   const { t } = useTranslation();
 
   return (
-    <Text
-      as="div"
-      variant={TextVariants.small}
-      weight={TextWeights.bold}
-      className="flex items-center w-full px-1 py-1.5 cursor-pointer group"
-      onClick={onToggle}
-      data-tooltip={
-        isOpen
-          ? t('library.folders.collapseSection', { section: title })
-          : t('library.folders.expandSection', { section: title })
-      }
-    >
-      <div className="p-0.5 rounded-md transition-colors">
-        {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-      </div>
-      <span className="ml-1 uppercase tracking-wider select-none">{title}</span>
-      {isLoading && <Loader2 size={13} className="ml-2 animate-spin text-text-secondary" />}
-    </Text>
+    <div className="flex items-center w-full group">
+      <Text
+        as="div"
+        variant={TextVariants.small}
+        weight={TextWeights.bold}
+        className="flex flex-1 min-w-0 items-center px-1 py-1.5 cursor-pointer"
+        onClick={onToggle}
+        data-tooltip={
+          isOpen
+            ? t('library.folders.collapseSection', { section: title })
+            : t('library.folders.expandSection', { section: title })
+        }
+      >
+        <div className="p-0.5 rounded-md transition-colors">
+          {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </div>
+        <span className="ml-1 uppercase tracking-wider select-none">{title}</span>
+        {isLoading && <Loader2 size={13} className="ml-2 animate-spin text-text-secondary" />}
+      </Text>
+      {action && <div className="shrink-0 pr-1">{action}</div>}
+    </div>
   );
 }
 
@@ -895,6 +902,9 @@ export default function FolderTree({
   const showPinnedSection = hasVisiblePinnedTrees || (!isSearching && (pinnedFolders.length > 0 || isPinnedFoldersLoading));
   const hasVisibleAlbums = filteredAlbumTree && filteredAlbumTree.length > 0;
   const hasVisibleCatalogRoots = librarySource.type === 'catalog' && catalogRoots.length > 0 && !isSearching;
+  // Shown whenever a catalog library is open, even with zero collections yet,
+  // so there's always a way to add the first one from the sidebar.
+  const showCatalogSection = librarySource.type === 'catalog' && !isSearching;
   const showAlbumsSection = hasVisibleAlbums || (!isSearching && albumTree.length === 0);
 
   // The currently-open image's folder can come from somewhere the tree
@@ -1082,6 +1092,24 @@ export default function FolderTree({
     }
   };
 
+  const [isAddingCollection, setIsAddingCollection] = useState(false);
+  const handleAddCollection = async (event: React.MouseEvent) => {
+    event.stopPropagation();
+    if (isAddingCollection) return;
+    setIsAddingCollection(true);
+    try {
+      const { root, cancelled } = await addLibraryCollection();
+      if (!cancelled && root) {
+        toast.success(`Added "${root.absolutePath}" - scanning now.`);
+        if (!isCatalogOpen) toggleSection('catalog');
+      }
+    } catch (err) {
+      toast.error(`Failed to add collection: ${err}`);
+    } finally {
+      setIsAddingCollection(false);
+    }
+  };
+
   return (
     <div
       className={clsx(
@@ -1246,10 +1274,24 @@ export default function FolderTree({
               </>
             )}
 
-            {hasVisibleCatalogRoots && (
+            {showCatalogSection && (
               <>
                 <div>
-                  <SectionHeader title="Library" isOpen={isCatalogOpen} onToggle={() => toggleSection('catalog')} />
+                  <SectionHeader
+                    title="Library"
+                    isOpen={isCatalogOpen}
+                    onToggle={() => toggleSection('catalog')}
+                    action={
+                      <button
+                        onClick={handleAddCollection}
+                        disabled={isAddingCollection}
+                        className="p-1 rounded-md text-text-secondary hover:bg-surface hover:text-text-primary disabled:opacity-50 disabled:cursor-not-allowed"
+                        data-tooltip="Add a photo folder as a new collection"
+                      >
+                        {isAddingCollection ? <Loader2 size={14} className="animate-spin" /> : <Plus size={14} />}
+                      </button>
+                    }
+                  />
                 </div>
                 <AnimatePresence initial={false}>
                   {isCatalogOpen && (
@@ -1261,6 +1303,11 @@ export default function FolderTree({
                       className="overflow-hidden"
                     >
 	                      <div className="pt-1 pb-2">
+	                        {catalogRoots.length === 0 && (
+	                          <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="px-2 py-1.5">
+	                            No collections yet - click + above to add one.
+	                          </Text>
+	                        )}
 	                        {catalogRoots.map((root) => {
 	                          const tree = catalogFolderTrees[root.id];
 	                          const isLoadingTree = loadingCatalogTreeIds.has(root.id);
