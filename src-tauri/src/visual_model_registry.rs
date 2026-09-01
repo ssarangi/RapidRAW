@@ -496,6 +496,16 @@ pub async fn download_visual_model_pack(
     let directory = pack_dir(&app_handle, &pack.id)?;
     fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
     let total = pack.artifacts.len() as i64;
+    if let Ok(db_path) = crate::library_db::active_library_path(&state) {
+        if let Ok(Some(_existing)) =
+            crate::library_db::find_active_model_download_job(&db_path, "visual", &pack.id)
+        {
+            return Err(format!(
+                "{} is already downloading. Check the background jobs list for progress.",
+                pack.display_name
+            ));
+        }
+    }
     let job = crate::library_db::active_library_path(&state)
         .ok()
         .and_then(|db_path| {

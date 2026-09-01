@@ -118,6 +118,27 @@ export default function FaceModelsSettings({ onOpenExternal }: FaceModelsSetting
     };
   }, [refresh]);
 
+  useEffect(() => {
+    void (async () => {
+      try {
+        const jobs = await invoke<{ kind: string; state: string; payloadJson?: string | null }[]>(Invokes.ListBackgroundJobs);
+        const activeJob = jobs.find((job) => {
+          if (job.kind !== 'model_download' || !['queued', 'running', 'paused', 'cancelling'].includes(job.state)) return false;
+          try {
+            const payload = job.payloadJson ? JSON.parse(job.payloadJson) : null;
+            return payload?.registry === 'face';
+          } catch { return false; }
+        });
+        if (activeJob?.payloadJson) {
+          const payload = JSON.parse(activeJob.payloadJson);
+          if (typeof payload.packId === 'string' && typeof payload.displayName === 'string') {
+            setActiveDownload({ packId: payload.packId, displayName: payload.displayName, current: 0, total: 1, stage: 'Downloading' });
+          }
+        }
+      } catch { /* best-effort resume of in-flight download state */ }
+    })();
+  }, []);
+
   const download = async (status: FaceModelPackStatus) => {
     setActionError(null);
     setActiveDownload({
@@ -231,6 +252,7 @@ export default function FaceModelsSettings({ onOpenExternal }: FaceModelsSetting
                     </div>
                     {status.pack.licenseAcknowledgementRequired && !status.installed && (
                       <Checkbox
+                        id={`accept-license-${status.pack.id}`}
                         className="mt-3"
                         checked={acceptedLicenses.has(status.pack.id)}
                         onChange={(checked) => {

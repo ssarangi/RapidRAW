@@ -310,6 +310,7 @@ pub struct BackgroundJob {
     pub error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub payload_json: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -423,6 +424,42 @@ pub fn create_background_job(
     .map_err(|error| error.to_string())?;
     record_job_event(&conn, &id, "queued", "Queued background job", 0, 0)?;
     Ok(id)
+}
+
+/// Returns the id of an existing, still-active `model_download` job for the given
+/// registry ("visual" or "face") and pack id, if one is already running. Two jobs
+/// for the same pack would both write to the same temp download path on disk and
+/// race/corrupt each other, so callers must check this before starting a new one.
+pub fn find_active_model_download_job(
+    db_path: &Path,
+    registry: &str,
+    pack_id: &str,
+) -> Result<Option<String>, String> {
+    let conn = open_connection(db_path)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT id, payload_json FROM background_jobs
+             WHERE kind = 'model_download' AND state IN ('queued', 'running', 'paused', 'cancelling')",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let payload_json: String = row.get(1)?;
+            Ok((id, payload_json))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    for (id, payload_json) in rows {
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload_json) else { continue };
+        if payload.get("registry").and_then(|v| v.as_str()) == Some(registry)
+            && payload.get("packId").and_then(|v| v.as_str()) == Some(pack_id)
+        {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
 }
 
 pub(crate) fn list_ai_tag_candidates(db_path: &Path) -> Result<Vec<(i64, String, i64)>, String> {
@@ -4255,6 +4292,7 @@ fn read_background_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<BackgroundJo
         error: row.get(8)?,
         created_at: row.get(9)?,
         updated_at: row.get(10)?,
+        payload_json: row.get(11)?,
     })
 }
 
@@ -4275,7 +4313,7 @@ pub fn list_background_jobs(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<Vec<BackgroundJob>, String> {
     let conn = open_connection(&active_library_path(&state)?)?;
-    let mut statement = conn.prepare("SELECT id, kind, state, root_id, current, total, current_item, message, error, created_at, updated_at FROM background_jobs ORDER BY CASE WHEN state IN ('running', 'paused', 'cancelling') THEN 0 ELSE 1 END, updated_at DESC LIMIT 100").map_err(|error| error.to_string())?;
+    let mut statement = conn.prepare("SELECT id, kind, state, root_id, current, total, current_item, message, error, created_at, updated_at, payload_json FROM background_jobs ORDER BY CASE WHEN state IN ('running', 'paused', 'cancelling') THEN 0 ELSE 1 END, updated_at DESC LIMIT 100").map_err(|error| error.to_string())?;
     statement
         .query_map([], read_background_job)
         .map_err(|error| error.to_string())?

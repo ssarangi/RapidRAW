@@ -97,6 +97,24 @@ export default function VisualModelsSettings({ onOpenExternal }: VisualModelsSet
     });
     return () => { void unlistenPromise.then((unlisten) => unlisten()); };
   }, []);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const jobs = await invoke<{ kind: string; state: string; payloadJson?: string | null }[]>(Invokes.ListBackgroundJobs);
+        const activeJob = jobs.find((job) => {
+          if (job.kind !== 'model_download' || !['queued', 'running', 'paused', 'cancelling'].includes(job.state)) return false;
+          try {
+            const payload = job.payloadJson ? JSON.parse(job.payloadJson) : null;
+            return payload?.registry === 'visual';
+          } catch { return false; }
+        });
+        if (activeJob?.payloadJson) {
+          const payload = JSON.parse(activeJob.payloadJson);
+          if (typeof payload.packId === 'string') setDownloadingId(payload.packId);
+        }
+      } catch { /* best-effort resume of in-flight download state */ }
+    })();
+  }, []);
   const refresh = useCallback(async () => {
     setLoading(true);
     try {

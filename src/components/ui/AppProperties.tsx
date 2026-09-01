@@ -495,6 +495,7 @@ export interface BackgroundJob {
   error?: string | null;
   createdAt: number;
   updatedAt: number;
+  payloadJson?: string | null;
 }
 
 export interface BackgroundJobEvent {

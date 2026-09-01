@@ -196,7 +196,7 @@ fn insightface_pack(
         recognizer: "ArcFace/MobileFaceNet".to_string(),
         detector_landmarks: 5,
         embedding_dimensions: Some(512),
-        availability: ModelAvailability::ConversionRequired,
+        availability: ModelAvailability::DirectDownload,
         artifacts: vec![artifact(
             file_name,
             ModelArtifactFormat::Zip,
@@ -276,6 +276,15 @@ fn read_installed_manifest(pack_dir: &Path) -> Result<Option<InstalledFaceModelP
         .map_err(|error| error.to_string())
 }
 
+/// Checks that every file the install manifest claims to have written is still
+/// present on disk with matching content. `pack.artifacts` describes the
+/// *download* sources, not necessarily the installed files: a `Zip`-format
+/// artifact (e.g. an InsightFace release archive) expands into several ONNX
+/// files whose names never appear in `pack.artifacts`, so completeness is
+/// checked against the manifest itself rather than requiring a 1:1 filename
+/// match against `pack.artifacts`. Registry-pinned digests (for artifacts
+/// downloaded directly as ONNX, not extracted from an archive) are still
+/// cross-checked so a locally forged manifest+file pair can't fake a pin.
 fn is_complete_install(
     pack: &FaceModelPack,
     pack_dir: &Path,
@@ -284,32 +293,29 @@ fn is_complete_install(
     let Some(manifest) = manifest else {
         return false;
     };
-    manifest.pack_id == pack.id
-        && manifest.artifacts.len() == pack.artifacts.len()
-        && pack.artifacts.iter().all(|artifact| {
-            let matching_manifest_artifacts = manifest
-                .artifacts
-                .iter()
-                .filter(|installed| installed.file_name == artifact.file_name)
-                .collect::<Vec<_>>();
-            let Some(installed) = matching_manifest_artifacts.first() else {
-                return false;
-            };
-            if matching_manifest_artifacts.len() != 1 {
-                return false;
-            }
+    if manifest.pack_id != pack.id || manifest.artifacts.is_empty() {
+        return false;
+    }
+    let pinned_onnx_digests: std::collections::HashMap<&str, Option<&str>> = pack
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.format == ModelArtifactFormat::Onnx)
+        .map(|artifact| (artifact.file_name.as_str(), artifact.sha256.as_deref()))
+        .collect();
 
-            let path = pack_dir.join(&artifact.file_name);
-            let Ok(actual) = sha256_file(&path) else {
-                return false;
-            };
-            actual.eq_ignore_ascii_case(&installed.sha256)
-                && artifact
-                    .sha256
-                    .as_deref()
-                    .map(|expected| actual.eq_ignore_ascii_case(expected))
-                    .unwrap_or(true)
-        })
+    manifest.artifacts.iter().all(|installed| {
+        let path = pack_dir.join(&installed.file_name);
+        let Ok(actual) = sha256_file(&path) else {
+            return false;
+        };
+        if !actual.eq_ignore_ascii_case(&installed.sha256) {
+            return false;
+        }
+        match pinned_onnx_digests.get(installed.file_name.as_str()) {
+            Some(Some(expected)) => actual.eq_ignore_ascii_case(expected),
+            _ => true,
+        }
+    })
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -455,6 +461,16 @@ pub async fn download_face_model_pack(
     let destination = pack_dir(&app_handle, &pack.id)?;
     fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
     let total = pack.artifacts.len();
+    if let Ok(db_path) = crate::library_db::active_library_path(&state) {
+        if let Ok(Some(_existing)) =
+            crate::library_db::find_active_model_download_job(&db_path, "face", &pack.id)
+        {
+            return Err(format!(
+                "{} is already downloading. Check the background jobs list for progress.",
+                pack.display_name
+            ));
+        }
+    }
     let mut installed_paths = Vec::new();
     let job = crate::library_db::active_library_path(&state)
         .ok()
