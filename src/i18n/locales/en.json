@@ -303,7 +303,8 @@
         "color": "Color",
         "curves": "Curves",
         "details": "Details",
-        "effects": "Effects"
+        "effects": "Effects",
+        "restore": "RAW Denoise & Sharpening"
       },
       "title": "Adjustments",
       "tooltips": {

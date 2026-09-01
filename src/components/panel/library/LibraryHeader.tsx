@@ -19,7 +19,6 @@ import {
   User,
   Bookmark,
   Trash2,
-  Wand2,
   Inbox,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -60,7 +59,7 @@ function DropdownMenu({
   buttonTitle,
   children,
   contentClassName = 'w-56',
-  buttonClassName = 'h-12 w-12 p-0 justify-center',
+  buttonClassName = 'h-12 w-12 bg-surface text-text-primary shadow-none p-0 justify-center',
 }: any) {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<any>(null);
@@ -80,10 +79,7 @@ function DropdownMenu({
       <Button
         aria-expanded={isOpen}
         aria-haspopup="true"
-        className={clsx(
-          'h-12 bg-surface text-text-primary shadow-none flex items-center',
-          buttonClassName,
-        )}
+        className={clsx('flex items-center', buttonClassName)}
         onClick={() => setIsOpen(!isOpen)}
         data-tooltip={buttonTitle}
       >
@@ -930,7 +926,7 @@ const AI_ANALYSIS_JOBS = [
   },
 ];
 
-export function CatalogAiAnalysisMenu() {
+export function CatalogAiAnalysisMenu({ compact = false }: { compact?: boolean } = {}) {
   const [startingKey, setStartingKey] = useState<string | null>(null);
   const librarySource = useLibraryStore((state) => state.librarySource);
   const isCatalogAvailable = librarySource.type === 'catalog';
@@ -955,13 +951,21 @@ export function CatalogAiAnalysisMenu() {
   return (
     <DropdownMenu
       buttonContent={
-        <>
-          <Sparkles className={clsx('w-5 h-5', !isCatalogAvailable && 'opacity-50')} />
-          <span className="text-sm font-medium whitespace-nowrap">AI Analysis</span>
-        </>
+        compact ? (
+          <Sparkles size={17} className={clsx(!isCatalogAvailable && 'opacity-50')} />
+        ) : (
+          <>
+            <Sparkles className={clsx('w-5 h-5', !isCatalogAvailable && 'opacity-50')} />
+            <span className="text-sm font-medium whitespace-nowrap">AI Analysis</span>
+          </>
+        )
       }
       buttonTitle={isCatalogAvailable ? 'Run AI analysis: tags, RAM++ broad tags' : 'Open a SQLite library to analyze catalog images'}
-      buttonClassName="px-3 gap-2 justify-center"
+      buttonClassName={
+        compact
+          ? 'h-auto w-auto p-2 bg-transparent shadow-none rounded-md text-text-secondary hover:bg-surface hover:text-text-primary'
+          : 'h-12 bg-surface text-text-primary shadow-none px-3 gap-2 justify-center'
+      }
       contentClassName="w-72"
     >
       <div className="p-2 space-y-1">
@@ -1000,7 +1004,7 @@ export function CatalogAiAnalysisMenu() {
 interface SuggestedAiTag { id: number; tag: string; imagePath: string; confidence: number }
 interface SuggestedSpecies { id: number; scientificName: string; commonName?: string; imagePath: string; confidence: number }
 
-export function CatalogReviewQueueButton() {
+export function CatalogReviewQueueButton({ compact = false }: { compact?: boolean } = {}) {
   const [tagItems, setTagItems] = useState<SuggestedAiTag[]>([]);
   const [speciesItems, setSpeciesItems] = useState<SuggestedSpecies[]>([]);
   const [open, setOpen] = useState(false);
@@ -1027,18 +1031,23 @@ export function CatalogReviewQueueButton() {
 
   return (
     <div className="relative" ref={dropdownRef}>
-      <Button
-        className="relative h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center"
+      <button
+        className={clsx(
+          'relative flex items-center justify-center rounded-md',
+          compact
+            ? 'p-2 text-text-secondary hover:bg-surface hover:text-text-primary'
+            : 'h-12 w-12 bg-transparent text-text-primary shadow-none p-0',
+        )}
         onClick={() => { setOpen(!open); if (!open) void loadAll(); }}
         data-tooltip="Review AI suggestions"
       >
-        <Inbox className="w-5 h-5" />
+        <Inbox size={compact ? 17 : 20} />
         {pendingCount > 0 && (
           <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-accent text-[10px] leading-4 text-white text-center font-semibold">
             {pendingCount > 99 ? '99+' : pendingCount}
           </span>
         )}
-      </Button>
+      </button>
       {open && (
         <div className="absolute right-0 mt-2 w-80 max-h-96 overflow-y-auto z-50 bg-surface border border-border-color rounded-md shadow-xl p-3 space-y-4">
           <div>
@@ -1088,119 +1097,6 @@ export function CatalogReviewQueueButton() {
                 </div>
               ))
             )}
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-export function CatalogEnhanceMenu() {
-  const [open, setOpen] = useState(false);
-  const [denoiseStrength, setDenoiseStrength] = useState(0.8);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const librarySource = useLibraryStore((state) => state.librarySource);
-  const libraryActivePath = useLibraryStore((state) => state.libraryActivePath);
-  const imageList = useLibraryStore((state) => state.imageList);
-  const isCatalogAvailable = librarySource.type === 'catalog';
-
-  const handleRunEnhance = async (operationKind: string) => {
-    if (!libraryActivePath) {
-      toast.info('Select an image in the catalog to enhance.');
-      return;
-    }
-    const currentImage = imageList.find((img) => img.path === libraryActivePath);
-    if (!currentImage?.id) {
-      toast.info('Selected image is not indexed in the catalog.');
-      return;
-    }
-    if (operationKind === 'raw_denoise' && !currentImage.is_raw) {
-      toast.info('RAW Restore is available only for RAW source images.');
-      return;
-    }
-    setIsProcessing(true);
-    try {
-      const recipe = {
-        operationKind,
-        modelId: operationKind === 'raw_denoise' ? 'rawnind-utnet2-bayer' : 'nafnet-sidd-rgb',
-        modelRevision: 'v1',
-        denoiseStrength,
-        // Finish-stage controls belong to the editor, never the catalog
-        // restoration derivative.
-        microcontrastStrength: 0,
-        detailRecovery: 0,
-        // rawnind-utnet2-bayer's ONNX graph has a static 512x512 input, and the
-        // Bayer tiling code halves tileSize before feeding the model, so this
-        // must be exactly 1024 for that model; nafnet-sidd-rgb's graph is
-        // static at 768x768 and takes tileSize directly.
-        tileSize: operationKind === 'raw_denoise' ? 1024 : 768,
-        tileOverlap: 64,
-      };
-      await invoke('start_image_restoration', {
-        imageId: currentImage.id,
-        recipe,
-      });
-      toast.success(`${operationKind === 'raw_denoise' ? 'RAW Restore' : 'RGB Denoise'} job started. Check Background Jobs.`);
-      setOpen(false);
-    } catch (error) {
-      console.error('Failed to start restoration:', error);
-      toast.error(`Restoration failed: ${error}`);
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  return (
-    <div className="relative">
-      <Button
-        className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center"
-        onClick={() => setOpen(!open)}
-        data-tooltip={isCatalogAvailable ? 'RAW Restore and RGB Denoise' : 'Open a SQLite library to restore catalog images'}
-        disabled={!isCatalogAvailable}
-      >
-        <Wand2 className="w-5 h-5 text-accent" />
-      </Button>
-      {open && (
-        <div className="absolute right-0 mt-2 w-80 z-50 bg-surface/95 backdrop-blur-md border border-border-color rounded-lg shadow-xl p-4">
-          <Text variant={TextVariants.subheading} weight={TextWeights.semibold} className="mb-3">
-            RAW Restore
-          </Text>
-
-          <div className="space-y-3 mb-4">
-            {!currentImage?.is_raw && <div>
-              <div className="flex justify-between text-xs text-text-secondary mb-1">
-                <span>Noise Reduction</span>
-                <span>{Math.round(denoiseStrength * 100)}%</span>
-              </div>
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.05"
-                value={denoiseStrength}
-                onChange={(e) => setDenoiseStrength(Number(e.target.value))}
-                className="w-full accent-accent"
-              />
-            </div>}
-
-          </div>
-
-          <div className="flex gap-2">
-            {currentImage?.is_raw ? <Button
-              className="flex-1 bg-accent text-white py-2 text-xs font-medium rounded-md"
-              disabled={isProcessing}
-              onClick={() => void handleRunEnhance('raw_denoise')}
-              data-tooltip="Run Bayer RAW denoise and demosaic restoration"
-            >
-              {isProcessing ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : 'RAW Restore'}
-            </Button> : <Button
-              className="flex-1 bg-surface-hover border border-border-color text-text-primary py-2 text-xs font-medium rounded-md"
-              disabled={isProcessing}
-              onClick={() => void handleRunEnhance('rgb_denoise')}
-              data-tooltip="Run developed-image RGB denoise"
-            >
-              {isProcessing ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : 'RGB Denoise'}
-            </Button>}
           </div>
         </div>
       )}

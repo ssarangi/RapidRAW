@@ -8,6 +8,7 @@ import CurveGraph from '../../adjustments/Curves';
 import ColorPanel from '../../adjustments/Color';
 import DetailsPanel from '../../adjustments/Details';
 import EffectsPanel from '../../adjustments/Effects';
+import RestorePanel from '../../adjustments/Restore';
 import CollapsibleSection from '../../ui/CollapsibleSection';
 import Waveform from '../editor/Waveform';
 import Resizer from '../../ui/Resizer';
@@ -271,7 +272,20 @@ export default function Controls() {
         )}
       </AnimatePresence>
 
-      <div className="grow overflow-y-scroll p-3 flex flex-col gap-2">
+      <div className="grow min-h-0 overflow-y-scroll p-3 flex flex-col gap-2">
+        {selectedImage && (
+          <div className="shrink-0 group">
+            <CollapsibleSection
+              canToggleVisibility={false}
+              isContentVisible={true}
+              isOpen={collapsibleSectionsState.restore}
+              onToggle={() => handleToggleSection('restore')}
+              title={t('editor.adjustments.sections.restore')}
+            >
+              <RestorePanel />
+            </CollapsibleSection>
+          </div>
+        )}
         {selectedImage ? (
           Object.keys(ADJUSTMENT_SECTIONS).map((sectionName: string) => {
             const SectionComponent: any = {
@@ -311,7 +325,8 @@ export default function Controls() {
               </div>
             );
           })
-        ) : (
+        ) : null}
+        {!selectedImage && (
           <div className="flex items-center justify-center h-full">
             <Text
               variant={TextVariants.heading}
