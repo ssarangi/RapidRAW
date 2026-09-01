@@ -2008,7 +2008,8 @@ pub fn generate_thumbnail_data(
                 } else {
                     settings.default_non_raw_tonemapper.as_deref().unwrap_or("basic")
                 };
-                default_tm == "agx"
+                crate::image_processing::ToneMapper::parse(default_tm)
+                    == crate::image_processing::ToneMapper::Agx
             }
         };
 
@@ -2121,13 +2122,6 @@ pub(crate) fn generate_single_thumbnail_and_cache(
         ));
     }
     None
-}
-
-fn prefetch_source_file(path_str: &str) {
-    let (source_path, _) = parse_virtual_path(path_str);
-    if let Ok(mut file) = std::fs::File::open(&source_path) {
-        let _ = std::io::copy(&mut file, &mut std::io::sink());
-    }
 }
 
 pub fn start_thumbnail_workers(app_handle: tauri::AppHandle) {

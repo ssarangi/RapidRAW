@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
 import clsx from 'clsx';
 import Slider from '../ui/Slider';
-import { Adjustments, BasicAdjustment } from '../../utils/adjustments';
+import { Adjustments, BasicAdjustment, ToneMapper } from '../../utils/adjustments';
 import { useEffect, useRef, useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
@@ -14,8 +14,8 @@ interface BasicAdjustmentsProps {
 }
 
 interface ToneMapperSwitchProps {
-  selectedMapper: string;
-  onMapperChange: (mapper: string) => void;
+  selectedMapper: ToneMapper;
+  onMapperChange: (mapper: ToneMapper) => void;
   evShiftValue: number;
   onEvShiftChange: (value: number) => void;
   onDragStateChange?: (isDragging: boolean) => void;
@@ -36,12 +36,12 @@ const ToneMapperSwitch = ({
   const toneMapperOptions = useMemo(
     () => [
       {
-        id: 'basic',
+        id: ToneMapper.Basic,
         label: t('adjustments.basic.mappers.basic'),
         title: t('adjustments.basic.mappers.basicDesc'),
       },
       {
-        id: 'agx',
+        id: ToneMapper.Agx,
         label: t('adjustments.basic.mappers.agx'),
         title: t('adjustments.basic.mappers.agxDesc'),
       },
@@ -50,7 +50,7 @@ const ToneMapperSwitch = ({
   );
 
   const handleReset = () => {
-    onMapperChange('basic');
+    onMapperChange(ToneMapper.Basic);
     onEvShiftChange(0);
   };
 
@@ -64,7 +64,7 @@ const ToneMapperSwitch = ({
 
     if (isInitialAnimation.current) {
       let initialX;
-      if (selectedMapper === 'agx') {
+      if (selectedMapper === ToneMapper.Agx) {
         initialX = `${toneMapperOptions.length * 100}%`;
       } else {
         initialX = '-25%';
@@ -168,10 +168,10 @@ export default function BasicAdjustments({
     setAdjustments((prev: Partial<Adjustments>) => ({ ...prev, [key]: numericValue }));
   };
 
-  const handleToneMapperChange = (mapper: string) => {
+  const handleToneMapperChange = (mapper: ToneMapper) => {
     setAdjustments((prev: Partial<Adjustments>) => ({
       ...prev,
-      toneMapper: mapper as 'basic' | 'agx',
+      toneMapper: mapper,
     }));
   };
 
@@ -191,7 +191,7 @@ export default function BasicAdjustments({
         />
       ) : (
         <ToneMapperSwitch
-          selectedMapper={adjustments.toneMapper || 'agx'}
+          selectedMapper={adjustments.toneMapper || ToneMapper.Agx}
           onMapperChange={handleToneMapperChange}
           evShiftValue={adjustments.exposure}
           onEvShiftChange={(value) => handleAdjustmentChange(BasicAdjustment.Exposure, value)}

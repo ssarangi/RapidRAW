@@ -39,6 +39,11 @@ export enum BasicAdjustment {
   Whites = 'whites',
 }
 
+export enum ToneMapper {
+  Basic = 'basic',
+  Agx = 'agx',
+}
+
 export enum ColorAdjustment {
   ColorGrading = 'colorGrading',
   Hsl = 'hsl',
@@ -236,7 +241,7 @@ export interface Adjustments {
   structure: number;
   temperature: number;
   tint: number;
-  toneMapper: 'agx' | 'basic';
+  toneMapper: ToneMapper;
   transformDistortion: number;
   transformVertical: number;
   transformHorizontal: number;
@@ -579,7 +584,7 @@ export const INITIAL_ADJUSTMENTS: Adjustments = {
   structure: 0,
   temperature: 0,
   tint: 0,
-  toneMapper: 'basic',
+  toneMapper: ToneMapper.Basic,
   transformDistortion: 0,
   transformVertical: 0,
   transformHorizontal: 0,

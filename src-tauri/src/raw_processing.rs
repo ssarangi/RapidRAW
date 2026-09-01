@@ -129,12 +129,7 @@ fn develop_internal(
     let rescale_factor = (u32::MAX as f32 - original_black_level) / denominator;
 
     let safe_highlight_compression = highlight_compression.max(1.01);
-
-    let clamp_limit = if fast_demosaic {
-        1.0
-    } else {
-        safe_highlight_compression
-    };
+    let clamp_limit = safe_highlight_compression;
 
     check_cancel()?;
 

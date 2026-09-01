@@ -1829,6 +1829,37 @@ fn calculate_agx_matrices() -> (GpuMat3, GpuMat3) {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToneMapper {
+    #[default]
+    Basic,
+    Agx,
+}
+
+impl ToneMapper {
+    /// Case-insensitive parse. Anything unrecognized (missing, misspelled,
+    /// or a stale/legacy value) resolves to `Basic` rather than silently
+    /// producing a mismatched render.
+    pub fn parse(value: &str) -> Self {
+        if value.eq_ignore_ascii_case("agx") {
+            ToneMapper::Agx
+        } else {
+            ToneMapper::Basic
+        }
+    }
+
+    pub fn from_adjustments_json(js_adjustments: &serde_json::Value) -> Self {
+        Self::parse(js_adjustments["toneMapper"].as_str().unwrap_or("basic"))
+    }
+
+    pub fn gpu_mode(self) -> u32 {
+        match self {
+            ToneMapper::Basic => 0,
+            ToneMapper::Agx => 1,
+        }
+    }
+}
+
 pub fn resolve_tonemapper_override(settings: &crate::AppSettings, is_raw: bool) -> Option<u32> {
     if !settings.tonemapper_override_enabled.unwrap_or(false) {
         return None;
@@ -1841,7 +1872,48 @@ pub fn resolve_tonemapper_override(settings: &crate::AppSettings, is_raw: bool) 
             .as_deref()
             .unwrap_or("basic")
     };
-    Some(if tm == "agx" { 1 } else { 0 })
+    Some(ToneMapper::parse(tm).gpu_mode())
+}
+
+#[cfg(test)]
+mod tone_mapper_tests {
+    use super::ToneMapper;
+
+    #[test]
+    fn parses_lowercase() {
+        assert_eq!(ToneMapper::parse("agx"), ToneMapper::Agx);
+        assert_eq!(ToneMapper::parse("basic"), ToneMapper::Basic);
+    }
+
+    #[test]
+    fn parses_case_insensitively() {
+        // Regression test: a legacy/corrupted sidecar with "AGX" (uppercase)
+        // must still resolve to Agx, not silently fall back to Basic.
+        assert_eq!(ToneMapper::parse("AGX"), ToneMapper::Agx);
+        assert_eq!(ToneMapper::parse("Agx"), ToneMapper::Agx);
+        assert_eq!(ToneMapper::parse("BASIC"), ToneMapper::Basic);
+    }
+
+    #[test]
+    fn falls_back_to_basic_for_unknown_values() {
+        assert_eq!(ToneMapper::parse("filmic"), ToneMapper::Basic);
+        assert_eq!(ToneMapper::parse(""), ToneMapper::Basic);
+    }
+
+    #[test]
+    fn gpu_mode_matches_shader_convention() {
+        assert_eq!(ToneMapper::Basic.gpu_mode(), 0);
+        assert_eq!(ToneMapper::Agx.gpu_mode(), 1);
+    }
+
+    #[test]
+    fn from_adjustments_json_reads_tone_mapper_field() {
+        let json = serde_json::json!({ "toneMapper": "AGX" });
+        assert_eq!(ToneMapper::from_adjustments_json(&json), ToneMapper::Agx);
+
+        let missing = serde_json::json!({});
+        assert_eq!(ToneMapper::from_adjustments_json(&missing), ToneMapper::Basic);
+    }
 }
 
 pub fn resolve_tonemapper_override_from_handle(
@@ -2139,7 +2211,7 @@ fn get_global_adjustments_from_json(
         ColorCalibrationSettings::default()
     };
 
-    let tone_mapper = js_adjustments["toneMapper"].as_str().unwrap_or("basic");
+    let tone_mapper = ToneMapper::from_adjustments_json(js_adjustments);
     let (pipe_to_rendering, rendering_to_pipe) = calculate_agx_matrices();
 
     let (has_lut, lut_intensity, lut_is_scene_referred) = if is_visible("effects") {
@@ -2250,8 +2322,7 @@ fn get_global_adjustments_from_json(
         has_lut,
         lut_intensity,
 
-        tonemapper_mode: tonemapper_override
-            .unwrap_or_else(|| if tone_mapper == "agx" { 1 } else { 0 }),
+        tonemapper_mode: tonemapper_override.unwrap_or_else(|| tone_mapper.gpu_mode()),
         lut_is_scene_referred,
         _pad_lut3: 0.0,
         _pad_lut4: 0.0,
