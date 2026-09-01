@@ -56,7 +56,7 @@ import {
   SortDirection,
   SmartCollection,
 } from '../../ui/AppProperties';
-import { addLibraryCollection } from '../../../utils/libraryCollections';
+import { addLibraryCollection, browseCatalogRoot } from '../../../utils/libraryCollections';
 import { CatalogAiAnalysisMenu, CatalogReviewQueueButton } from '../library/LibraryHeader';
 
 export interface FolderTree {
@@ -116,8 +116,6 @@ const ALBUM_ICONS: Record<string, React.ElementType> = {
   car: Car,
   briefcase: Briefcase,
 };
-
-const catalogFolderPath = (rootId: number, relativePath = '.') => `LibraryFolder:${rootId}:${relativePath || '.'}`;
 
 const filterTree = (node: FolderTree | null, query: string): FolderTree | null => {
   if (!node) {
@@ -995,36 +993,11 @@ export default function FolderTree({
   };
 
   const handleBrowseCatalogRoot = async (root: CatalogRoot, relativePath = '.', recursiveOverride?: boolean) => {
-    useLibraryStore.getState().setLibrary({ isViewLoading: true });
+    const recursive = recursiveOverride ?? appSettings?.libraryViewMode === LibraryViewMode.Recursive;
     try {
-      const recursive = recursiveOverride ?? appSettings?.libraryViewMode === LibraryViewMode.Recursive;
-      const files = await invoke<ImageFile[]>(Invokes.ListCatalogImages, {
-        rootId: root.id,
-        recursive,
-        folderPath: relativePath,
-      });
-      const initialRatings: Record<string, number> = {};
-      files.forEach((file) => {
-        initialRatings[file.path] = file.rating || 0;
-      });
-      useLibraryStore.getState().setLibrary({
-        rootPaths: [root.absolutePath],
-        currentFolderPath: catalogFolderPath(root.id, relativePath),
-        activeAlbumId: null,
-        activeCatalogRootId: root.id,
-        imageList: files,
-        imageRatings: initialRatings,
-        multiSelectedPaths: [],
-        libraryActivePath: null,
-        libraryScrollTop: 0,
-      });
-      useUIStore.getState().setUI({ activeView: 'library' });
+      await browseCatalogRoot(root, { relativePath, recursive });
     } catch (err) {
       console.error('Failed to load catalog images:', err);
-      toast.error(`Failed to load catalog images: ${err}`);
-      useUIStore.getState().setUI({ activeView: 'library' });
-    } finally {
-      useLibraryStore.getState().setLibrary({ isViewLoading: false });
     }
   };
 

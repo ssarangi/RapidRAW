@@ -40,6 +40,8 @@ import Text from '../ui/Text';
 import { TextColors, TextVariants, TextWeights } from '../../types/typography';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import { useUIStore } from '../../store/useUIStore';
+import { addLibraryCollection, browseCatalogRoot } from '../../utils/libraryCollections';
+import { toast } from 'react-toastify';
 import SettingsPanel from './SettingsPanel';
 
 import LibraryGrid from './library/LibraryGrid';
@@ -185,13 +187,16 @@ export default function MainLibrary(props: MainLibraryProps) {
     useUIStore.getState().setUI({ libraryDisplayMode: mode });
   };
 
-  const { searchCriteria, filterCriteria, catalogRoots } = useLibraryStore(
+  const { searchCriteria, filterCriteria, catalogRoots, librarySource, activeCatalogRootId } = useLibraryStore(
     useShallow((state) => ({
       searchCriteria: state.searchCriteria,
       filterCriteria: state.filterCriteria,
       catalogRoots: state.catalogRoots,
+      librarySource: state.librarySource,
+      activeCatalogRootId: state.activeCatalogRootId,
     })),
   );
+  const [isSplashBusy, setIsSplashBusy] = useState(false);
   const displayFolderPath = useMemo(() => {
     const path = props.currentFolderPath;
     if (!path?.startsWith('LibraryFolder:')) return path;
@@ -352,7 +357,53 @@ export default function MainLibrary(props: MainLibraryProps) {
         </div>
       );
     }
-    const hasLastPath = !!props.appSettings.lastRootPath || !!props.appSettings.rootFolders?.length;
+    const isCatalogMode = librarySource.type === 'catalog';
+    const hasLastPath = !!props.appSettings.lastRootPath || !!props.appSettings.rootFolders?.length || isCatalogMode;
+    const canContinueSession = !!props.appSettings.lastRootPath || !!props.appSettings.rootFolders?.length ||
+      (isCatalogMode && catalogRoots.length > 0);
+
+    const handleSplashAddFolder = async () => {
+      if (!isCatalogMode) {
+        props.onOpenFolder();
+        return;
+      }
+      if (isSplashBusy) return;
+      setIsSplashBusy(true);
+      try {
+        const { root, cancelled } = await addLibraryCollection();
+        if (!cancelled && root) {
+          await browseCatalogRoot(root, {
+            recursive: props.appSettings?.libraryViewMode === LibraryViewMode.Recursive,
+          });
+        }
+      } catch (err) {
+        toast.error(`Failed to add folder: ${err}`);
+      } finally {
+        setIsSplashBusy(false);
+      }
+    };
+
+    const handleSplashContinueSession = async () => {
+      if (!isCatalogMode) {
+        props.onContinueSession();
+        return;
+      }
+      if (isSplashBusy) return;
+      const root =
+        catalogRoots.find((candidate) => candidate.id === activeCatalogRootId) || catalogRoots[0] || null;
+      if (!root) return;
+      setIsSplashBusy(true);
+      try {
+        await browseCatalogRoot(root, {
+          recursive: props.appSettings?.libraryViewMode === LibraryViewMode.Recursive,
+        });
+      } catch (err) {
+        toast.error(`Failed to open library: ${err}`);
+      } finally {
+        setIsSplashBusy(false);
+      }
+    };
+
     const currentThemeId = props.theme || DEFAULT_THEME_ID;
     const selectedTheme: ThemeProps | undefined =
       THEMES.find((t: ThemeProps) => t.id === currentThemeId) ||
@@ -420,13 +471,19 @@ export default function MainLibrary(props: MainLibraryProps) {
                       )}
                     </Text>
                     <div className="flex flex-col w-full max-w-xs gap-4 relative z-10">
-                      {hasLastPath && (
+                      {canContinueSession && (
                         <Button
                           className="rounded-md h-11 w-full flex justify-center items-center shadow-md transition-transform duration-200 hover:scale-[1.01] active:scale-[.98]"
-                          onClick={props.onContinueSession}
+                          onClick={() => void handleSplashContinueSession()}
+                          disabled={isSplashBusy}
                           size="lg"
                         >
-                          <RefreshCw size={20} className="mr-2" /> {t('library.splash.continueSession')}
+                          {isSplashBusy ? (
+                            <Loader2 size={20} className="mr-2 animate-spin" />
+                          ) : (
+                            <RefreshCw size={20} className="mr-2" />
+                          )}{' '}
+                          {t('library.splash.continueSession')}
                         </Button>
                       )}
                       <div className="flex items-center gap-2">
@@ -434,7 +491,8 @@ export default function MainLibrary(props: MainLibraryProps) {
                           className={`rounded-md grow flex justify-center items-center shadow-md h-11 transition-transform duration-200 hover:scale-[1.01] active:scale-[.98] ${
                             hasLastPath ? 'bg-surface text-text-primary' : ''
                           }`}
-                          onClick={props.onOpenFolder}
+                          onClick={() => void handleSplashAddFolder()}
+                          disabled={isSplashBusy}
                           size="lg"
                         >
                           <Folder size={20} className="mr-2" />
