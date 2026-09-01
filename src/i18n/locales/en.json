@@ -978,7 +978,7 @@
       "title": "Library",
       "viewOptions": {
         "currentFolder": "Current Folder",
-        "displayMode": "Display Mode",
+        "folderScope": "Folder Scope",
         "exifDisabledTooltip": "Enable EXIF Reading in Settings to use this option.",
         "filterByColorLabel": "Filter by Color Label",
         "filterByEdited": "Filter by Edit Status",

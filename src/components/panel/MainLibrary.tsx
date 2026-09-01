@@ -43,7 +43,7 @@ import { useUIStore } from '../../store/useUIStore';
 import SettingsPanel from './SettingsPanel';
 
 import LibraryGrid from './library/LibraryGrid';
-import { CatalogAiTaggingButton, CatalogAiTagReviewButton, CatalogEnhanceMenu, CatalogRamPlusTaggingButton, CatalogSearchDropdown, CatalogSpeciesReviewButton, SearchInput, SmartCollectionsDropdown, ViewOptionsDropdown } from './library/LibraryHeader';
+import { CatalogAiAnalysisMenu, CatalogEnhanceMenu, CatalogReviewQueueButton, CatalogSearchDropdown, SearchInput, SmartCollectionsDropdown, ViewOptionsDropdown } from './library/LibraryHeader';
 
 export interface ColumnWidths {
   thumbnail: number;
@@ -614,45 +614,67 @@ export default function MainLibrary(props: MainLibraryProps) {
           )}
           <DisplayModeSwitch displayMode={libraryDisplayMode} setDisplayMode={setLibraryDisplayMode} t={t} />
 
-          <div className="flex items-center bg-surface p-1 rounded-lg gap-1 border border-border-color/20">
+          <div className="flex items-center gap-2">
             {libraryDisplayMode !== LibraryDisplayMode.Cull && (
               <>
-                <SearchInput indexingProgress={props.indexingProgress} isIndexing={props.isIndexing} />
-                <CatalogSearchDropdown />
-                <SmartCollectionsDropdown />
-                <CatalogAiTaggingButton />
-                <CatalogRamPlusTaggingButton />
-                <CatalogAiTagReviewButton />
-                <CatalogSpeciesReviewButton />
-                <CatalogEnhanceMenu />
-                <ViewOptionsDropdown
-                  libraryViewMode={props.libraryViewMode}
-                  onSelectSize={props.onThumbnailSizeChange}
-                  onSelectAspectRatio={props.onThumbnailAspectRatioChange}
-                  onLibraryRefresh={props.onLibraryRefresh}
-                  setLibraryViewMode={props.setLibraryViewMode}
-                  thumbnailSize={props.thumbnailSize}
-                  thumbnailAspectRatio={props.thumbnailAspectRatio}
-                  thumbnailSizeOptions={translatedThumbnailSizeOptions}
-                  thumbnailAspectRatioOptions={translatedThumbnailAspectRatioOptions}
-                  ratingFilterOptions={translatedRatingFilterOptions}
-                  rawStatusOptions={translatedRawStatusOptions}
-                  editedStatusOptions={translatedEditedStatusOptions}
-                  sortOptions={translatedSortOptions}
-                />
+                {/* Find */}
+                <div
+                  className="flex items-center bg-surface p-1 rounded-lg gap-1 border border-border-color/20"
+                  data-tooltip="Find"
+                >
+                  <SearchInput indexingProgress={props.indexingProgress} isIndexing={props.isIndexing} />
+                  <CatalogSearchDropdown />
+                  <SmartCollectionsDropdown />
+                </div>
+
+                {/* Library tools */}
+                <div
+                  className="flex items-center bg-surface p-1 rounded-lg gap-1 border border-border-color/20"
+                  data-tooltip="Library tools — catalog only"
+                >
+                  <CatalogAiAnalysisMenu />
+                  <CatalogReviewQueueButton />
+                  <CatalogEnhanceMenu />
+                </div>
+
+                {/* View & layout */}
+                <div
+                  className="flex items-center bg-surface p-1 rounded-lg gap-1 border border-border-color/20"
+                  data-tooltip="View & layout"
+                >
+                  <ViewOptionsDropdown
+                    libraryViewMode={props.libraryViewMode}
+                    onSelectSize={props.onThumbnailSizeChange}
+                    onSelectAspectRatio={props.onThumbnailAspectRatioChange}
+                    onLibraryRefresh={props.onLibraryRefresh}
+                    setLibraryViewMode={props.setLibraryViewMode}
+                    thumbnailSize={props.thumbnailSize}
+                    thumbnailAspectRatio={props.thumbnailAspectRatio}
+                    thumbnailSizeOptions={translatedThumbnailSizeOptions}
+                    thumbnailAspectRatioOptions={translatedThumbnailAspectRatioOptions}
+                    ratingFilterOptions={translatedRatingFilterOptions}
+                    rawStatusOptions={translatedRawStatusOptions}
+                    editedStatusOptions={translatedEditedStatusOptions}
+                    sortOptions={translatedSortOptions}
+                  />
+                </div>
+
+                {/* App chrome */}
                 {!props.isAndroid && (
-                  <Button
-                    className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center"
-                    onClick={props.onNavigateToCommunity}
-                    data-tooltip={t('library.tooltips.communityPresets')}
-                  >
-                    <Users className="w-5 h-5" />
-                  </Button>
+                  <div className="flex items-center bg-surface p-1 rounded-lg gap-1 border border-border-color/20">
+                    <Button
+                      className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center"
+                      onClick={props.onNavigateToCommunity}
+                      data-tooltip={t('library.tooltips.communityPresets')}
+                    >
+                      <Users className="w-5 h-5" />
+                    </Button>
+                  </div>
                 )}
               </>
             )}
             <Button
-              className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center"
+              className="h-12 w-12 bg-surface border border-border-color/20 text-text-primary shadow-none p-0 flex items-center justify-center rounded-lg"
               onClick={props.onGoHome}
               data-tooltip={t('library.tooltips.goHome')}
             >

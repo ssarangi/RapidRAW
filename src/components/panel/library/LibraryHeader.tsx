@@ -19,6 +19,8 @@ import {
   User,
   Bookmark,
   Trash2,
+  Wand2,
+  Inbox,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useShallow } from 'zustand/react/shallow';
@@ -53,7 +55,13 @@ import { useSettingsStore } from '../../../store/useSettingsStore';
 import { useUIStore } from '../../../store/useUIStore';
 import { ADVANCED_QUERY_REGEX } from '../../../hooks/useSortedLibrary';
 
-function DropdownMenu({ buttonContent, buttonTitle, children, contentClassName = 'w-56' }: any) {
+function DropdownMenu({
+  buttonContent,
+  buttonTitle,
+  children,
+  contentClassName = 'w-56',
+  buttonClassName = 'h-12 w-12 p-0 justify-center',
+}: any) {
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<any>(null);
 
@@ -72,7 +80,10 @@ function DropdownMenu({ buttonContent, buttonTitle, children, contentClassName =
       <Button
         aria-expanded={isOpen}
         aria-haspopup="true"
-        className="h-12 w-12 bg-surface text-text-primary shadow-none p-0 flex items-center justify-center"
+        className={clsx(
+          'h-12 bg-surface text-text-primary shadow-none flex items-center',
+          buttonClassName,
+        )}
         onClick={() => setIsOpen(!isOpen)}
         data-tooltip={buttonTitle}
       >
@@ -620,18 +631,17 @@ export function CatalogSearchDropdown() {
         aria-expanded={isOpen}
         aria-haspopup="true"
         className={clsx(
-          'h-12 px-3 bg-transparent text-text-primary shadow-none flex items-center justify-center gap-2',
+          'h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center',
           !isCatalogAvailable && 'opacity-50',
         )}
         onClick={() => setIsOpen((open) => !open)}
         data-tooltip={
           isCatalogAvailable
-            ? t('library.header.catalogSearch.title', { defaultValue: 'Search Catalog' })
+            ? t('library.header.catalogSearch.title', { defaultValue: 'Advanced search' })
             : t('library.header.catalogSearch.unavailable', { defaultValue: 'Open a SQLite library to search catalog metadata' })
         }
       >
         <Database className="w-5 h-5" />
-        <span className="text-sm font-medium whitespace-nowrap">Catalog Search</span>
       </Button>
 
       <AnimatePresence>
@@ -863,7 +873,7 @@ export function SmartCollectionsDropdown() {
         className={clsx('h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center', !isCatalogAvailable && 'opacity-50')}
         disabled={!isCatalogAvailable}
         onClick={toggleOpen}
-        data-tooltip="Smart Collections"
+        data-tooltip="Saved searches"
       >
         <Bookmark className="w-5 h-5" />
       </Button>
@@ -872,7 +882,7 @@ export function SmartCollectionsDropdown() {
           <motion.div className="absolute right-0 mt-2 w-80 max-w-[calc(100vw-2rem)] origin-top-right z-50" initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.95 }} transition={{ duration: 0.1, ease: 'easeOut' }}>
             <div className="bg-surface/95 backdrop-blur-md border border-border-color/50 rounded-lg shadow-xl p-2">
               <div className="flex items-center justify-between px-2 py-2">
-                <Text variant={TextVariants.small} weight={TextWeights.semibold}>Smart Collections</Text>
+                <Text variant={TextVariants.small} weight={TextWeights.semibold}>Saved Searches</Text>
                 <Button className="h-7 w-7 p-0 bg-transparent text-text-secondary shadow-none" onClick={() => void loadCollections()} data-tooltip="Refresh collections">
                   <Loader2 size={15} className={clsx(isLoading && 'animate-spin')} />
                 </Button>
@@ -901,75 +911,188 @@ export function SmartCollectionsDropdown() {
   );
 }
 
-export function CatalogAiTaggingButton() {
-  const [isStarting, setIsStarting] = useState(false);
+const AI_ANALYSIS_JOBS = [
+  {
+    key: 'aiTags' as const,
+    label: 'AI Tags',
+    description: 'General-purpose AI tags for the active catalog',
+    invoke: Invokes.StartCatalogAiTagging,
+    startedMessage: 'AI tagging started. Progress is available in Background Jobs.',
+    failedMessage: 'Failed to start AI tagging',
+  },
+  {
+    key: 'ramPlus' as const,
+    label: 'RAM++ Broad Tags',
+    description: 'Broad scene and object tags via RAM++',
+    invoke: Invokes.StartCatalogRamPlusTagging,
+    startedMessage: 'RAM++ tagging started. Progress is available in Background Jobs.',
+    failedMessage: 'Failed to start RAM++ tagging',
+  },
+];
+
+export function CatalogAiAnalysisMenu() {
+  const [startingKey, setStartingKey] = useState<string | null>(null);
   const librarySource = useLibraryStore((state) => state.librarySource);
   const isCatalogAvailable = librarySource.type === 'catalog';
 
-  const startTagging = async () => {
+  const startJob = async (job: (typeof AI_ANALYSIS_JOBS)[number]) => {
     if (!isCatalogAvailable) {
       toast.info('Open or create a SQLite library first.');
       return;
     }
-
-    setIsStarting(true);
+    setStartingKey(job.key);
     try {
-      await invoke<string>(Invokes.StartCatalogAiTagging);
-      toast.info('AI tagging started. Progress is available in Background Jobs.');
+      await invoke<string>(job.invoke);
+      toast.info(job.startedMessage);
     } catch (error) {
-      console.error('Failed to start catalog AI tagging:', error);
-      toast.error(`Failed to start AI tagging: ${error}`);
+      console.error(`${job.failedMessage}:`, error);
+      toast.error(`${job.failedMessage}: ${error}`);
     } finally {
-      setIsStarting(false);
+      setStartingKey(null);
     }
   };
 
   return (
-    <Button
-      className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center"
-      disabled={isStarting || !isCatalogAvailable}
-      onClick={() => void startTagging()}
-      data-tooltip={
-        isCatalogAvailable
-          ? 'Analyze catalog with AI tags'
-          : 'Open a SQLite library to analyze catalog images'
+    <DropdownMenu
+      buttonContent={
+        <>
+          <Sparkles className={clsx('w-5 h-5', !isCatalogAvailable && 'opacity-50')} />
+          <span className="text-sm font-medium whitespace-nowrap">AI Analysis</span>
+        </>
       }
+      buttonTitle={isCatalogAvailable ? 'Run AI analysis: tags, RAM++ broad tags' : 'Open a SQLite library to analyze catalog images'}
+      buttonClassName="px-3 gap-2 justify-center"
+      contentClassName="w-72"
     >
-      {isStarting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Sparkles className="w-5 h-5" />}
-    </Button>
+      <div className="p-2 space-y-1">
+        <Text as="div" variant={TextVariants.small} weight={TextWeights.semibold} className="px-2 py-1 uppercase">
+          AI Analysis
+        </Text>
+        {AI_ANALYSIS_JOBS.map((job) => (
+          <button
+            key={job.key}
+            className="w-full flex items-center justify-between gap-3 rounded-md px-2 py-2 text-left hover:bg-bg-primary disabled:opacity-50 disabled:hover:bg-transparent"
+            disabled={!!startingKey || !isCatalogAvailable}
+            onClick={() => void startJob(job)}
+          >
+            <div className="min-w-0">
+              <Text as="div" variant={TextVariants.small} weight={TextWeights.medium}>
+                {job.label}
+              </Text>
+              <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="truncate">
+                {job.description}
+              </Text>
+            </div>
+            {startingKey === job.key ? (
+              <Loader2 size={16} className="shrink-0 animate-spin text-text-secondary" />
+            ) : (
+              <Text as="span" variant={TextVariants.small} color={TextColors.secondary} className="shrink-0">
+                Run
+              </Text>
+            )}
+          </button>
+        ))}
+      </div>
+    </DropdownMenu>
   );
 }
 
-export function CatalogRamPlusTaggingButton() {
-  const [isStarting, setIsStarting] = useState(false);
-  const librarySource = useLibraryStore((state) => state.librarySource);
-  const isCatalogAvailable = librarySource.type === 'catalog';
-  const startTagging = async () => {
-    if (!isCatalogAvailable) { toast.info('Open or create a SQLite library first.'); return; }
-    setIsStarting(true);
-    try { await invoke<string>(Invokes.StartCatalogRamPlusTagging); toast.info('RAM++ tagging started. Progress is available in Background Jobs.'); }
-    catch (error) { console.error('Failed to start RAM++ tagging:', error); toast.error(`Failed to start RAM++ tagging: ${error}`); }
-    finally { setIsStarting(false); }
-  };
-  return <Button className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center" disabled={isStarting || !isCatalogAvailable} onClick={() => void startTagging()} data-tooltip={isCatalogAvailable ? 'Analyze catalog with RAM++ broad tags' : 'Open a SQLite library to analyze catalog images'}>{isStarting ? <Loader2 className="w-5 h-5 animate-spin" /> : <Tags className="w-5 h-5" />}</Button>;
-}
+interface SuggestedAiTag { id: number; tag: string; imagePath: string; confidence: number }
+interface SuggestedSpecies { id: number; scientificName: string; commonName?: string; imagePath: string; confidence: number }
 
-export function CatalogAiTagReviewButton() {
-  const [items, setItems] = useState<Array<{ id: number; tag: string; imagePath: string; confidence: number }>>([]);
+export function CatalogReviewQueueButton() {
+  const [tagItems, setTagItems] = useState<SuggestedAiTag[]>([]);
+  const [speciesItems, setSpeciesItems] = useState<SuggestedSpecies[]>([]);
   const [open, setOpen] = useState(false);
-  const load = async () => { try { setItems(await invoke(Invokes.ListSuggestedAiTags)); } catch (error) { console.error('Failed to load AI tag suggestions:', error); toast.error(`Failed to load AI tag suggestions: ${error}`); } };
-  const review = async (id: number, reviewState: 'accepted' | 'rejected') => { try { await invoke(Invokes.ReviewAiTag, { id, reviewState }); await load(); } catch (error) { console.error('Failed to review AI tag:', error); toast.error(`Failed to review AI tag: ${error}`); } };
-  const reviewAll = async (reviewState: 'accepted' | 'rejected') => { try { await invoke(Invokes.ReviewAiTags, { ids: items.map((item) => item.id), reviewState }); await load(); } catch (error) { toast.error(`Failed to review AI tags: ${error}`); } };
-  return <div className="relative"><Button className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center" onClick={() => { setOpen(!open); if (!open) void load(); }} data-tooltip="Review AI tag suggestions"><Tags className="w-5 h-5" /></Button>{open && <div className="absolute right-0 mt-2 w-72 max-h-80 overflow-y-auto z-50 bg-surface border border-border-color rounded-md shadow-xl p-3"><div className="flex items-center justify-between gap-2"><Text variant={TextVariants.small}>AI tag suggestions</Text>{items.length > 0 && <div className="flex gap-2 text-xs"><button className="text-green-300" onClick={() => void reviewAll('accepted')}>Accept all</button><button className="text-red-300" onClick={() => void reviewAll('rejected')}>Reject all</button></div>}</div>{items.length === 0 ? <Text variant={TextVariants.small} color={TextColors.secondary}>No suggestions to review</Text> : items.map((item) => <div key={item.id} className="flex items-center justify-between gap-2 py-2 border-b border-border-color/40"><img src={convertFileSrc(item.imagePath)} className="w-10 h-10 object-cover rounded-sm" alt="" /><div className="min-w-0 flex-1"><Text variant={TextVariants.small}>{item.tag}</Text><Text variant={TextVariants.small} color={TextColors.secondary}>{item.confidence > 0 ? `${Math.round(item.confidence * 100)}% confidence` : 'Derived tag'}</Text></div><div className="flex gap-1"><button className="text-green-300 text-xs" onClick={() => void review(item.id, 'accepted')}>Accept</button><button className="text-red-300 text-xs" onClick={() => void review(item.id, 'rejected')}>Reject</button></div></div>)}</div>}</div>;
-}
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
-export function CatalogSpeciesReviewButton() {
-  const [items, setItems] = useState<Array<{ id: number; scientificName: string; commonName?: string; imagePath: string; confidence: number }>>([]);
-  const [open, setOpen] = useState(false);
-  const load = async () => { try { setItems(await invoke('list_suggested_species')); } catch (error) { console.error('Failed to load species suggestions:', error); toast.error(`Failed to load species suggestions: ${error}`); } };
-  const review = async (id: number, reviewState: 'accepted' | 'rejected') => { try { await invoke('review_species', { id, reviewState }); await load(); } catch (error) { console.error('Failed to review species:', error); toast.error(`Failed to review species: ${error}`); } };
-  const reviewAll = async (reviewState: 'accepted' | 'rejected') => { try { await invoke('review_species_batch', { ids: items.map((item) => item.id), reviewState }); await load(); } catch (error) { toast.error(`Failed to review species: ${error}`); } };
-  return <div className="relative"><Button className="h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center" onClick={() => { setOpen(!open); if (!open) void load(); }} data-tooltip="Review BioCLIP species suggestions"><Bookmark className="w-5 h-5" /></Button>{open && <div className="absolute right-0 mt-2 w-80 max-h-80 overflow-y-auto z-50 bg-surface border border-border-color rounded-md shadow-xl p-3"><div className="flex items-center justify-between gap-2"><Text variant={TextVariants.small} weight={TextWeights.semibold}>Species Classifications</Text>{items.length > 0 && <div className="flex gap-2 text-xs"><button className="text-green-300" onClick={() => void reviewAll('accepted')}>Accept all</button><button className="text-red-300" onClick={() => void reviewAll('rejected')}>Reject all</button></div>}</div>{items.length === 0 ? <Text variant={TextVariants.small} color={TextColors.secondary} className="mt-2">No species suggestions to review</Text> : items.map((item) => <div key={item.id} className="flex items-center justify-between gap-2 py-2 border-b border-border-color/40"><img src={convertFileSrc(item.imagePath)} className="w-10 h-10 object-cover rounded-sm" alt="" /><div className="min-w-0 flex-1"><Text variant={TextVariants.small} weight={TextWeights.medium} className="truncate">{item.commonName || item.scientificName}</Text><Text variant={TextVariants.small} color={TextColors.secondary} className="truncate italic">{item.scientificName}</Text><Text variant={TextVariants.small} color={TextColors.secondary}>{Math.round(item.confidence * 100)}% match</Text></div><div className="flex gap-1"><button className="text-green-300 text-xs px-2 py-1 bg-green-500/10 rounded" onClick={() => void review(item.id, 'accepted')}>Accept</button><button className="text-red-300 text-xs px-2 py-1 bg-red-500/10 rounded" onClick={() => void review(item.id, 'rejected')}>Reject</button></div></div>)}</div>}</div>;
+  const loadTags = async () => { try { setTagItems(await invoke(Invokes.ListSuggestedAiTags)); } catch (error) { console.error('Failed to load AI tag suggestions:', error); toast.error(`Failed to load AI tag suggestions: ${error}`); } };
+  const loadSpecies = async () => { try { setSpeciesItems(await invoke('list_suggested_species')); } catch (error) { console.error('Failed to load species suggestions:', error); toast.error(`Failed to load species suggestions: ${error}`); } };
+  const loadAll = async () => { await Promise.all([loadTags(), loadSpecies()]); };
+
+  const reviewTag = async (id: number, reviewState: 'accepted' | 'rejected') => { try { await invoke(Invokes.ReviewAiTag, { id, reviewState }); await loadTags(); } catch (error) { console.error('Failed to review AI tag:', error); toast.error(`Failed to review AI tag: ${error}`); } };
+  const reviewAllTags = async (reviewState: 'accepted' | 'rejected') => { try { await invoke(Invokes.ReviewAiTags, { ids: tagItems.map((item) => item.id), reviewState }); await loadTags(); } catch (error) { toast.error(`Failed to review AI tags: ${error}`); } };
+  const reviewSpecies = async (id: number, reviewState: 'accepted' | 'rejected') => { try { await invoke('review_species', { id, reviewState }); await loadSpecies(); } catch (error) { console.error('Failed to review species:', error); toast.error(`Failed to review species: ${error}`); } };
+  const reviewAllSpecies = async (reviewState: 'accepted' | 'rejected') => { try { await invoke('review_species_batch', { ids: speciesItems.map((item) => item.id), reviewState }); await loadSpecies(); } catch (error) { toast.error(`Failed to review species: ${error}`); } };
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const pendingCount = tagItems.length + speciesItems.length;
+
+  return (
+    <div className="relative" ref={dropdownRef}>
+      <Button
+        className="relative h-12 w-12 bg-transparent text-text-primary shadow-none p-0 flex items-center justify-center"
+        onClick={() => { setOpen(!open); if (!open) void loadAll(); }}
+        data-tooltip="Review AI suggestions"
+      >
+        <Inbox className="w-5 h-5" />
+        {pendingCount > 0 && (
+          <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 rounded-full bg-accent text-[10px] leading-4 text-white text-center font-semibold">
+            {pendingCount > 99 ? '99+' : pendingCount}
+          </span>
+        )}
+      </Button>
+      {open && (
+        <div className="absolute right-0 mt-2 w-80 max-h-96 overflow-y-auto z-50 bg-surface border border-border-color rounded-md shadow-xl p-3 space-y-4">
+          <div>
+            <div className="flex items-center justify-between gap-2">
+              <Text variant={TextVariants.small} weight={TextWeights.semibold}>AI tag suggestions</Text>
+              {tagItems.length > 0 && <div className="flex gap-2 text-xs"><button className="text-green-300" onClick={() => void reviewAllTags('accepted')}>Accept all</button><button className="text-red-300" onClick={() => void reviewAllTags('rejected')}>Reject all</button></div>}
+            </div>
+            {tagItems.length === 0 ? (
+              <Text variant={TextVariants.small} color={TextColors.secondary} className="mt-1">No suggestions to review</Text>
+            ) : (
+              tagItems.map((item) => (
+                <div key={item.id} className="flex items-center justify-between gap-2 py-2 border-b border-border-color/40">
+                  <img src={convertFileSrc(item.imagePath)} className="w-10 h-10 object-cover rounded-sm" alt="" />
+                  <div className="min-w-0 flex-1">
+                    <Text variant={TextVariants.small}>{item.tag}</Text>
+                    <Text variant={TextVariants.small} color={TextColors.secondary}>{item.confidence > 0 ? `${Math.round(item.confidence * 100)}% confidence` : 'Derived tag'}</Text>
+                  </div>
+                  <div className="flex gap-1">
+                    <button className="text-green-300 text-xs" onClick={() => void reviewTag(item.id, 'accepted')}>Accept</button>
+                    <button className="text-red-300 text-xs" onClick={() => void reviewTag(item.id, 'rejected')}>Reject</button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between gap-2">
+              <Text variant={TextVariants.small} weight={TextWeights.semibold}>Species classifications</Text>
+              {speciesItems.length > 0 && <div className="flex gap-2 text-xs"><button className="text-green-300" onClick={() => void reviewAllSpecies('accepted')}>Accept all</button><button className="text-red-300" onClick={() => void reviewAllSpecies('rejected')}>Reject all</button></div>}
+            </div>
+            {speciesItems.length === 0 ? (
+              <Text variant={TextVariants.small} color={TextColors.secondary} className="mt-1">No species suggestions to review</Text>
+            ) : (
+              speciesItems.map((item) => (
+                <div key={item.id} className="flex items-center justify-between gap-2 py-2 border-b border-border-color/40">
+                  <img src={convertFileSrc(item.imagePath)} className="w-10 h-10 object-cover rounded-sm" alt="" />
+                  <div className="min-w-0 flex-1">
+                    <Text variant={TextVariants.small} weight={TextWeights.medium} className="truncate">{item.commonName || item.scientificName}</Text>
+                    <Text variant={TextVariants.small} color={TextColors.secondary} className="truncate italic">{item.scientificName}</Text>
+                    <Text variant={TextVariants.small} color={TextColors.secondary}>{Math.round(item.confidence * 100)}% match</Text>
+                  </div>
+                  <div className="flex gap-1">
+                    <button className="text-green-300 text-xs px-2 py-1 bg-green-500/10 rounded" onClick={() => void reviewSpecies(item.id, 'accepted')}>Accept</button>
+                    <button className="text-red-300 text-xs px-2 py-1 bg-red-500/10 rounded" onClick={() => void reviewSpecies(item.id, 'rejected')}>Reject</button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function CatalogEnhanceMenu() {
@@ -1035,7 +1158,7 @@ export function CatalogEnhanceMenu() {
         data-tooltip={isCatalogAvailable ? 'RAW Restore and RGB Denoise' : 'Open a SQLite library to restore catalog images'}
         disabled={!isCatalogAvailable}
       >
-        <Sparkles className="w-5 h-5 text-accent" />
+        <Wand2 className="w-5 h-5 text-accent" />
       </Button>
       {open && (
         <div className="absolute right-0 mt-2 w-80 z-50 bg-surface/95 backdrop-blur-md border border-border-color rounded-lg shadow-xl p-4">
@@ -1258,7 +1381,7 @@ export function ViewOptionsDropdown({
 
           <div>
             <Text as="div" variant={TextVariants.small} weight={TextWeights.semibold} className="px-3 py-1 uppercase">
-              {t('library.header.viewOptions.displayMode')}
+              {t('library.header.viewOptions.folderScope')}
             </Text>
             <div className="px-3 mt-1">
               <SegmentedSwitch
