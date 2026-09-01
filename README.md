@@ -60,20 +60,24 @@ RapidRAW is still in active development and isn't yet as polished as mature tool
 <details>
 <summary><strong>Recent Changes</strong></summary>
 
+- **2026-08-31:** New edge-aware filter for ai masks, improved sharpening & mobile UI improvements
+- **2026-08-29:** Improved EXIF ​​metadata processing during export
+- **2026-08-29:** Implement folder-level EXIF caching and prevent redundant adjustment saves
+- **2026-08-28:** Categorize mask creation panel
 - **2026-08-27:** Split thumbnail resolution settings into separate grid and editor preview sizes
 - **2026-08-26:** Introduced a retouch tool to effortlessly smooth skin
 - **2026-08-25:** Added a liquify tool to reshape and warp parts of an image
 - **2026-08-24:** New global shift+drag straighten shortcut & improved auto-crop calculation
 - **2026-08-20:** Add drag & drop image move system to quickly organize library
 - **2026-08-19:** Restored side panels on tablets
-- **2026-08-17:** Integrated built-in analog film emulations powered by Spektrafilm, featuring a scene-referred V-Log color pipeline in the WGSL shader
-- **2026-08-16:** Added native Camera Tethering with real-time Live View, exposure controls, ghost overlay, and direct library ingestion (macOS & Linux)
-- **2026-08-16:** Added Focus Stacking to merge multi-focus brackets into a single sharp image
-- **2026-08-14:** Export now preserves and writes full EXIF metadata
 
 <details>
 <summary><strong>Expand further</strong></summary>
 
+- **2026-08-17:** Integrated built-in analog film emulations powered by Spektrafilm, featuring a scene-referred V-Log color pipeline in the WGSL shader
+- **2026-08-16:** Added native Camera Tethering with real-time Live View, exposure controls, ghost overlay, and direct library ingestion (macOS & Linux)
+- **2026-08-16:** Added Focus Stacking to merge multi-focus brackets into a single sharp image
+- **2026-08-14:** Export now preserves and writes full EXIF metadata
 - **2026-08-13:** Replaced local contrast sharpening with a high-quality multi-scale filter
 - **2026-08-11:** Added automatic canvas cropping for generative AI inpainting workflows
 - **2026-08-07:** Updated Lensfun database for latest camera bodies and lenses
@@ -786,15 +790,30 @@ npm run tauri build -- --features tethering
 
 RapidRAW includes camera tethering for studio, portrait, and product photography workflows. Connect your camera via USB to control exposure settings, monitor your shot in real time, and automatically ingest files directly into your workspace.
 
-### Key Capabilities
-
-- **Real-Time Live View:** High-frame-rate live view with composition guides, 90° rotation, and horizontal flip.
-- **Full Camera Control:** Adjust Aperture, Shutter Speed, ISO, White Balance, Exposure Compensation, Exposure Mode, and Metering Mode directly from RapidRAW.
-- **Autofocus Control:** Trigger autofocus directly from RapidRAW.
-- **Ghost Overlay:** Overlay previous captures with adjustable opacity to maintain consistent framing and perspective.
-- **Battery Monitoring:** View the connected camera's battery level directly in RapidRAW.
-- **Automatic Presets:** Automatically apply a selected preset to newly captured images.
-- **Instant Ingestion:** Captured images are automatically saved to your active library, indexed, and optionally opened in the editor.
+<table width="100%">
+  <tr>
+    <td width="65%" valign="top">
+      <h3>Key Capabilities</h3>
+      <ul>
+        <li><strong>Real-Time Live View:</strong> High-frame-rate live view with composition guides, 90° rotation, and horizontal flip.</li>
+        <li><strong>Full Camera Control:</strong> Adjust Aperture, Shutter Speed, ISO, White Balance, Exposure Compensation, Exposure Mode, and Metering Mode directly from RapidRAW.</li>
+        <li><strong>Autofocus Control:</strong> Trigger autofocus directly from RapidRAW.</li>
+        <li><strong>Ghost Overlay:</strong> Overlay previous captures with adjustable opacity to maintain consistent framing and perspective.</li>
+        <li><strong>Battery Monitoring:</strong> View the connected camera's battery level directly in RapidRAW.</li>
+        <li><strong>Automatic Presets:</strong> Automatically apply a selected preset to newly captured images.</li>
+        <li><strong>Instant Ingestion:</strong> Captured images are automatically saved to your active library, indexed, and optionally opened in the editor.</li>
+        <br>
+      </ul>
+    </td>
+    <td width="35%" valign="top" align="center">
+      <br>
+      <img src="https://raw.githubusercontent.com/CyberTimon/RapidRAW/assets/.github/assets/tethering.jpeg" alt="RapidRAW Camera Tethering Setup" width="100%" style="border-radius: 8px;">
+      <br><br>
+      <strong>Live Camera Tethering</strong><br>
+      <sub>Sony α7 III connected with real-time Live View</sub>
+    </td>
+  </tr>
+</table>
 
 ### Supported Cameras
 

@@ -45,17 +45,19 @@ export default function DetailsPanel({
             value={adjustments.sharpness}
             onDragStateChange={onDragStateChange}
           />
-          <Slider
-            label={t('adjustments.details.threshold')}
-            max={80}
-            min={0}
-            onChange={(e: any) => handleAdjustmentChange(DetailsAdjustment.SharpnessThreshold, e.target.value)}
-            step={1}
-            value={adjustments.sharpnessThreshold ?? 15}
-            onDragStateChange={onDragStateChange}
-            defaultValue={15}
-            fillOrigin="min"
-          />
+          {!isForMask && (
+            <Slider
+              label={t('adjustments.details.threshold')}
+              max={80}
+              min={0}
+              onChange={(e: any) => handleAdjustmentChange(DetailsAdjustment.SharpnessThreshold, e.target.value)}
+              step={1}
+              value={adjustments.sharpnessThreshold ?? 15}
+              onDragStateChange={onDragStateChange}
+              defaultValue={15}
+              fillOrigin="min"
+            />
+          )}
         </div>
       )}
 

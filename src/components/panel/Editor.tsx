@@ -2082,7 +2082,7 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
         style={{ cursor: cursorStyle }}
         onContextMenu={onContextMenu}
         ref={imageContainerRef}
-        onPointerDown={handlePointerDown}
+        onPointerDownCapture={handlePointerDown}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerCancel={handlePointerUp}

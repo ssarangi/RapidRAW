@@ -142,7 +142,17 @@ pub fn get_or_init_gpu_context(
     #[cfg(not(any(target_os = "android", target_os = "linux")))]
     let app_handle = _app_handle;
 
-    let mut context_lock = state.gpu_context.lock().unwrap();
+    let mut context_lock = match state.gpu_context.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!(
+                "GPU context lock was poisoned (previous crash). Wiping state to self-heal."
+            );
+            let mut guard = poisoned.into_inner();
+            *guard = None;
+            guard
+        }
+    };
     if let Some(context) = &*context_lock {
         return Ok(context.clone());
     }
@@ -232,6 +242,10 @@ pub fn get_or_init_gpu_context(
         }
         e.to_string()
     })?;
+
+    device.on_uncaptured_error(Arc::new(|err: wgpu::Error| {
+        log::error!("[wgpu-error] {}", err);
+    }));
 
     if let Some(p) = &flag_path {
         let _ = std::fs::remove_file(p);
@@ -1655,7 +1669,15 @@ fn process_and_get_dynamic_image_inner(
         return Ok(base_image.clone());
     }
 
-    let mut processor_lock = state.gpu_processor.lock().unwrap();
+    let mut processor_lock = match state.gpu_processor.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("GPU processor lock was poisoned. Resetting to self-heal.");
+            let mut guard = poisoned.into_inner();
+            *guard = None;
+            guard
+        }
+    };
     let mut needs_new_processor = false;
     let new_width = (width + 255) & !255;
     let new_height = (height + 255) & !255;
@@ -1695,7 +1717,15 @@ fn process_and_get_dynamic_image_inner(
     let processor_state = processor_lock.as_ref().unwrap();
     let processor = &processor_state.processor;
 
-    let mut cache_lock = state.gpu_image_cache.lock().unwrap();
+    let mut cache_lock = match state.gpu_image_cache.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            log::warn!("GPU image cache lock was poisoned. Resetting to self-heal.");
+            let mut guard = poisoned.into_inner();
+            *guard = None;
+            guard
+        }
+    };
     let mut needs_new_cache = false;
 
     if let Some(cache) = &*cache_lock {
@@ -1920,8 +1950,11 @@ fn process_and_get_dynamic_image_inner(
     }
 
     if output_to_display
-        && let Ok(mut display_lock) = context.display.lock()
-        && let Some(display) = display_lock.as_mut()
+        && let Some(display) = context
+            .display
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
     {
         display.latest_transform.image_size = [width as f32, height as f32];
         display.latest_transform.texture_size =

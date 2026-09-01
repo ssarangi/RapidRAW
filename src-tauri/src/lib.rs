@@ -187,7 +187,10 @@ pub fn generate_transformed_preview(
     let transform_hash = calculate_transform_hash(adjustments);
 
     let (transformed_full_res, unscaled_crop_offset) = {
-        let mut cache_lock = state.full_transformed_cache.lock().unwrap();
+        let mut cache_lock = state
+            .full_transformed_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some((hash, img, offset)) = cache_lock.as_ref() {
             if *hash == transform_hash {
                 (Arc::clone(img), *offset)
@@ -277,7 +280,10 @@ pub fn get_cached_full_warped_image(
     let geo_hash = calculate_geometry_hash(js_adjustments);
 
     {
-        let cache_lock = state.full_warped_cache.lock().unwrap();
+        let cache_lock = state
+            .full_warped_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some((hash, img)) = cache_lock.as_ref()
             && *hash == geo_hash
         {
@@ -296,7 +302,10 @@ pub fn get_cached_full_warped_image(
     let warped_arc = Arc::new(warped_image);
 
     {
-        let mut cache_lock = state.full_warped_cache.lock().unwrap();
+        let mut cache_lock = state
+            .full_warped_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *cache_lock = Some((geo_hash, Arc::clone(&warped_arc)));
     }
 
@@ -308,13 +317,18 @@ async fn update_wgpu_transform(
     payload: WgpuTransformPayload,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    let context = match state.gpu_context.lock().unwrap().as_ref() {
+    let context = match state
+        .gpu_context
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+    {
         Some(c) => c.clone(),
         None => return Ok(()),
     };
 
     tokio::task::spawn_blocking(move || {
-        let mut display_lock = context.display.lock().unwrap();
+        let mut display_lock = context.display.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(display) = display_lock.as_mut() {
             display.latest_transform.rect = [payload.x, payload.y, payload.width, payload.height];
             display.latest_transform.clip = [
@@ -384,7 +398,10 @@ fn process_preview_job(
         _ => (if has_roi { 1.4_f32 } else { 1.0_f32 }, 75_u8),
     };
 
-    let mut cached_preview_lock = state.cached_preview.lock().unwrap();
+    let mut cached_preview_lock = state
+        .cached_preview
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
 
     let base_valid = cached_preview_lock
         .as_ref()
@@ -402,7 +419,10 @@ fn process_preview_job(
             cached.unscaled_crop_offset,
         )
     } else {
-        *state.gpu_image_cache.lock().unwrap() = None;
+        *state
+            .gpu_image_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
 
         let (base, scale, offset) =
             generate_transformed_preview(&state, &loaded_image, &adjustments_clone, preview_dim)?;
@@ -432,7 +452,10 @@ fn process_preview_job(
         };
 
         if is_interactive && base_valid {
-            *state.gpu_image_cache.lock().unwrap() = None;
+            *state
+                .gpu_image_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
         }
 
         small
@@ -896,7 +919,7 @@ async fn preview_geometry_transform(
         let maybe_cached_image = state
             .geometry_cache
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&visual_hash)
             .cloned();
 
@@ -974,7 +997,10 @@ async fn preview_geometry_transform(
                 "preview_geometry_transform_base_gen",
             )?;
 
-            let mut cache = state.geometry_cache.lock().unwrap();
+            let mut cache = state
+                .geometry_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if cache.len() > 5 {
                 cache.clear();
             }

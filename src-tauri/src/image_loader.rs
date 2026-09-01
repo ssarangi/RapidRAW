@@ -843,19 +843,52 @@ pub async fn load_image(
     let cancel_token = Some((generation_tracker.clone(), my_generation));
 
     {
-        *state.original_image.lock().unwrap() = None;
-        *state.cached_preview.lock().unwrap() = None;
-        *state.gpu_image_cache.lock().unwrap() = None;
-        *state.full_warped_cache.lock().unwrap() = None;
-        *state.full_transformed_cache.lock().unwrap() = None;
+        *state
+            .original_image
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *state
+            .cached_preview
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *state
+            .gpu_image_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *state
+            .full_warped_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *state
+            .full_transformed_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
 
-        state.mask_cache.lock().unwrap().clear();
-        state.patch_cache.lock().unwrap().clear();
-        state.geometry_cache.lock().unwrap().clear();
+        state
+            .mask_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        state
+            .patch_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        state
+            .geometry_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
 
-        *state.denoise_result.lock().unwrap() = None;
-        *state.hdr_result.lock().unwrap() = None;
-        *state.panorama_result.lock().unwrap() = None;
+        *state
+            .denoise_result
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *state.hdr_result.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *state
+            .panorama_result
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     let (source_path, sidecar_path) = parse_virtual_path(&path);

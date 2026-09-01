@@ -37,7 +37,6 @@ interface BottomBarProps {
   filmstripHeight?: number;
   imageList?: Array<ImageFile>;
   imageRatings?: Record<string, number> | null;
-  isAndroid?: boolean;
   isCopied: boolean;
   isCopyDisabled: boolean;
   isExportDisabled?: boolean;
@@ -64,8 +63,8 @@ interface BottomBarProps {
   onZoomChange?(zoomValue: number, fitToWindow?: boolean): void;
   rating: number;
   selectedImage?: SelectedImage;
-  setIsFilmstripVisible?(isVisible: boolean): void;
   showFilmstrip?: boolean;
+  layoutMode: 'compact' | 'wide' | 'full';
   showZoomControls?: boolean;
   thumbnailAspectRatio: ThumbnailAspectRatio;
   totalImages?: number;
@@ -141,7 +140,6 @@ export default function BottomBar({
   filmstripHeight,
   imageList = [],
   imageRatings,
-  isAndroid,
   isCopied,
   isCopyDisabled,
   isFilmstripVisible,
@@ -164,8 +162,8 @@ export default function BottomBar({
   onZoomChange = () => {},
   rating,
   selectedImage,
-  setIsFilmstripVisible,
   showFilmstrip = true,
+  layoutMode,
   showZoomControls = true,
   thumbnailAspectRatio,
   totalImages,
@@ -183,6 +181,9 @@ export default function BottomBar({
   const isLeftOpen = uiVisibility.leftPanel;
   const isRightOpen = uiVisibility.rightPanel;
   const isBottomOpen = uiVisibility.filmstrip;
+  const showLeftPanelToggle = layoutMode === 'full';
+  const showRightPanelToggle = layoutMode === 'full' || layoutMode === 'wide';
+  const showBottomPanelToggle = layoutMode !== 'compact';
 
   const toggleLeft = () =>
     setUI((s) => {
@@ -820,15 +821,19 @@ export default function BottomBar({
           )}
 
           <div className="flex items-center gap-1">
-            {!isAndroid && (
+            {(showLeftPanelToggle || showRightPanelToggle || showBottomPanelToggle) && (
               <>
-                <PanelToggleButton
-                  onClick={toggleLeft}
-                  Icon={PanelLeft}
-                  tooltip={isLeftOpen ? t('ui.bottomBar.tooltips.collapseLeft') : t('ui.bottomBar.tooltips.expandLeft')}
-                />
+                {showLeftPanelToggle && (
+                  <PanelToggleButton
+                    onClick={toggleLeft}
+                    Icon={PanelLeft}
+                    tooltip={
+                      isLeftOpen ? t('ui.bottomBar.tooltips.collapseLeft') : t('ui.bottomBar.tooltips.expandLeft')
+                    }
+                  />
+                )}
 
-                {showFilmstrip && (
+                {showBottomPanelToggle && showFilmstrip && (
                   <PanelToggleButton
                     onClick={toggleBottom}
                     Icon={PanelBottom}
@@ -841,13 +846,15 @@ export default function BottomBar({
                   />
                 )}
 
-                <PanelToggleButton
-                  onClick={toggleRight}
-                  Icon={PanelRight}
-                  tooltip={
-                    isRightOpen ? t('ui.bottomBar.tooltips.collapseRight') : t('ui.bottomBar.tooltips.expandRight')
-                  }
-                />
+                {showRightPanelToggle && (
+                  <PanelToggleButton
+                    onClick={toggleRight}
+                    Icon={PanelRight}
+                    tooltip={
+                      isRightOpen ? t('ui.bottomBar.tooltips.collapseRight') : t('ui.bottomBar.tooltips.expandRight')
+                    }
+                  />
+                )}
               </>
             )}
           </div>

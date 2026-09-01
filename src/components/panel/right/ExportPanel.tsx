@@ -383,7 +383,7 @@ export default function ExportPanel({
       preserveFolders,
       resize: enableResize ? { mode: resizeMode, value: resizeValue, dontEnlarge } : null,
       stripGps,
-      exportMasks: !isLibraryContext ? exportMasks : undefined,
+      exportMasks: exportMasks,
       watermark:
         enableWatermark && watermarkPath
           ? {
@@ -475,7 +475,7 @@ export default function ExportPanel({
       preserveFolders,
       resize: enableResize ? { mode: resizeMode, value: resizeValue, dontEnlarge } : null,
       stripGps,
-      exportMasks: !isLibraryContext ? exportMasks : undefined,
+      exportMasks: exportMasks,
       watermark:
         enableWatermark && watermarkPath
           ? {
@@ -840,15 +840,13 @@ export default function ExportPanel({
                               onChange={setPreserveTimestamps}
                               trackClassName="bg-surface"
                             />
-                            {!isLibraryContext && (
-                              <Switch
-                                label={t('export.advanced.exportMasks')}
-                                checked={exportMasks}
-                                onChange={setExportMasks}
-                                disabled={isExporting}
-                                trackClassName="bg-surface"
-                              />
-                            )}
+                            <Switch
+                              label={t('export.advanced.exportMasks')}
+                              checked={exportMasks}
+                              onChange={setExportMasks}
+                              disabled={isExporting}
+                              trackClassName="bg-surface"
+                            />
                           </>
                         )}
                       </div>

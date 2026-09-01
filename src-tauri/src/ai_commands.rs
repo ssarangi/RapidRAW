@@ -238,6 +238,8 @@ pub async fn generate_ai_subject_mask(
         hasher.finalize().to_hex().to_string()
     };
 
+    let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
+
     let embeddings = {
         let mut ai_state_lock = state.ai_state.lock().unwrap();
         let ai_state = ai_state_lock.as_mut().unwrap();
@@ -246,7 +248,6 @@ pub async fn generate_ai_subject_mask(
             if cached_embeddings.path_hash == path_hash {
                 cached_embeddings.clone()
             } else {
-                let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
                 let mut new_embeddings =
                     generate_image_embeddings(warped_image.as_ref(), &models.sam_encoder)
                         .map_err(|e| e.to_string())?;
@@ -255,7 +256,6 @@ pub async fn generate_ai_subject_mask(
                 new_embeddings
             }
         } else {
-            let warped_image = get_cached_full_warped_image(&state, &js_adjustments)?;
             let mut new_embeddings =
                 generate_image_embeddings(warped_image.as_ref(), &models.sam_encoder)
                     .map_err(|e| e.to_string())?;
@@ -342,8 +342,10 @@ pub async fn generate_ai_subject_mask(
         &embeddings,
         unrotated_start_point,
         unrotated_end_point,
+        Some(warped_image.as_ref()),
     )
     .map_err(|e| e.to_string())?;
+
     let base64_data = encode_to_base64_png(&mask_bitmap)?;
 
     Ok(AiSubjectMaskParameters {

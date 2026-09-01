@@ -142,9 +142,6 @@ function ImageDragOverlayNode({ activeItem }: { activeItem: { path: string; path
 }
 
 function App() {
-  const COMPACT_EDITOR_MAX_WIDTH = 900;
-  const ANDROID_PHONE_MAX_WIDTH = 600;
-
   const [activeImageDragItem, setActiveImageDragItem] = useState<{ path: string; paths: string[] } | null>(null);
 
   const { appSettings, theme, osPlatform, handleSettingsChange } = useSettingsStore(
@@ -163,7 +160,6 @@ function App() {
     isInstantTransition,
     isLayoutReady,
     uiVisibility,
-    isLibraryExportPanelVisible,
     leftPanelWidth,
     rightPanelWidth,
     compactEditorPanelHeightOverride,
@@ -183,7 +179,6 @@ function App() {
       isInstantTransition: state.isInstantTransition,
       isLayoutReady: state.isLayoutReady,
       uiVisibility: state.uiVisibility,
-      isLibraryExportPanelVisible: state.isLibraryExportPanelVisible,
       leftPanelWidth: state.leftPanelWidth,
       rightPanelWidth: state.rightPanelWidth,
       compactEditorPanelHeightOverride: state.compactEditorPanelHeightOverride,
@@ -279,11 +274,25 @@ function App() {
   });
 
   const isAndroid = osPlatform === 'android';
-  const isPortraitViewport = viewportSize.width > 0 && viewportSize.height > viewportSize.width;
-  const compactEditorMaxWidth = isAndroid ? ANDROID_PHONE_MAX_WIDTH : COMPACT_EDITOR_MAX_WIDTH;
-  const isCompactPortrait = viewportSize.width > 0 && viewportSize.width <= compactEditorMaxWidth && isPortraitViewport;
-  const useCompactAndroidPanels = isAndroid && isCompactPortrait;
+  const COMPACT_EDITOR_MAX_WIDTH = 900;
+  const ANDROID_COMPACT_MAX_WIDTH = 600;
+  const ANDROID_FULL_MIN_WIDTH = 1000;
 
+  const isPortraitViewport = viewportSize.width > 0 && viewportSize.height > viewportSize.width;
+
+  type LayoutMode = 'compact' | 'wide' | 'full';
+  const layoutMode: LayoutMode = isAndroid
+    ? viewportSize.width >= ANDROID_FULL_MIN_WIDTH
+      ? 'full'
+      : isPortraitViewport && viewportSize.width < ANDROID_COMPACT_MAX_WIDTH
+        ? 'compact'
+        : 'wide'
+    : isPortraitViewport && viewportSize.width > 0 && viewportSize.width <= COMPACT_EDITOR_MAX_WIDTH
+      ? 'compact'
+      : 'full';
+
+  const useCompactPanels = layoutMode === 'compact';
+  const useWidePanels = layoutMode === 'wide';
   const compactEditorPanelMinHeight = 220;
   const compactEditorPanelMaxHeight =
     viewportSize.height > 0
@@ -786,7 +795,7 @@ function App() {
   const hasRoots = rootPaths && rootPaths.length > 0;
   const hasMainContent = hasRoots || (activeView === 'editor' && !!selectedImage);
 
-  const shouldHideFolderTree = useCompactAndroidPanels;
+  const shouldHideFolderTree = useCompactPanels || useWidePanels;
   const isCullingMode = activeView === 'library' && libraryDisplayMode === LibraryDisplayMode.Cull;
   const isWgpuActive =
     activeView === 'editor' &&
@@ -874,7 +883,7 @@ function App() {
 
   const ActiveOverlayIcon = activeLayoutDragItem ? PANEL_ICONS[activeLayoutDragItem] : null;
   const effectiveLeftWidth = uiVisibility.leftPanel ? leftPanelWidth : 48;
-  const effectiveRightWidth = uiVisibility.rightPanel ? rightPanelWidth : 48;
+  const effectiveRightWidth = uiVisibility.rightPanel ? rightPanelWidth : useWidePanels ? 58 : 48;
 
   return (
     <>
@@ -955,7 +964,7 @@ function App() {
                     <EditorView
                       transformWrapperRef={transformWrapperRef}
                       isResizing={isResizing}
-                      isCompactPortrait={isCompactPortrait}
+                      layoutMode={layoutMode}
                       isAndroid={isAndroid}
                       compactEditorPanelHeight={compactEditorPanelHeight}
                       compactEditorPanelCollapsedHeight={compactEditorPanelCollapsedHeight}
@@ -992,6 +1001,7 @@ function App() {
                     thumbnailAspectRatio={thumbnailAspectRatio}
                     libraryViewMode={libraryViewMode}
                     isAndroid={isAndroid}
+                    layoutMode={layoutMode}
                     setThumbnailSize={setThumbnailSize}
                     setThumbnailAspectRatio={setThumbnailAspectRatio}
                     setLibraryViewMode={setLibraryViewMode}
@@ -1026,7 +1036,7 @@ function App() {
                   </div>
                 )}
               </div>
-              {!useCompactAndroidPanels && hasMainContent && !isCullingMode && (
+              {!useCompactPanels && hasMainContent && !isCullingMode && (
                 <SidePanelArea
                   side="right"
                   width={effectiveRightWidth}
@@ -1036,6 +1046,7 @@ function App() {
                   onWidthChange={createResizeHandler('right', effectiveRightWidth)}
                   onWidthReset={createResizeResetHandler('right')}
                   isResizing={isResizing}
+                  showAdditionalTabs={useWidePanels}
                 />
               )}
             </div>

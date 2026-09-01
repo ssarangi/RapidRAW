@@ -3065,6 +3065,16 @@ const ImageCanvas = memo(
                 position: 'relative',
                 width: uncroppedImageRenderSize.width,
               }}
+              onPointerDownCapture={(e) => {
+                if (e.button !== 0) {
+                  e.stopPropagation();
+                }
+              }}
+              onMouseDownCapture={(e) => {
+                if (e.button !== 0) {
+                  e.stopPropagation();
+                }
+              }}
             >
               <ReactCrop
                 aspect={adjustments.aspectRatio ?? undefined}

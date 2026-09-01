@@ -856,8 +856,7 @@ fn apply_sharpen(
     let g0 = smoothstep(t * 0.20, t * 0.85, abs(d0));
     let g1 = smoothstep(t * 0.12, t * 0.55, abs(d1));
 
-    let boost = (d0 * 1.20 * g0
-               + d1 * 0.70 * g1) * amount;
+    let boost = (d0 * 1.25 * g0 + d1 * 0.25 * g1) * amount;
 
     let dims = vec2<i32>(textureDimensions(input_texture));
     let max_idx = dims - vec2<i32>(1);
@@ -912,21 +911,28 @@ fn apply_sharpen(
 
         if (aa > 0.002) {
             let inv_g = inverseSqrt(g2);
-            let tang = vec2<f32>(-gy, gx) * inv_g * 1.30;
+
+            let tang = vec2<f32>(-gy, gx) * inv_g * 0.75;
             let p = vec2<f32>(coords_i) + vec2<f32>(0.5);
 
             let tp = sharpen_tap_bilinear(p + tang - vec2<f32>(0.5), max_idx, is_raw);
             let tn = sharpen_tap_bilinear(p - tang - vec2<f32>(0.5), max_idx, is_raw);
-            let l_tan = (tp + tn + l * 2.0) * 0.25;
+
+            let safe_tp = max(tp, l * 0.6);
+            let safe_tn = max(tn, l * 0.6);
+
+            let l_tan = (safe_tp + safe_tn + l * 2.0) * 0.25;
 
             let l_aa = l_tan + (l_new - l);
-            l_new = mix(l_new, l_aa, aa);
+
+            l_new = mix(l_new, l_aa, min(aa, 0.5));
         }
     }
 
     let shadow_floor = select(0.03, 0.10, is_raw == 1u);
     let prot = smoothstep(0.0, shadow_floor, l) * (1.0 - smoothstep(0.92, 1.0, l));
     l_new = max(mix(l, l_new, prot), 0.0);
+    l_new = max(l_new, l * 0.40);
 
     let ratio = l_new / max(l, 1e-4);
     if (is_raw == 1u) {
