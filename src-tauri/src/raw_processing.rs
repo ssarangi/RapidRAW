@@ -19,6 +19,21 @@ pub fn develop_raw_image(
     linear_mode: String,
     cancel_token: Option<(Arc<AtomicUsize>, usize)>,
 ) -> Result<DynamicImage> {
+    // Opt-in (env-var gated, default off) experimental path: our own
+    // AMaZE/IGV/LMMSE demosaic pipeline (see custom_raw_pipeline.rs and
+    // CLAUDE.md's "Open TODO: pluggable demosaic algorithms"), used only for
+    // full-quality (non-fast) decodes of standard Bayer sensors. Falls back
+    // to the normal rawler-PPG pipeline below on any error or ineligible
+    // sensor, so this can never break existing behavior when unset.
+    if !fast_demosaic && std::env::var("RAPIDRAW_CUSTOM_DEMOSAIC").as_deref() == Ok("1") {
+        match crate::custom_raw_pipeline::develop_raw_image_custom(file_bytes, highlight_compression) {
+            Ok(image) => return Ok(image),
+            Err(e) => {
+                log::info!("custom demosaic pipeline unavailable ({e}), falling back to rawler PPG");
+            }
+        }
+    }
+
     let (developed_image, orientation) = develop_internal(
         file_bytes,
         fast_demosaic,

@@ -108,19 +108,69 @@ already went through several wrong turns (CSS/compositor theories, WGPU
 surface bugs, texture-loading CORS issues) before isolating this as the real
 bottleneck; don't re-litigate those from scratch if this comes up again.
 
-## Open TODO: pluggable demosaic algorithms (AMaZE / IGV / LMMSE) via rawler
+## Status: custom demosaic pipeline (AMaZE / IGV / LMMSE) — implemented, opt-in
 
-Goal: implement AMaZE, IGV, and LMMSE demosaic algorithms, with automatic
-selection based on ISO (LMMSE/IGV for high-ISO images, AMaZE otherwise —
-exact ISO thresholds still to be decided).
+Implemented in `src-tauri/src/custom_raw_pipeline.rs` +
+`src-tauri/src/demosaic_algorithms.rs`. **Hard constraint honored: all code
+stays on our side.** rawler is used only to decode a RAW file into
+pre-demosaic sensor data + calibration metadata (`RawImage`'s public fields);
+demosaic, white balance, camera→sRGB color-matrix conversion, highlight
+compression, cropping (active area + default crop), and orientation are all
+reimplemented in this repo. This was necessary, not just preferred: rawler's
+own calibration step (`map_3ch_to_rgb`) is `pub(crate)`-only inside rawler
+and cannot be called or hooked into from outside the crate, so there was no
+way to reuse rawler's pipeline for anything past our own demosaic step even
+if we'd wanted to — the whole post-demosaic chain had to be reimplemented
+too, mirroring `raw_processing::develop_internal`'s exact rescale/highlight-
+compression formulas so output stays numerically compatible with the app's
+GPU tonemap stage.
 
-**Hard constraint (explicitly stated by the user): all code must stay on our
-side.** A local, path-based `[patch]` override of the vendored `rawler`
-git dependency was tried earlier this session (see git history around the
-WebGL rendering investigation) and explicitly rejected: it lived in an
-untracked `vendor/` directory outside version control, which is unreproducible
-and not acceptable long-term. Before implementing new demosaic algorithms,
-figure out an approach that doesn't require modifying/forking the upstream
-`rawler` crate at all — e.g. decoding to a pre-demosaic intermediate ourselves
-and running our own demosaic step entirely within this repo's own Rust code,
-rather than swapping rawler's internal `Demosaic` trait implementation.
+- Three algorithms implemented and validated against real RawTherapee source
+  (`Beep6581/RawTherapee`'s `amaze_demosaic_RT.cc`, `demosaic_algos.cc`
+  (`igv_interpolate`), `lmmse_demosaic.cc`) — not guessed from names. AMaZE
+  and LMMSE follow the reference formulas closely; IGV's real ±6-neighborhood
+  Gaussian-vector-variance refinement pass is approximated with simple
+  neighbor averaging (documented in `demosaic_algorithms.rs`'s module doc).
+- ISO auto-selection: `demosaic_algorithms::select_by_iso` — AMaZE below 800,
+  IGV 800–1599, LMMSE ≥1600. Starting thresholds, not tuned against a real
+  test set.
+- Eligibility: only a standard 2×2 RGB Bayer CFA (`RawSensorData::is_standard_bayer`).
+  X-Trans, 4-channel (CMY/RGBE), monochrome, and DNG `LinearRaw` sources are
+  ineligible and always fall back to rawler's own PPG pipeline.
+- **Live-app wiring is opt-in, default OFF**, gated by the
+  `RAPIDRAW_CUSTOM_DEMOSAIC=1` env var, checked inside
+  `raw_processing::develop_raw_image` (the single choke point every real
+  call site already goes through). Falls back to the normal rawler-PPG path
+  on any error or ineligible sensor, so leaving the env var unset — the
+  default — can never change existing behavior. This was a deliberate
+  choice over silently replacing the default pipeline: the surrounding
+  production path (`develop_internal`) also handles linear-RAW formats,
+  monochrome, multi-exposure WB neutralization, and highlight compression
+  that would all need independent re-verification before trusting this for
+  every user by default.
+- **CLI support** (for debugging this pipeline outside the full Tauri app,
+  per explicit request): `rapidraw-cli raw inspect --input <file.raw>`
+  (reports ISO/CFA-eligibility/orientation/crop without developing) and
+  `rapidraw-cli raw develop --input <file.raw> --output <file.png>
+  [--demosaic auto|amaze|igv|lmmse|bilinear] [--highlight-compression <f32>]
+  [--linear]` (`--linear` reproduces the exact linear pre-tonemap
+  intermediate the live app pipeline consumes, re-encoded to sRGB only for
+  PNG viewability; default is a display-ready gamma-encoded preview). This
+  required making `custom_raw_pipeline`, `demosaic_algorithms`, and
+  `raw_processing` `pub mod` in `lib.rs` (they were private `mod` before).
+  **Next work (raw denoise, raw sharpen, tone curve) should hang off this
+  same `raw develop` command as additional flags**, not a separate CLI
+  entry point.
+
+**Not yet done:**
+- Tone curve: ART/RawTherapee use a mild S-curve (contrast/brightness), not
+  the straight linear→gamma passthrough this pipeline currently does
+  (`srgb_gamma` in `custom_raw_pipeline.rs`). Matters for the upcoming
+  tone-mapping phase.
+- Raw denoise, raw sharpening — not started.
+- `develop_raw_custom_with_algorithm` (the non-`--linear` CLI/test path)
+  only crops to `active_area`, not the default `crop_area` — a Phase-1 gap
+  that `develop_raw_image_custom(_with_algorithm)` (the production-parity
+  path) does not have. Low priority since it only affects the CLI preview
+  PNG, not the live app, but worth fixing for consistency if it causes
+  confusion when comparing CLI output to the app.
