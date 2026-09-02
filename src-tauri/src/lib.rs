@@ -39,11 +39,13 @@ pub use library_db::record_cull_session;
 pub use library_db::scan_library_root_headless;
 pub use library_db::update_job;
 pub use library_db::{
-    add_library_root_headless, create_library_headless, open_library_headless,
-    read_job_progress, remove_library_root_headless, review_ai_tag_headless, review_species_headless,
+    CatalogMetadataBatchReport, CatalogThumbnailBatchReport, add_library_root_headless,
+    create_library_headless, open_library_headless, read_job_progress,
+    remove_library_root_headless, review_ai_tag_headless, review_species_headless,
     run_catalog_metadata_extraction_headless, run_catalog_thumbnail_generation_headless,
-    CatalogMetadataBatchReport, CatalogThumbnailBatchReport,
 };
+pub mod custom_raw_pipeline;
+pub mod demosaic_algorithms;
 mod inpainting;
 mod launch_request;
 mod lens_blur;
@@ -56,9 +58,10 @@ mod negative_conversion;
 mod panorama_stitching;
 mod panorama_utils;
 mod preset_converter;
-pub mod custom_raw_pipeline;
-pub mod demosaic_algorithms;
+pub mod raw_denoise;
+pub mod raw_preprocess;
 pub mod raw_processing;
+pub mod raw_sharpen;
 pub mod tagging;
 mod tagging_utils;
 pub mod visual_model_registry;
@@ -1253,6 +1256,7 @@ async fn generate_all_community_previews(
             true,
             &settings,
             None,
+            None,
         )
         .map_err(|e| e.to_string())?;
 
@@ -1574,6 +1578,7 @@ async fn generate_preview_for_path(
                         &source_path_str,
                         false,
                         &settings,
+                        Some(&js_adjustments),
                         None,
                     )
                     .map_err(|e| e.to_string())?;
@@ -1592,6 +1597,7 @@ async fn generate_preview_for_path(
                         &source_path_str,
                         false,
                         &settings,
+                        Some(&js_adjustments),
                         None,
                     )
                     .map_err(|e| e.to_string())?;

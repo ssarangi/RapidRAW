@@ -810,6 +810,7 @@ pub fn run_restoration_worker(
                                     false,
                                     &crate::app_settings::AppSettings::default(),
                                     None,
+                                    None,
                                 ) {
                                     Ok(loaded) => loaded,
                                     Err(e) => {
@@ -875,6 +876,7 @@ pub fn run_restoration_worker(
                 &source_path.to_string_lossy(),
                 false,
                 &crate::app_settings::AppSettings::default(),
+                None,
                 None,
             ) {
                 Ok(loaded) => loaded,

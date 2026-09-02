@@ -2006,7 +2006,10 @@ pub fn generate_thumbnail_data(
                 let default_tm = if is_raw {
                     settings.default_raw_tonemapper.as_deref().unwrap_or("agx")
                 } else {
-                    settings.default_non_raw_tonemapper.as_deref().unwrap_or("basic")
+                    settings
+                        .default_non_raw_tonemapper
+                        .as_deref()
+                        .unwrap_or("basic")
                 };
                 crate::image_processing::ToneMapper::parse(default_tm)
                     == crate::image_processing::ToneMapper::Agx
@@ -2083,10 +2086,15 @@ pub(crate) fn generate_single_thumbnail_and_cache(
     // fresh grid/culling request never generates it speculatively.
     let should_produce_medium = need_medium || medium_already_cached;
 
-    if !force_regenerate && small_path.exists() && (!should_produce_medium || medium_already_cached) {
+    if !force_regenerate && small_path.exists() && (!should_produce_medium || medium_already_cached)
+    {
         return Some((
             small_path.to_string_lossy().into_owned(),
-            if medium_already_cached { medium_path.to_string_lossy().into_owned() } else { String::new() },
+            if medium_already_cached {
+                medium_path.to_string_lossy().into_owned()
+            } else {
+                String::new()
+            },
             rating,
             is_edited,
         ));
@@ -2099,7 +2107,8 @@ pub(crate) fn generate_single_thumbnail_and_cache(
     let target_width_small = settings.small_thumbnail_resolution.unwrap_or(480);
     let target_width_medium = settings.medium_thumbnail_resolution.unwrap_or(1280);
 
-    if let Ok(thumb_image) = generate_thumbnail_data(path_str, gpu_context, preloaded_image, app_handle)
+    if let Ok(thumb_image) =
+        generate_thumbnail_data(path_str, gpu_context, preloaded_image, app_handle)
         && let Ok(small_data) = encode_thumbnail(&thumb_image, target_width_small)
     {
         let _ = fs::write(&small_path, &small_data);
@@ -3091,6 +3100,7 @@ pub async fn apply_auto_adjustments_to_paths(
                     &source_path_str,
                     true,
                     &settings,
+                    None,
                     None,
                 )
                 .map_err(|e| e.to_string())?;

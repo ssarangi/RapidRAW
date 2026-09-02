@@ -307,7 +307,22 @@
         "curves": "Curves",
         "details": "Details",
         "effects": "Effects",
-        "restore": "RAW Denoise & Sharpening"
+        "rawDevelop": "Raw Develop"
+      },
+      "rawDevelop": {
+        "description": "RAW-only pipeline: demosaic algorithm and pre-Basic denoise/sharpening. No effect on non-RAW files.",
+        "demosaicLabel": "Demosaic Algorithm",
+        "demosaicOptions": {
+          "auto": "Auto (by ISO)",
+          "amaze": "AMaZE",
+          "igv": "IGV",
+          "lmmse": "LMMSE",
+          "bilinear": "Bilinear"
+        },
+        "denoiseLabel": "Raw Denoise",
+        "sharpenLabel": "Raw Sharpening",
+        "autoToggleLabel": "Auto",
+        "preprocessLabel": "Hot/Dead Pixel & Line-Banding Correction"
       },
       "title": "Adjustments",
       "tooltips": {
@@ -368,6 +383,7 @@
       "dropzoneText": "Drop here to create a new edit",
       "editSettingsTitle": "Edit Settings",
       "editsTitle": "Edits",
+      "aiDenoiseTitle": "AI Denoise",
       "generatingDepthMap": "Calculating AI Depth Map...",
       "generativeEditTitle": "Generative Edit",
       "inpaintingTitle": "Inpainting",

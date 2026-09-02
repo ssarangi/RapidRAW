@@ -8,7 +8,7 @@ import CurveGraph from '../../adjustments/Curves';
 import ColorPanel from '../../adjustments/Color';
 import DetailsPanel from '../../adjustments/Details';
 import EffectsPanel from '../../adjustments/Effects';
-import RestorePanel from '../../adjustments/Restore';
+import RawDevelopPanel from '../../adjustments/RawDevelop';
 import CollapsibleSection from '../../ui/CollapsibleSection';
 import Waveform from '../editor/Waveform';
 import Resizer from '../../ui/Resizer';
@@ -278,11 +278,16 @@ export default function Controls() {
             <CollapsibleSection
               canToggleVisibility={false}
               isContentVisible={true}
-              isOpen={collapsibleSectionsState.restore}
-              onToggle={() => handleToggleSection('restore')}
-              title={t('editor.adjustments.sections.restore')}
+              isOpen={collapsibleSectionsState.rawDevelop}
+              onToggle={() => handleToggleSection('rawDevelop')}
+              title={t('editor.adjustments.sections.rawDevelop')}
             >
-              <RestorePanel />
+              <RawDevelopPanel
+                adjustments={adjustments}
+                setAdjustments={setAdjustments}
+                isRaw={!!selectedImage.isRaw}
+                onDragStateChange={onDragStateChange}
+              />
             </CollapsibleSection>
           </div>
         )}

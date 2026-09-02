@@ -20,6 +20,45 @@ use rawler::{
     rawsource::RawSource,
 };
 
+/// Toggles for the optional pipeline stages that sit around demosaic:
+/// raw-domain preprocessing (before), denoise and sharpening (after).
+/// Passing all-default/off values reproduces the original demosaic-only
+/// pipeline exactly.
+#[derive(Clone, Copy, Debug)]
+pub struct DevelopOptions {
+    /// Hot/dead pixel correction + CFA row-banding denoise, applied to the
+    /// raw mosaic before demosaic. See `raw_preprocess.rs`.
+    pub preprocess: bool,
+    /// Post-demosaic wavelet luminance/chrominance denoise strength, 0..1
+    /// (0 = off). See `raw_denoise.rs`.
+    pub denoise_strength: f32,
+    /// Post-demosaic luminance unsharp-mask amount, 0..1 (0 = off). See
+    /// `raw_sharpen.rs`.
+    pub sharpen_amount: f32,
+}
+
+impl Default for DevelopOptions {
+    fn default() -> Self {
+        Self {
+            preprocess: true,
+            denoise_strength: 0.0,
+            sharpen_amount: 0.0,
+        }
+    }
+}
+
+impl DevelopOptions {
+    /// Auto-selected options for a given ISO, matching the same
+    /// "auto by ISO" pattern as `demosaic_algorithms::select_by_iso`.
+    pub fn auto_for_iso(iso: u32) -> Self {
+        Self {
+            preprocess: true,
+            denoise_strength: crate::raw_denoise::suggest_strength_for_iso(iso),
+            sharpen_amount: crate::raw_sharpen::suggest_amount_for_iso(iso),
+        }
+    }
+}
+
 /// Raw (pre-demosaic) sensor data plus everything needed to develop it,
 /// extracted from rawler's `RawImage` - all fields here come from rawler's
 /// own public API, nothing requires modifying rawler itself.
@@ -220,7 +259,10 @@ fn average_neighbors(sensor: &RawSensorData, row: isize, col: isize, cross: bool
     } else {
         [(-1, -1), (-1, 1), (1, -1), (1, 1)]
     };
-    let sum: f32 = offsets.iter().map(|&(dr, dc)| sample(sensor, row + dr, col + dc)).sum();
+    let sum: f32 = offsets
+        .iter()
+        .map(|&(dr, dc)| sample(sensor, row + dr, col + dc))
+        .sum();
     sum / 4.0
 }
 
@@ -230,7 +272,10 @@ fn average_neighbors(sensor: &RawSensorData, row: isize, col: isize, cross: bool
 fn apply_white_balance(rgb: &mut [[f32; 3]], sensor: &RawSensorData) {
     let bl = sensor.black_level;
     let wb = sensor.wb_coeffs;
-    let wb_max = wb[0].max(wb[1]).max(wb[2]).max(if wb[3] > 0.0 { wb[3] } else { 0.0 });
+    let wb_max = wb[0]
+        .max(wb[1])
+        .max(wb[2])
+        .max(if wb[3] > 0.0 { wb[3] } else { 0.0 });
     let denom = (sensor.white_level - bl[0]).max(1.0);
 
     for px in rgb.iter_mut() {
@@ -312,27 +357,79 @@ fn apply_color_matrix_and_gamma(rgb: &mut [[f32; 3]], xyz_to_cam: &Matrix3<f32>)
 /// Returns `Err` for anything our demosaic doesn't support (X-Trans,
 /// 4-channel, monochrome, DNG `LinearRaw`) - callers must fall back to
 /// `raw_processing::develop_raw_image` in that case.
-pub fn develop_raw_image_custom(file_bytes: &[u8], highlight_compression: f32) -> Result<DynamicImage> {
-    let sensor = decode_raw_sensor_data(file_bytes)?;
-    if !sensor.is_standard_bayer {
-        return Err(anyhow!("not a standard Bayer CFA; custom pipeline not applicable"));
-    }
-    let algo = crate::demosaic_algorithms::select_by_iso(sensor.iso);
-    develop_raw_image_custom_with_algorithm(file_bytes, algo, highlight_compression)
-}
-
-/// Same as `develop_raw_image_custom`, but with an explicit algorithm choice
-/// instead of ISO auto-selection - used by the CLI (`raw develop
-/// --demosaic amaze|igv|lmmse|bilinear`) to debug/compare algorithms
-/// directly against the exact linear intermediate the live app produces.
-pub fn develop_raw_image_custom_with_algorithm(
+pub fn develop_raw_image_custom(
     file_bytes: &[u8],
-    algo: crate::demosaic_algorithms::DemosaicAlgorithm,
     highlight_compression: f32,
 ) -> Result<DynamicImage> {
     let sensor = decode_raw_sensor_data(file_bytes)?;
     if !sensor.is_standard_bayer {
-        return Err(anyhow!("not a standard Bayer CFA; custom pipeline not applicable"));
+        return Err(anyhow!(
+            "not a standard Bayer CFA; custom pipeline not applicable"
+        ));
+    }
+    let algo = crate::demosaic_algorithms::select_by_iso(sensor.iso);
+    let options = DevelopOptions::auto_for_iso(sensor.iso);
+    develop_raw_image_custom_with_algorithm(file_bytes, algo, highlight_compression, &options)
+}
+
+/// Same as `develop_raw_image_custom`, but with per-image overrides (the
+/// "Raw Develop" adjustments panel section) layered on top of the ISO-based
+/// auto defaults - `None`/`Ok(None)` for any override falls back to auto.
+/// This is what `raw_processing::develop_raw_image_for_editor` calls; used
+/// only by the one real "open an image for editing" load path, not by every
+/// `raw_processing::develop_raw_image` caller (thumbnails, export, culling,
+/// etc. all keep using plain ISO-auto behavior unchanged).
+pub fn develop_raw_image_custom_resolved(
+    file_bytes: &[u8],
+    highlight_compression: f32,
+    demosaic_override: Option<&str>,
+    denoise_override: Option<f32>,
+    sharpen_override: Option<f32>,
+    preprocess: bool,
+) -> Result<DynamicImage> {
+    let sensor = decode_raw_sensor_data(file_bytes)?;
+    if !sensor.is_standard_bayer {
+        return Err(anyhow!(
+            "not a standard Bayer CFA; custom pipeline not applicable"
+        ));
+    }
+
+    let algo = match demosaic_override {
+        None | Some("auto") | Some("") => crate::demosaic_algorithms::select_by_iso(sensor.iso),
+        Some(name) => crate::demosaic_algorithms::parse_algorithm_name(name)
+            .ok_or_else(|| anyhow!("unknown demosaic override '{name}'"))?,
+    };
+    let options = DevelopOptions {
+        preprocess,
+        denoise_strength: denoise_override
+            .unwrap_or_else(|| crate::raw_denoise::suggest_strength_for_iso(sensor.iso)),
+        sharpen_amount: sharpen_override
+            .unwrap_or_else(|| crate::raw_sharpen::suggest_amount_for_iso(sensor.iso)),
+    };
+    develop_raw_image_custom_with_algorithm(file_bytes, algo, highlight_compression, &options)
+}
+
+/// Same as `develop_raw_image_custom`, but with an explicit algorithm choice
+/// and pipeline options instead of ISO auto-selection - used by the CLI
+/// (`raw develop --demosaic amaze|igv|lmmse|bilinear --denoise ... --sharpen
+/// ...`) to debug/compare stages directly against the exact linear
+/// intermediate the live app produces.
+pub fn develop_raw_image_custom_with_algorithm(
+    file_bytes: &[u8],
+    algo: crate::demosaic_algorithms::DemosaicAlgorithm,
+    highlight_compression: f32,
+    options: &DevelopOptions,
+) -> Result<DynamicImage> {
+    let mut sensor = decode_raw_sensor_data(file_bytes)?;
+    if !sensor.is_standard_bayer {
+        return Err(anyhow!(
+            "not a standard Bayer CFA; custom pipeline not applicable"
+        ));
+    }
+
+    if options.preprocess {
+        crate::raw_preprocess::correct_hot_dead_pixels(&mut sensor, 0.15);
+        crate::raw_preprocess::correct_cfa_line_banding(&mut sensor, 0.5);
     }
 
     let mut rgb = crate::demosaic_algorithms::demosaic(&sensor, algo);
@@ -358,7 +455,11 @@ pub fn develop_raw_image_custom_with_algorithm(
             let compressed_max = compressed_r.max(compressed_g).max(compressed_b);
             if compressed_max > 1e-6 {
                 let rescale = max_c / compressed_max;
-                (compressed_r * rescale, compressed_g * rescale, compressed_b * rescale)
+                (
+                    compressed_r * rescale,
+                    compressed_g * rescale,
+                    compressed_b * rescale,
+                )
             } else {
                 (max_c, max_c, max_c)
             }
@@ -368,6 +469,24 @@ pub fn develop_raw_image_custom_with_algorithm(
         px[0] = final_r.clamp(0.0, clamp_limit);
         px[1] = final_g.clamp(0.0, clamp_limit);
         px[2] = final_b.clamp(0.0, clamp_limit);
+    }
+
+    if options.denoise_strength > 0.0 {
+        crate::raw_denoise::wavelet_denoise(
+            &mut rgb,
+            sensor.width,
+            sensor.height,
+            options.denoise_strength,
+        );
+    }
+    if options.sharpen_amount > 0.0 {
+        crate::raw_sharpen::unsharp_mask(
+            &mut rgb,
+            sensor.width,
+            sensor.height,
+            options.sharpen_amount,
+            1.0,
+        );
     }
 
     // Crop to active area, then to the default crop (crop_area), matching
@@ -408,17 +527,58 @@ pub fn develop_raw_image_custom_with_algorithm(
 /// `raw_processing::develop_raw_image`'s shape so output can be compared
 /// directly against the existing rawler-pipeline result.
 pub fn develop_raw_custom(file_bytes: &[u8]) -> Result<DynamicImage> {
-    develop_raw_custom_with_algorithm(file_bytes, crate::demosaic_algorithms::DemosaicAlgorithm::Bilinear)
+    develop_raw_custom_with_algorithm(
+        file_bytes,
+        crate::demosaic_algorithms::DemosaicAlgorithm::Bilinear,
+    )
 }
 
 pub fn develop_raw_custom_with_algorithm(
     file_bytes: &[u8],
     algo: crate::demosaic_algorithms::DemosaicAlgorithm,
 ) -> Result<DynamicImage> {
-    let sensor = decode_raw_sensor_data(file_bytes)?;
+    develop_raw_custom_with_options(file_bytes, algo, &DevelopOptions::default())
+}
+
+/// Same as `develop_raw_custom_with_algorithm`, with explicit preprocess/
+/// denoise/sharpen options - used by the CLI's non-`--linear` (display-ready
+/// gamma-encoded) preview path. Note denoise/sharpen run in gamma-encoded
+/// space here (after `apply_color_matrix_and_gamma`), unlike
+/// `develop_raw_image_custom_with_algorithm`'s linear space - this path is a
+/// display convenience, not meant for exact numeric parity between the two.
+pub fn develop_raw_custom_with_options(
+    file_bytes: &[u8],
+    algo: crate::demosaic_algorithms::DemosaicAlgorithm,
+    options: &DevelopOptions,
+) -> Result<DynamicImage> {
+    let mut sensor = decode_raw_sensor_data(file_bytes)?;
+
+    if options.preprocess {
+        crate::raw_preprocess::correct_hot_dead_pixels(&mut sensor, 0.15);
+        crate::raw_preprocess::correct_cfa_line_banding(&mut sensor, 0.5);
+    }
+
     let mut rgb = crate::demosaic_algorithms::demosaic(&sensor, algo);
     apply_white_balance(&mut rgb, &sensor);
     apply_color_matrix_and_gamma(&mut rgb, &sensor.xyz_to_cam);
+
+    if options.denoise_strength > 0.0 {
+        crate::raw_denoise::wavelet_denoise(
+            &mut rgb,
+            sensor.width,
+            sensor.height,
+            options.denoise_strength,
+        );
+    }
+    if options.sharpen_amount > 0.0 {
+        crate::raw_sharpen::unsharp_mask(
+            &mut rgb,
+            sensor.width,
+            sensor.height,
+            options.sharpen_amount,
+            1.0,
+        );
+    }
 
     let (crop_x, crop_y, crop_w, crop_h) = match sensor.active_area {
         Some([x, y, w, h]) => (x, y, w, h),
@@ -458,7 +618,8 @@ mod tests {
                 return;
             }
         };
-        let dump_dir = std::env::var("RAPIDRAW_TEST_DUMP_DIR").unwrap_or_else(|_| "/tmp".to_string());
+        let dump_dir =
+            std::env::var("RAPIDRAW_TEST_DUMP_DIR").unwrap_or_else(|_| "/tmp".to_string());
         let bytes = std::fs::read(&path).expect("read raw file");
 
         use crate::demosaic_algorithms::DemosaicAlgorithm;
@@ -468,7 +629,8 @@ mod tests {
             ("igv", DemosaicAlgorithm::IGV),
             ("lmmse", DemosaicAlgorithm::LMMSE),
         ] {
-            let img = develop_raw_custom_with_algorithm(&bytes, algo).expect("develop_raw_custom_with_algorithm");
+            let img = develop_raw_custom_with_algorithm(&bytes, algo)
+                .expect("develop_raw_custom_with_algorithm");
             let out_path = format!("{dump_dir}/custom_{name}.png");
             img.save(&out_path).expect("save custom variant");
             println!("saved {} ({}x{})", out_path, img.width(), img.height());
@@ -483,8 +645,10 @@ mod tests {
             crate::raw_processing::develop_raw_image(&bytes, false, 2.0, "auto".to_string(), None)
                 .expect("develop_raw_image");
         let reference_f32 = reference.to_rgba32f();
-        let reference_rgba8 =
-            image::ImageBuffer::<image::Rgba<u8>, _>::from_fn(reference.width(), reference.height(), |x, y| {
+        let reference_rgba8 = image::ImageBuffer::<image::Rgba<u8>, _>::from_fn(
+            reference.width(),
+            reference.height(),
+            |x, y| {
                 let p = reference_f32.get_pixel(x, y).0;
                 image::Rgba([
                     (srgb_gamma(p[0]) * 255.0).round().clamp(0.0, 255.0) as u8,
@@ -492,7 +656,8 @@ mod tests {
                     (srgb_gamma(p[2]) * 255.0).round().clamp(0.0, 255.0) as u8,
                     255,
                 ])
-            });
+            },
+        );
         let reference = DynamicImage::ImageRgba8(reference_rgba8);
         let reference_path = format!("{dump_dir}/reference_pipeline.png");
         reference.save(&reference_path).expect("save reference");
@@ -520,7 +685,8 @@ mod tests {
                 return;
             }
         };
-        let dump_dir = std::env::var("RAPIDRAW_TEST_DUMP_DIR").unwrap_or_else(|_| "/tmp".to_string());
+        let dump_dir =
+            std::env::var("RAPIDRAW_TEST_DUMP_DIR").unwrap_or_else(|_| "/tmp".to_string());
         let bytes = std::fs::read(&path).expect("read raw file");
 
         let sensor = decode_raw_sensor_data(&bytes).expect("decode_raw_sensor_data");
@@ -559,8 +725,10 @@ mod tests {
         // rawler-PPG path) - apply the same naive gamma+clamp used for the
         // reference dump above so it's visually inspectable as a PNG.
         let wired_f32 = wired.to_rgba32f();
-        let wired_rgba8 =
-            image::ImageBuffer::<image::Rgba<u8>, _>::from_fn(wired.width(), wired.height(), |x, y| {
+        let wired_rgba8 = image::ImageBuffer::<image::Rgba<u8>, _>::from_fn(
+            wired.width(),
+            wired.height(),
+            |x, y| {
                 let p = wired_f32.get_pixel(x, y).0;
                 image::Rgba([
                     (srgb_gamma(p[0]) * 255.0).round().clamp(0.0, 255.0) as u8,
@@ -568,7 +736,8 @@ mod tests {
                     (srgb_gamma(p[2]) * 255.0).round().clamp(0.0, 255.0) as u8,
                     255,
                 ])
-            });
+            },
+        );
         let out_path = format!("{dump_dir}/wired_custom_pipeline.png");
         image::DynamicImage::ImageRgba8(wired_rgba8)
             .save(&out_path)

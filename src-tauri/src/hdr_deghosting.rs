@@ -55,7 +55,7 @@ pub fn load_hdr_frames(
             let file_bytes =
                 fs::read(path).map_err(|e| format!("Failed to read image {}: {}", path, e))?;
             let mut dynamic_image =
-                load_base_image_from_bytes(&file_bytes, path, false, settings, None)
+                load_base_image_from_bytes(&file_bytes, path, false, settings, None, None)
                     .map_err(|e| format!("Failed to load image {}: {}", path, e))?;
             if !is_raw_file(path) {
                 dynamic_image = apply_srgb_to_linear(dynamic_image);

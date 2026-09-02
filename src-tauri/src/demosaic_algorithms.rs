@@ -148,17 +148,38 @@ fn directional_estimate(sensor: &RawSensorData, row: isize, col: isize) -> Direc
     let g = |dr: isize, dc: isize| sample(sensor, row + dr, col + dc);
     let eps = 1e-5;
 
-    let n = (23.0 * g(-1, 0) + 23.0 * g(-3, 0) + g(-5, 0) + g(1, 0) + 40.0 * center - 32.0 * g(-2, 0) - 8.0 * g(-4, 0)) / 48.0;
-    let s = (23.0 * g(1, 0) + 23.0 * g(3, 0) + g(5, 0) + g(-1, 0) + 40.0 * center - 32.0 * g(2, 0) - 8.0 * g(4, 0)) / 48.0;
-    let e = (23.0 * g(0, 1) + 23.0 * g(0, 3) + g(0, 5) + g(0, -1) + 40.0 * center - 32.0 * g(0, 2) - 8.0 * g(0, 4)) / 48.0;
-    let w = (23.0 * g(0, -1) + 23.0 * g(0, -3) + g(0, -5) + g(0, 1) + 40.0 * center - 32.0 * g(0, -2) - 8.0 * g(0, -4)) / 48.0;
+    let n = (23.0 * g(-1, 0) + 23.0 * g(-3, 0) + g(-5, 0) + g(1, 0) + 40.0 * center
+        - 32.0 * g(-2, 0)
+        - 8.0 * g(-4, 0))
+        / 48.0;
+    let s = (23.0 * g(1, 0) + 23.0 * g(3, 0) + g(5, 0) + g(-1, 0) + 40.0 * center
+        - 32.0 * g(2, 0)
+        - 8.0 * g(4, 0))
+        / 48.0;
+    let e = (23.0 * g(0, 1) + 23.0 * g(0, 3) + g(0, 5) + g(0, -1) + 40.0 * center
+        - 32.0 * g(0, 2)
+        - 8.0 * g(0, 4))
+        / 48.0;
+    let w = (23.0 * g(0, -1) + 23.0 * g(0, -3) + g(0, -5) + g(0, 1) + 40.0 * center
+        - 32.0 * g(0, -2)
+        - 8.0 * g(0, -4))
+        / 48.0;
 
     let grad_n = eps + (g(-1, 0) - g(-3, 0)).abs() + (center - g(-2, 0)).abs();
     let grad_s = eps + (g(1, 0) - g(3, 0)).abs() + (center - g(2, 0)).abs();
     let grad_e = eps + (g(0, 1) - g(0, 3)).abs() + (center - g(0, 2)).abs();
     let grad_w = eps + (g(0, -1) - g(0, -3)).abs() + (center - g(0, -2)).abs();
 
-    DirectionalEstimate { n, e, w, s, grad_n, grad_e, grad_w, grad_s }
+    DirectionalEstimate {
+        n,
+        e,
+        w,
+        s,
+        grad_n,
+        grad_e,
+        grad_w,
+        grad_s,
+    }
 }
 
 fn amaze_green_plane(sensor: &RawSensorData) -> Vec<f32> {

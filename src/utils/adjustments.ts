@@ -44,6 +44,26 @@ export enum ToneMapper {
   Agx = 'agx',
 }
 
+// RAW-only, pre-Basic pipeline stage: which demosaic algorithm to use
+// (auto-selected by ISO unless overridden), plus post-demosaic denoise/
+// sharpen strength (-1 = auto, ISO-based; 0-100 = manual amount) and
+// whether raw-domain preprocessing (hot/dead pixel + CFA line-banding
+// correction) runs before demosaic. No effect on non-RAW files.
+export enum RawDevelopAdjustment {
+  DemosaicAlgorithm = 'rawDemosaicAlgorithm',
+  DenoiseAmount = 'rawDenoiseAmount',
+  SharpenAmount = 'rawSharpenAmount',
+  PreprocessEnabled = 'rawPreprocessEnabled',
+}
+
+export enum DemosaicAlgorithm {
+  Auto = 'auto',
+  Amaze = 'amaze',
+  Igv = 'igv',
+  Lmmse = 'lmmse',
+  Bilinear = 'bilinear',
+}
+
 export enum ColorAdjustment {
   ColorGrading = 'colorGrading',
   Hsl = 'hsl',
@@ -231,6 +251,10 @@ export interface Adjustments {
   lutIsSceneReferred?: boolean;
   masks: Array<MaskContainer>;
   orientationSteps: number;
+  rawDemosaicAlgorithm: DemosaicAlgorithm;
+  rawDenoiseAmount: number;
+  rawSharpenAmount: number;
+  rawPreprocessEnabled: boolean;
   rotation: number;
   saturation: number;
   sectionVisibility: SectionVisibility;
@@ -568,6 +592,10 @@ export const INITIAL_ADJUSTMENTS: Adjustments = {
   lutIsSceneReferred: false,
   masks: [],
   orientationSteps: 0,
+  rawDemosaicAlgorithm: DemosaicAlgorithm.Auto,
+  rawDenoiseAmount: -1,
+  rawSharpenAmount: -1,
+  rawPreprocessEnabled: true,
   rotation: 0,
   saturation: 0,
   sectionVisibility: {

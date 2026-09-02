@@ -26,10 +26,15 @@ pub fn develop_raw_image(
     // to the normal rawler-PPG pipeline below on any error or ineligible
     // sensor, so this can never break existing behavior when unset.
     if !fast_demosaic && std::env::var("RAPIDRAW_CUSTOM_DEMOSAIC").as_deref() == Ok("1") {
-        match crate::custom_raw_pipeline::develop_raw_image_custom(file_bytes, highlight_compression) {
+        match crate::custom_raw_pipeline::develop_raw_image_custom(
+            file_bytes,
+            highlight_compression,
+        ) {
             Ok(image) => return Ok(image),
             Err(e) => {
-                log::info!("custom demosaic pipeline unavailable ({e}), falling back to rawler PPG");
+                log::info!(
+                    "custom demosaic pipeline unavailable ({e}), falling back to rawler PPG"
+                );
             }
         }
     }
@@ -42,6 +47,58 @@ pub fn develop_raw_image(
         cancel_token,
     )?;
     Ok(apply_orientation(developed_image, orientation))
+}
+
+/// Real "open an image for editing" entry point (called only from
+/// `image_loader::load_base_image_from_bytes`, the one path that has the
+/// per-image "Raw Develop" adjustments-panel overrides available): tries
+/// our own demosaic/preprocess/denoise/sharpen pipeline first for
+/// full-quality decodes of standard Bayer sensors, falling back to the
+/// normal rawler-PPG `develop_raw_image` above on any error or ineligible
+/// sensor (X-Trans, 4-channel, monochrome, linear RAW) - so an image this
+/// pipeline can't handle degrades to the exact prior behavior, never fails.
+///
+/// Every OTHER caller of `develop_raw_image` (thumbnails, export, culling,
+/// HDR, focus stacking, panorama, restoration, etc.) is unaffected and
+/// keeps using rawler's PPG pipeline unchanged - this is deliberately not a
+/// blanket replacement.
+#[allow(clippy::too_many_arguments)]
+pub fn develop_raw_image_for_editor(
+    file_bytes: &[u8],
+    fast_demosaic: bool,
+    highlight_compression: f32,
+    linear_mode: String,
+    demosaic_override: Option<&str>,
+    denoise_override: Option<f32>,
+    sharpen_override: Option<f32>,
+    preprocess: bool,
+    cancel_token: Option<(Arc<AtomicUsize>, usize)>,
+) -> Result<DynamicImage> {
+    if !fast_demosaic {
+        match crate::custom_raw_pipeline::develop_raw_image_custom_resolved(
+            file_bytes,
+            highlight_compression,
+            demosaic_override,
+            denoise_override,
+            sharpen_override,
+            preprocess,
+        ) {
+            Ok(image) => return Ok(image),
+            Err(e) => {
+                log::info!(
+                    "custom raw develop pipeline unavailable ({e}), falling back to rawler PPG"
+                );
+            }
+        }
+    }
+
+    develop_raw_image(
+        file_bytes,
+        fast_demosaic,
+        highlight_compression,
+        linear_mode,
+        cancel_token,
+    )
 }
 
 fn is_linear_raw_format(raw_image: &RawImage) -> bool {

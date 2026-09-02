@@ -1912,7 +1912,10 @@ mod tone_mapper_tests {
         assert_eq!(ToneMapper::from_adjustments_json(&json), ToneMapper::Agx);
 
         let missing = serde_json::json!({});
-        assert_eq!(ToneMapper::from_adjustments_json(&missing), ToneMapper::Basic);
+        assert_eq!(
+            ToneMapper::from_adjustments_json(&missing),
+            ToneMapper::Basic
+        );
     }
 }
 
@@ -2577,7 +2580,7 @@ pub struct GpuContext {
 }
 
 #[inline(always)]
-fn rgb_to_yc_only(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
+pub(crate) fn rgb_to_yc_only(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
     let y = 0.299 * r + 0.587 * g + 0.114 * b;
     let cb = -0.168736 * r - 0.331264 * g + 0.5 * b;
     let cr = 0.5 * r - 0.418688 * g - 0.081312 * b;
@@ -2585,7 +2588,7 @@ fn rgb_to_yc_only(r: f32, g: f32, b: f32) -> (f32, f32, f32) {
 }
 
 #[inline(always)]
-fn yc_to_rgb(y: f32, cb: f32, cr: f32) -> (f32, f32, f32) {
+pub(crate) fn yc_to_rgb(y: f32, cb: f32, cr: f32) -> (f32, f32, f32) {
     let r = y + 1.402 * cr;
     let g = y - 0.344136 * cb - 0.714136 * cr;
     let b = y + 1.772 * cb;

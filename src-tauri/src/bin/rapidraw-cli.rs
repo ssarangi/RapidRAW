@@ -117,7 +117,7 @@ fn main() {
         Some("restore") if arguments.get(1).map(String::as_str) == Some("run") => run_restore_cli(&arguments),
         Some("raw") if arguments.get(1).map(String::as_str) == Some("develop") => run_raw_develop_cli(&arguments),
         Some("raw") if arguments.get(1).map(String::as_str) == Some("inspect") => run_raw_inspect_cli(&arguments),
-        _ => Err("Usage: rapidraw-cli library create --name <name> --database <catalog.db> | rapidraw-cli library open --database <catalog.db> | rapidraw-cli library add-root --database <catalog.db> --path <folder> [--label <name>] | rapidraw-cli library remove-root --database <catalog.db> --root <id> | rapidraw-cli library inspect|roots|metrics|scan|thumbnails|metadata --database <catalog.db> | rapidraw-cli library scan --database <catalog.db> --root <id> [--non-recursive] | rapidraw-cli library thumbnails --database <catalog.db> [--root <id>] [--force] | rapidraw-cli library metadata --database <catalog.db> [--root <id>] | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli faces detect|recognize --database <catalog.db> --face-models-dir <models/face> [--root <id>] | rapidraw-cli people list|images --database <catalog.db> | rapidraw-cli people images --database <catalog.db> --person <id> | rapidraw-cli tags status|top|export-suggestions|review|run --database <catalog.db> | rapidraw-cli tags review --database <catalog.db> --id <rowid> --state accepted|rejected | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli species list|review --database <catalog.db> | rapidraw-cli species review --database <catalog.db> --id <id> --state accepted|rejected | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions|decisions|analyze --database <catalog.db> | rapidraw-cli cull analyze --database <catalog.db> --root <id> [--similarity-threshold <n>] [--blur-threshold <n>] | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>] | rapidraw-cli raw inspect --input <file.raw> | rapidraw-cli raw develop --input <file.raw> --output <file.png> [--demosaic auto|amaze|igv|lmmse|bilinear] [--highlight-compression <f32>] [--linear]".to_string()),
+        _ => Err("Usage: rapidraw-cli library create --name <name> --database <catalog.db> | rapidraw-cli library open --database <catalog.db> | rapidraw-cli library add-root --database <catalog.db> --path <folder> [--label <name>] | rapidraw-cli library remove-root --database <catalog.db> --root <id> | rapidraw-cli library inspect|roots|metrics|scan|thumbnails|metadata --database <catalog.db> | rapidraw-cli library scan --database <catalog.db> --root <id> [--non-recursive] | rapidraw-cli library thumbnails --database <catalog.db> [--root <id>] [--force] | rapidraw-cli library metadata --database <catalog.db> [--root <id>] | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli faces detect|recognize --database <catalog.db> --face-models-dir <models/face> [--root <id>] | rapidraw-cli people list|images --database <catalog.db> | rapidraw-cli people images --database <catalog.db> --person <id> | rapidraw-cli tags status|top|export-suggestions|review|run --database <catalog.db> | rapidraw-cli tags review --database <catalog.db> --id <rowid> --state accepted|rejected | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli species list|review --database <catalog.db> | rapidraw-cli species review --database <catalog.db> --id <id> --state accepted|rejected | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions|decisions|analyze --database <catalog.db> | rapidraw-cli cull analyze --database <catalog.db> --root <id> [--similarity-threshold <n>] [--blur-threshold <n>] | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>] | rapidraw-cli raw inspect --input <file.raw> | rapidraw-cli raw develop --input <file.raw> --output <file.png> [--demosaic auto|amaze|igv|lmmse|bilinear] [--denoise auto|<0-1>] [--sharpen auto|<0-1>] [--no-preprocess] [--highlight-compression <f32>] [--linear]".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -1494,6 +1494,12 @@ fn run_raw_inspect_cli(arguments: &[String]) -> Result<serde_json::Value, String
 /// (raw_processing::develop_raw_image's contract), re-encoded to sRGB only
 /// for PNG viewability - useful when debugging exposure/highlight-rolloff
 /// behavior that happens downstream of demosaic.
+///
+/// `--denoise` and `--sharpen` accept `auto` (ISO-based suggestion, same
+/// pattern as `--demosaic auto`) or an explicit 0..1 amount; `0` (the
+/// implicit default) disables the stage entirely. `--no-preprocess`
+/// disables the raw-domain hot/dead-pixel + CFA-line-banding correction
+/// that otherwise always runs before demosaic.
 fn run_raw_develop_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
     let input_path = named_argument(arguments, "--input")?;
     let output_path = named_argument(arguments, "--output")?;
@@ -1505,10 +1511,17 @@ fn run_raw_develop_cli(arguments: &[String]) -> Result<serde_json::Value, String
     let highlight_compression = arguments
         .windows(2)
         .find(|pair| pair[0] == "--highlight-compression")
-        .map(|pair| pair[1].parse::<f32>().map_err(|_| "--highlight-compression must be a number".to_string()))
+        .map(|pair| {
+            pair[1]
+                .parse::<f32>()
+                .map_err(|_| "--highlight-compression must be a number".to_string())
+        })
         .transpose()?
         .unwrap_or(2.5);
     let linear_intermediate = arguments.iter().any(|argument| argument == "--linear");
+    let preprocess = !arguments
+        .iter()
+        .any(|argument| argument == "--no-preprocess");
 
     let bytes = fs::read(&input_path).map_err(|error| error.to_string())?;
     let sensor = rapidraw_lib::custom_raw_pipeline::decode_raw_sensor_data(&bytes)
@@ -1518,8 +1531,38 @@ fn run_raw_develop_cli(arguments: &[String]) -> Result<serde_json::Value, String
         rapidraw_lib::demosaic_algorithms::select_by_iso(sensor.iso)
     } else {
         rapidraw_lib::demosaic_algorithms::parse_algorithm_name(&demosaic_arg).ok_or_else(|| {
-            format!("unknown --demosaic value '{demosaic_arg}': expected auto|amaze|igv|lmmse|bilinear")
+            format!(
+                "unknown --demosaic value '{demosaic_arg}': expected auto|amaze|igv|lmmse|bilinear"
+            )
         })?
+    };
+
+    let parse_stage_arg = |flag: &str, auto_default: f32| -> Result<f32, String> {
+        match arguments
+            .windows(2)
+            .find(|pair| pair[0] == flag)
+            .map(|pair| pair[1].as_str())
+        {
+            None => Ok(0.0),
+            Some("auto") => Ok(auto_default),
+            Some(value) => value
+                .parse::<f32>()
+                .map_err(|_| format!("{flag} must be 'auto' or a number between 0 and 1"))
+                .map(|v| v.clamp(0.0, 1.0)),
+        }
+    };
+    let denoise_strength = parse_stage_arg(
+        "--denoise",
+        rapidraw_lib::raw_denoise::suggest_strength_for_iso(sensor.iso),
+    )?;
+    let sharpen_amount = parse_stage_arg(
+        "--sharpen",
+        rapidraw_lib::raw_sharpen::suggest_amount_for_iso(sensor.iso),
+    )?;
+    let options = rapidraw_lib::custom_raw_pipeline::DevelopOptions {
+        preprocess,
+        denoise_strength,
+        sharpen_amount,
     };
 
     let image = if linear_intermediate {
@@ -1527,6 +1570,7 @@ fn run_raw_develop_cli(arguments: &[String]) -> Result<serde_json::Value, String
             &bytes,
             algo,
             highlight_compression,
+            &options,
         )
         .map_err(|error| error.to_string())?;
         // Naive gamma+clamp re-encode purely for PNG viewability - the real
@@ -1540,7 +1584,11 @@ fn run_raw_develop_cli(arguments: &[String]) -> Result<serde_json::Value, String
                 let p = linear_f32.get_pixel(x, y).0;
                 let gamma = |v: f32| {
                     let v = v.clamp(0.0, 1.0);
-                    if v <= 0.0031308 { v * 12.92 } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
+                    if v <= 0.0031308 {
+                        v * 12.92
+                    } else {
+                        1.055 * v.powf(1.0 / 2.4) - 0.055
+                    }
                 };
                 image::Rgba([
                     (gamma(p[0]) * 255.0).round().clamp(0.0, 255.0) as u8,
@@ -1551,17 +1599,22 @@ fn run_raw_develop_cli(arguments: &[String]) -> Result<serde_json::Value, String
             },
         ))
     } else {
-        rapidraw_lib::custom_raw_pipeline::develop_raw_custom_with_algorithm(&bytes, algo)
+        rapidraw_lib::custom_raw_pipeline::develop_raw_custom_with_options(&bytes, algo, &options)
             .map_err(|error| error.to_string())?
     };
 
-    image.save(&output_path).map_err(|error| error.to_string())?;
+    image
+        .save(&output_path)
+        .map_err(|error| error.to_string())?;
 
     Ok(json!({
         "input": input_path,
         "output": output_path,
         "width": image.width(),
         "height": image.height(),
+        "preprocess": preprocess,
+        "denoiseStrength": denoise_strength,
+        "sharpenAmount": sharpen_amount,
         "iso": sensor.iso,
         "demosaic": rapidraw_lib::demosaic_algorithms::algorithm_name(algo),
         "linear": linear_intermediate,
@@ -1602,13 +1655,16 @@ mod tests {
         conn.execute(
             "CREATE TABLE image_ai_tags (id INTEGER PRIMARY KEY, review_state TEXT)",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "CREATE TABLE image_ai_analysis_state (image_id INTEGER, analysis_kind TEXT, model_id TEXT, model_revision TEXT, image_modified_at INTEGER, state TEXT, error_message TEXT, processed_at INTEGER, updated_at INTEGER)",
             [],
         ).unwrap();
-        conn.execute("CREATE TABLE cull_sessions (id TEXT)", []).unwrap();
-        conn.execute("CREATE TABLE cull_decision_events (id TEXT)", []).unwrap();
+        conn.execute("CREATE TABLE cull_sessions (id TEXT)", [])
+            .unwrap();
+        conn.execute("CREATE TABLE cull_decision_events (id TEXT)", [])
+            .unwrap();
 
         conn.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'img1.jpg', 'img1.jpg', 100, 0, 0, 'present')", []).unwrap();
         conn.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(2, 1, 1, 'img2.jpg', 'img2.jpg', 200, 0, 0, 'present')", []).unwrap();

@@ -1,6 +1,6 @@
 use std::io::Cursor;
 
-use base64::{engine::general_purpose, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use image::codecs::jpeg::JpegEncoder;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -58,7 +58,9 @@ async fn resolve_flash_models(api_key: &str) -> Result<Vec<String>, String> {
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        return Err(format!("Gemini returned HTTP {status} while listing models: {body}"));
+        return Err(format!(
+            "Gemini returned HTTP {status} while listing models: {body}"
+        ));
     }
     let payload: serde_json::Value = response
         .json()
@@ -70,14 +72,23 @@ async fn resolve_flash_models(api_key: &str) -> Result<Vec<String>, String> {
 
     let mut candidates: Vec<(String, (u32, u32, bool, bool))> = Vec::new();
     for model in models {
-        let Some(name) = model["name"].as_str() else { continue };
-        let supports_generate = model["supportedGenerationMethods"]
-            .as_array()
-            .is_some_and(|methods| methods.iter().any(|m| m.as_str() == Some("generateContent")));
+        let Some(name) = model["name"].as_str() else {
+            continue;
+        };
+        let supports_generate =
+            model["supportedGenerationMethods"]
+                .as_array()
+                .is_some_and(|methods| {
+                    methods
+                        .iter()
+                        .any(|m| m.as_str() == Some("generateContent"))
+                });
         if !supports_generate {
             continue;
         }
-        let Some(key) = parse_flash_candidate(name) else { continue };
+        let Some(key) = parse_flash_candidate(name) else {
+            continue;
+        };
         candidates.push((name.rsplit('/').next().unwrap_or(name).to_string(), key));
     }
 
@@ -183,7 +194,11 @@ enum GeminiCallError {
     Fatal(String),
 }
 
-async fn call_gemini(api_key: &str, model: &str, image_base64: &str) -> Result<GeminiCritiqueResponse, GeminiCallError> {
+async fn call_gemini(
+    api_key: &str,
+    model: &str,
+    image_base64: &str,
+) -> Result<GeminiCritiqueResponse, GeminiCallError> {
     let client = reqwest::Client::new();
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
@@ -209,17 +224,21 @@ async fn call_gemini(api_key: &str, model: &str, image_base64: &str) -> Result<G
         });
     }
 
-    let payload: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|error| GeminiCallError::Fatal(format!("Could not parse Gemini's response: {error}")))?;
+    let payload: serde_json::Value = response.json().await.map_err(|error| {
+        GeminiCallError::Fatal(format!("Could not parse Gemini's response: {error}"))
+    })?;
 
     let text = payload["candidates"][0]["content"]["parts"][0]["text"]
         .as_str()
-        .ok_or_else(|| GeminiCallError::Fatal("Gemini's response did not contain the expected text part".to_string()))?;
+        .ok_or_else(|| {
+            GeminiCallError::Fatal(
+                "Gemini's response did not contain the expected text part".to_string(),
+            )
+        })?;
 
-    serde_json::from_str(text)
-        .map_err(|error| GeminiCallError::Fatal(format!("Could not parse Gemini's critique JSON: {error}")))
+    serde_json::from_str(text).map_err(|error| {
+        GeminiCallError::Fatal(format!("Could not parse Gemini's critique JSON: {error}"))
+    })
 }
 
 #[tauri::command]
@@ -263,8 +282,15 @@ pub async fn get_or_generate_gemini_critique(
     };
 
     let file_bytes = std::fs::read(&image_path).map_err(|error| error.to_string())?;
-    let image = crate::image_loader::load_base_image_from_bytes(&file_bytes, &image_path, true, &settings, None)
-        .map_err(|error| error.to_string())?;
+    let image = crate::image_loader::load_base_image_from_bytes(
+        &file_bytes,
+        &image_path,
+        true,
+        &settings,
+        None,
+        None,
+    )
+    .map_err(|error| error.to_string())?;
     let resized = image.thumbnail(MAX_CRITIQUE_DIMENSION, MAX_CRITIQUE_DIMENSION);
 
     let mut buf = Cursor::new(Vec::new());
@@ -310,4 +336,3 @@ pub async fn get_or_generate_gemini_critique(
         cached: false,
     })
 }
-

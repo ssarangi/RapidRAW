@@ -2088,7 +2088,7 @@ fn decode_frame(
 ) -> Result<PlanarRgb, String> {
     let bytes = fs::read(path).map_err(|e| format!("Failed to read {}: {}", path, e))?;
     let mut dyn_img =
-        crate::image_loader::load_base_image_from_bytes(&bytes, path, false, settings, None)
+        crate::image_loader::load_base_image_from_bytes(&bytes, path, false, settings, None, None)
             .map_err(|e| format!("Failed to decode {}: {}", path, e))?;
     if is_raw_file(path) {
         apply_cpu_default_raw_processing(&mut dyn_img);

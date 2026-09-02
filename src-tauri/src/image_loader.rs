@@ -72,16 +72,30 @@ pub fn load_and_composite(
     settings: &AppSettings,
     cancel_token: Option<(Arc<AtomicUsize>, usize)>,
 ) -> Result<DynamicImage> {
-    let base_image =
-        load_base_image_from_bytes(base_image, path, use_fast_raw_dev, settings, cancel_token)?;
+    let base_image = load_base_image_from_bytes(
+        base_image,
+        path,
+        use_fast_raw_dev,
+        settings,
+        Some(adjustments),
+        cancel_token,
+    )?;
     composite_patches_on_image(&base_image, adjustments)
 }
 
+/// `raw_develop_adjustments`, when present, supplies the per-image "Raw
+/// Develop" adjustments-panel overrides (`rawDemosaicAlgorithm`,
+/// `rawDenoiseAmount`, `rawSharpenAmount`, `rawPreprocessEnabled`) read from
+/// that image's own persisted adjustments - pass `None` for any caller that
+/// doesn't have (or care about) per-image overrides, which falls back to
+/// ISO-auto behavior for RAW files, identical to passing all-default
+/// overrides explicitly.
 pub fn load_base_image_from_bytes(
     bytes: &[u8],
     path_for_ext_check: &str,
     use_fast_raw_dev: bool,
     settings: &AppSettings,
+    raw_develop_adjustments: Option<&Value>,
     cancel_token: Option<(Arc<AtomicUsize>, usize)>,
 ) -> Result<DynamicImage> {
     let highlight_compression = settings.raw_highlight_compression.unwrap_or(2.5);
@@ -103,12 +117,38 @@ pub fn load_base_image_from_bytes(
     );
 
     if is_raw_file(path_for_ext_check) {
+        let demosaic_override = raw_develop_adjustments
+            .and_then(|a| a.get("rawDemosaicAlgorithm"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        // Sliders store 0..100 with a negative sentinel meaning "auto"
+        // (ISO-based suggestion) - matches how other percentage-style
+        // adjustments in this app are already stored.
+        let denoise_override = raw_develop_adjustments
+            .and_then(|a| a.get("rawDenoiseAmount"))
+            .and_then(|v| v.as_f64())
+            .filter(|v| *v >= 0.0)
+            .map(|v| (v as f32 / 100.0).clamp(0.0, 1.0));
+        let sharpen_override = raw_develop_adjustments
+            .and_then(|a| a.get("rawSharpenAmount"))
+            .and_then(|v| v.as_f64())
+            .filter(|v| *v >= 0.0)
+            .map(|v| (v as f32 / 100.0).clamp(0.0, 1.0));
+        let preprocess = raw_develop_adjustments
+            .and_then(|a| a.get("rawPreprocessEnabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
         match panic::catch_unwind(move || {
-            crate::raw_processing::develop_raw_image(
+            crate::raw_processing::develop_raw_image_for_editor(
                 bytes,
                 use_fast_raw_dev,
                 highlight_compression,
                 linear_mode,
+                demosaic_override.as_deref(),
+                denoise_override,
+                sharpen_override,
+                preprocess,
                 cancel_token,
             )
         }) {
@@ -899,6 +939,7 @@ pub async fn load_image(
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
 
     let path_clone = source_path_str.clone();
+    let metadata_adjustments = metadata.adjustments.clone();
 
     let cached_data = state
         .decoded_image_cache
@@ -933,6 +974,7 @@ pub async fn load_image(
                             &path_clone,
                             false,
                             &settings,
+                            Some(&metadata_adjustments),
                             cancel_token.clone(),
                         )
                         .map_err(|e| e.to_string())?;
@@ -958,6 +1000,7 @@ pub async fn load_image(
                             &path_clone,
                             false,
                             &settings,
+                            Some(&metadata_adjustments),
                             cancel_token.clone(),
                         )
                         .map_err(|e| e.to_string())?;

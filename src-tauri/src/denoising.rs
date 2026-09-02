@@ -312,8 +312,9 @@ fn denoise_image(
     let _ = app_handle.emit("denoise-progress", "Loading image...");
 
     let file_bytes = fs::read(path).map_err(|e| e.to_string())?;
-    let dynamic_img = load_base_image_from_bytes(&file_bytes, &path_str, false, &settings, None)
-        .map_err(|e| e.to_string())?;
+    let dynamic_img =
+        load_base_image_from_bytes(&file_bytes, &path_str, false, &settings, None, None)
+            .map_err(|e| e.to_string())?;
 
     let rgb_img_for_denoiser = dynamic_img.to_rgb32f();
 
