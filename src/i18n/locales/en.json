@@ -291,6 +291,9 @@
     }
   },
   "editor": {
+    "canvas": {
+      "embeddedPreviewBadge": "Embedded Preview"
+    },
     "adjustments": {
       "actions": {
         "copySectionSettings": "Copy {{section}} Settings",

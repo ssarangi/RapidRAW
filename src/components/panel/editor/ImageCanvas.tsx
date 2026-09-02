@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, memo, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import ReactCrop from 'react-image-crop';
 import 'react-image-crop/dist/ReactCrop.css';
 import { Stage, Layer, Ellipse, Line, Transformer, Group, Circle, Rect, Arrow } from 'react-konva';
@@ -12,6 +13,7 @@ import { useOsPlatform } from '../../../hooks/useOsPlatform';
 import { useTranslation } from 'react-i18next';
 import type { OverlayMode } from '../right/CropPanel';
 import CompositionOverlays from './overlays/CompositionOverlays';
+import WebglTexturedCanvas from './WebglTexturedCanvas';
 import { calculateStraightenAngle } from '../../../utils/cropUtils';
 
 interface CursorPreview {
@@ -75,6 +77,8 @@ interface ImageCanvasProps {
   liveRotation?: number | null;
   transformState: { scale: number; positionX: number; positionY: number };
   hasRenderedFirstFrame: boolean;
+  portalContainerRef?: React.RefObject<HTMLDivElement | null>;
+  onFirstPaintPendingChange?: (isPending: boolean) => void;
 }
 
 interface MaskOverlayProps {
@@ -1330,6 +1334,8 @@ const ImageCanvas = memo(
     liveRotation,
     transformState,
     hasRenderedFirstFrame,
+    portalContainerRef,
+    onFirstPaintPendingChange,
   }: ImageCanvasProps) => {
     const [isCropViewVisible, setIsCropViewVisible] = useState(false);
     const cropImageRef = useRef<HTMLImageElement>(null);
@@ -1356,6 +1362,15 @@ const ImageCanvas = memo(
     });
     const [isFadingIn, setIsFadingIn] = useState(false);
     const prevImageIdentityRef = useRef(selectedImage.thumbnailUrl);
+    const [isAwaitingFirstPaint, setIsAwaitingFirstPaint] = useState(!!selectedImage.thumbnailUrl);
+
+    useEffect(() => {
+      onFirstPaintPendingChange?.(isAwaitingFirstPaint);
+    }, [isAwaitingFirstPaint, onFirstPaintPendingChange]);
+
+    const handleBaseLoadingChange = useCallback((loading: boolean) => {
+      if (!loading) setIsAwaitingFirstPaint(false);
+    }, []);
 
     const [baseTool, setBaseTool] = useState<ToolType>(brushSettings?.tool ?? ToolType.Brush);
     const [isAltPressed, setIsAltPressed] = useState(false);
@@ -1363,6 +1378,14 @@ const ImageCanvas = memo(
     const retainedPatchRef = useRef<typeof interactivePatch>(null);
 
     const isWgpuActive = appSettings?.useWgpuRenderer !== false && selectedImage?.isReady && hasRenderedFirstFrame;
+
+    // The awaiting-first-paint state only means something for the WebGL fallback path
+    // (below); once the native WGPU surface takes over, that texture-load concept
+    // doesn't apply, so never leave the caller stuck showing a loading indicator.
+    useEffect(() => {
+      if (isWgpuActive) setIsAwaitingFirstPaint(false);
+    }, [isWgpuActive]);
+
     const { t } = useTranslation();
     const osPlatform = useOsPlatform();
     const modifierKey = osPlatform === 'macos' ? 'Cmd' : 'Ctrl';
@@ -1454,6 +1477,7 @@ const ImageCanvas = memo(
         prevImageIdentityRef.current = selectedImage.thumbnailUrl;
         setDisplayState({ base: newSrc, fade: null });
         setIsFadingIn(false);
+        setIsAwaitingFirstPaint(!!newSrc);
         return;
       }
 
@@ -1462,6 +1486,11 @@ const ImageCanvas = memo(
         setIsFadingIn(false);
       } else {
         if (displayState.base !== newSrc && displayState.base) {
+          // A genuinely new, correctly-framed full image is arriving - any
+          // retained interactive patch was positioned for the previous
+          // pan/zoom framing and would be misaligned with it, so stop
+          // showing it now rather than for the whole fade transition.
+          retainedPatchRef.current = null;
           setDisplayState((prev) => ({ base: prev.base, fade: newSrc }));
           setIsFadingIn(false);
 
@@ -2622,6 +2651,15 @@ const ImageCanvas = memo(
 
     const visiblePatch = interactivePatch ?? (baseIsReady ? null : retainedPatchRef.current);
 
+    // While a RAW file is still decoding, the app falls back to displaying its
+    // embedded JPEG preview so something appears immediately - flag that case so
+    // the UI can label it clearly rather than let it silently pass as the real thing.
+    const isShowingEmbeddedPreview =
+      !!selectedImage.thumbnailUrl &&
+      displayState.base === selectedImage.thumbnailUrl &&
+      finalPreviewUrl !== selectedImage.thumbnailUrl &&
+      !finalPreviewUrl;
+
     useEffect(() => {
       if (baseIsReady && !interactivePatch) {
         retainedPatchRef.current = null;
@@ -2766,65 +2804,62 @@ const ImageCanvas = memo(
             }}
           >
             <div className="absolute inset-0 w-full h-full">
-              <svg
-                className="pointer-events-none"
-                style={
-                  imageRenderSize.width > 0 && imageRenderSize.height > 0
-                    ? {
-                        position: 'absolute',
-                        left: `${imageRenderSize.offsetX}px`,
-                        top: `${imageRenderSize.offsetY}px`,
-                        width: `${imageRenderSize.width}px`,
-                        height: `${imageRenderSize.height}px`,
-                        overflow: 'visible',
-                      }
-                    : {
-                        position: 'absolute',
-                        inset: '0px',
-                        width: '100%',
-                        height: '100%',
-                        overflow: 'visible',
-                      }
-                }
-              >
-                {displayState.base && !isWgpuActive && (
-                  <image
-                    href={displayState.base}
-                    x="0"
-                    y="0"
-                    width="100%"
-                    height="100%"
-                    style={{ imageRendering: isMaxZoom ? 'pixelated' : 'auto' }}
-                  />
-                )}
+              {portalContainerRef?.current &&
+                !isWgpuActive &&
+                createPortal(
+                  <div
+                    className="pointer-events-none"
+                    style={{ position: 'absolute', inset: 0, zIndex: 0, overflow: 'hidden' }}
+                  >
+                    {displayState.base && (
+                      <WebglTexturedCanvas
+                        src={displayState.base}
+                        imageRenderSize={imageRenderSize}
+                        transformState={transformState}
+                        isMaxZoom={!!isMaxZoom}
+                        onLoadingChange={handleBaseLoadingChange}
+                      />
+                    )}
+                    {displayState.fade && (
+                      <WebglTexturedCanvas
+                        src={displayState.fade}
+                        imageRenderSize={imageRenderSize}
+                        transformState={transformState}
+                        isMaxZoom={!!isMaxZoom}
+                        style={{ opacity: isFadingIn ? 1 : 0, transition: 'opacity 150ms ease-in-out' }}
+                      />
+                    )}
+                    {visiblePatch && (
+                      <WebglTexturedCanvas
+                        src={visiblePatch.url}
+                        rect={{
+                          normX: visiblePatch.normX,
+                          normY: visiblePatch.normY,
+                          normW: visiblePatch.normW,
+                          normH: visiblePatch.normH,
+                        }}
+                        imageRenderSize={imageRenderSize}
+                        transformState={transformState}
+                        isMaxZoom={!!isMaxZoom}
+                      />
+                    )}
 
-                {displayState.fade && !isWgpuActive && (
-                  <image
-                    href={displayState.fade}
-                    x="0"
-                    y="0"
-                    width="100%"
-                    height="100%"
-                    style={{
-                      imageRendering: isMaxZoom ? 'pixelated' : 'auto',
-                      opacity: isFadingIn ? 1 : 0,
-                      transition: 'opacity 150ms ease-in-out',
-                    }}
-                  />
+                    {isShowingEmbeddedPreview && (
+                      <div
+                        className="absolute top-2 left-2 px-2 py-1 rounded-md text-xs font-medium select-none"
+                        style={{
+                          zIndex: 1,
+                          backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                          color: '#ffffff',
+                          boxShadow: '0 1px 3px rgba(0, 0, 0, 0.5)',
+                        }}
+                      >
+                        {t('editor.canvas.embeddedPreviewBadge')}
+                      </div>
+                    )}
+                  </div>,
+                  portalContainerRef.current,
                 )}
-
-                {visiblePatch && !isWgpuActive && (
-                  <image
-                    href={visiblePatch.url}
-                    x={`${visiblePatch.normX * 100}%`}
-                    y={`${visiblePatch.normY * 100}%`}
-                    width={`${visiblePatch.normW * 100}%`}
-                    height={`${visiblePatch.normH * 100}%`}
-                    preserveAspectRatio="none"
-                    style={{ imageRendering: isMaxZoom ? 'pixelated' : 'auto' }}
-                  />
-                )}
-              </svg>
 
               {displayedMaskUrl && (
                 <img

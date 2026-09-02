@@ -3260,6 +3260,31 @@ pub fn load_metadata(path: String, app_handle: AppHandle) -> Result<ImageMetadat
     Ok(metadata)
 }
 
+#[derive(serde::Serialize)]
+pub struct FastImageDimensions {
+    pub width: u32,
+    pub height: u32,
+}
+
+// Reads just the pixel dimensions of an image, without the full RAW decode
+// pipeline (which can take several seconds) - lets the frontend size the
+// editor's image box correctly while a fast embedded-preview placeholder is
+// shown, well before the real decode result would otherwise arrive.
+#[tauri::command]
+pub fn get_fast_image_dimensions(path: String) -> Result<FastImageDimensions, String> {
+    let (source_path, _sidecar_path) = parse_virtual_path(&path);
+
+    if crate::formats::is_raw_file(&source_path) {
+        let bytes = fs::read(&source_path).map_err(|e| e.to_string())?;
+        let (width, height) = crate::raw_processing::get_fast_raw_dimensions(&bytes)
+            .ok_or_else(|| "Failed to read RAW dimensions".to_string())?;
+        Ok(FastImageDimensions { width, height })
+    } else {
+        let (width, height) = image::image_dimensions(&source_path).map_err(|e| e.to_string())?;
+        Ok(FastImageDimensions { width, height })
+    }
+}
+
 fn get_presets_path(app_handle: &AppHandle) -> Result<std::path::PathBuf, String> {
     let presets_dir = app_handle
         .path()

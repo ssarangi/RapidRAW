@@ -1031,7 +1031,8 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
   }, [isMasking, isAiEditing]);
 
   const hasDisplayableImage = finalPreviewUrl || selectedImage?.thumbnailUrl;
-  const showSpinner = isLoading && !hasDisplayableImage;
+  const [isFirstPaintPending, setIsFirstPaintPending] = useState(false);
+  const showSpinner = (isLoading && !hasDisplayableImage) || isFirstPaintPending;
 
   useLayoutEffect(() => {
     const container = imageContainerRef.current;
@@ -1353,7 +1354,14 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
         lastWgpuTransformRef.current = currentTransform;
         isInvoking = true;
 
-        const isZoomedIn = scale >= maxScaleRef.current - 0.5;
+        // Must trigger once we're magnifying past the image's true 1:1 native-pixel
+        // density, not once scale merely approaches the arbitrary (~20x) max zoom cap -
+        // see the identical fix/rationale for isMaxZoom further down in this file. This
+        // is the flag that actually reaches the live renderer (WGPU is the default
+        // path; useWgpuRenderer defaults to true), so this was the real bug behind the
+        // persistent softness at ordinary zoom levels, not the CSS `isMaxZoom` fallback.
+        const scaleFor100Percent = irs.scale > 0 ? 1 / irs.scale : Infinity;
+        const isZoomedIn = scale >= scaleFor100Percent * 0.95;
 
         invoke(Invokes.UpdateWgpuTransform, {
           payload: {
@@ -2012,7 +2020,16 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
   }
 
   const isZoomActionActive = !isPanningDisabled;
-  const isMaxZoom = transformState.scale >= maxScaleRef.current - 0.5;
+  // "isMaxZoom" gates whether the displayed <img> uses `image-rendering: pixelated`
+  // (crisp) vs. `auto` (browser bilinear/bicubic smoothing). It must trigger once the
+  // CSS transform is magnifying the image past its true 1:1 native-pixel density -
+  // NOT once scale is merely close to the (arbitrary, ~20x) max zoom cap, which is
+  // reached almost never in practice. Below 1:1 density, `auto` is still correct
+  // (it avoids aliasing on genuine downscales); past it, `auto`'s smoothing is exactly
+  // the softness/anti-aliasing look reported at ordinary zoom levels (150%-300%),
+  // long before the old scale >= maxScale - 0.5 threshold would ever fire.
+  const scaleFor100Percent = imageRenderSize.scale > 0 ? 1 / imageRenderSize.scale : Infinity;
+  const isMaxZoom = transformState.scale >= scaleFor100Percent * 0.95;
 
   let cursorStyle = 'default';
   if ((isShiftPressed && !isCropping) || straightenDragLine) {
@@ -2104,6 +2121,15 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
           className="w-full h-full flex items-center justify-center origin-top-left"
           style={{
             transform: `translate(${transformState.positionX}px, ${transformState.positionY}px) scale(${transformState.scale})`,
+            // Kept for the mask overlay <img> and other content still positioned by this
+            // transform. The main image itself now renders via a WebGL canvas portaled
+            // to imageContainerRef (see ImageCanvas's portalContainerRef) - doing its own
+            // pan/zoom in-shader rather than being scaled by this CSS transform, since
+            // WebKitGTK does not reliably honor `image-rendering` through a compositor
+            // blow-up of an already-rasterized layer.
+            imageRendering: isMaxZoom ? 'pixelated' : 'auto',
+            position: 'relative',
+            zIndex: 1,
           }}
         >
           <ImageCanvas
@@ -2119,6 +2145,8 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
             handleCropComplete={handleCropComplete}
             imageRenderSize={imageRenderSize}
             interactivePatch={interactivePatch}
+            portalContainerRef={imageContainerRef}
+            onFirstPaintPendingChange={setIsFirstPaintPending}
             isAiEditing={isAiEditing}
             isCropping={isCropping}
             isMaskControlHovered={isMaskControlHovered}

@@ -5,7 +5,7 @@ import { useEditorStore } from '../store/useEditorStore';
 import { useLibraryStore } from '../store/useLibraryStore';
 import { useSettingsStore } from '../store/useSettingsStore';
 import { Invokes } from '../components/ui/AppProperties';
-import { INITIAL_ADJUSTMENTS, normalizeLoadedAdjustments } from '../utils/adjustments';
+import { INITIAL_ADJUSTMENTS, autoNoiseReductionForIso, normalizeLoadedAdjustments } from '../utils/adjustments';
 
 export function useImageLoader(cachedEditStateRef: React.RefObject<any>) {
   const selectedImage = useEditorStore((s) => s.selectedImage);
@@ -48,6 +48,26 @@ export function useImageLoader(cachedEditStateRef: React.RefObject<any>) {
           resetHistory(initialAdjusts);
         } catch (err) {
           console.error('Failed to load metadata early:', err);
+        }
+      };
+
+      // Runs independently of loadMetadataEarly/loadFullImageData below, purely to
+      // get a real aspect ratio onto screen fast: the full decode (loadFullImageData)
+      // is what actually sets originalSize, but for a RAW file that can take several
+      // seconds, during which originalSize stays {0,0} and the image box has no size
+      // to render the embedded-preview placeholder into - even though the thumbnail
+      // itself is ready near-instantly. This fetches just the dimensions via a fast,
+      // non-demosaic probe, so the placeholder is correctly sized from the start.
+      const loadFastDimensions = async () => {
+        try {
+          const dims: any = await invoke(Invokes.GetFastImageDimensions, { path: selectedImage.path });
+          if (!isEffectActive) return;
+          const current = useEditorStore.getState();
+          if (current.selectedImage?.path !== selectedImage.path) return;
+          if (current.originalSize.width > 0) return; // the real decode already won the race
+          setEditor({ originalSize: { width: dims.width, height: dims.height } });
+        } catch (err) {
+          console.warn('Failed to load fast image dimensions:', err);
         }
       };
 
@@ -101,6 +121,26 @@ export function useImageLoader(cachedEditStateRef: React.RefObject<any>) {
             }
             return state;
           });
+
+          if (loadImageResult.is_raw) {
+            const iso = parseInt(loadImageResult.exif?.PhotographicSensitivity || '0', 10);
+            const { luma, color } = autoNoiseReductionForIso(iso);
+            if (luma > 0 || color > 0) {
+              setEditor((state) => {
+                const isUnedited =
+                  state.adjustments.lumaNoiseReduction === INITIAL_ADJUSTMENTS.lumaNoiseReduction &&
+                  state.adjustments.colorNoiseReduction === INITIAL_ADJUSTMENTS.colorNoiseReduction;
+                if (!isUnedited) return state;
+                return {
+                  adjustments: {
+                    ...state.adjustments,
+                    lumaNoiseReduction: luma,
+                    colorNoiseReduction: color,
+                  },
+                };
+              });
+            }
+          }
         } catch (err) {
           if (isEffectActive) {
             console.error('Failed to load image:', err);
@@ -122,6 +162,7 @@ export function useImageLoader(cachedEditStateRef: React.RefObject<any>) {
       };
 
       loadAll();
+      loadFastDimensions();
 
       return () => {
         isEffectActive = false;

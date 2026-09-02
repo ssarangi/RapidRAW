@@ -601,6 +601,57 @@ export const INITIAL_ADJUSTMENTS: Adjustments = {
   whites: 0,
 };
 
+/**
+ * Default luma/color noise reduction strength for a fresh, unedited RAW,
+ * scaled to the shot's ISO. Without this, real sensor noise at high ISO
+ * passes through untouched and gets amplified by the default sharpening
+ * pass - the noise reduction sliders exist and work, they just default to
+ * 0, so an unedited high-ISO photo looks noisier than it needs to.
+ * Piecewise-linear ramp anchored to where noise becomes visually obvious
+ * on typical full-frame/APS-C sensors; chroma noise shows up earlier and
+ * needs a bit more strength than luma at the same ISO.
+ */
+export function autoNoiseReductionForIso(iso: number): { luma: number; color: number } {
+  if (!iso || iso <= 0) return { luma: 0, color: 0 };
+
+  const lumaPoints: [number, number][] = [
+    [400, 0],
+    [800, 0.15],
+    [1600, 0.25],
+    [3200, 0.4],
+    [6400, 0.55],
+    [12800, 0.7],
+  ];
+  const colorPoints: [number, number][] = [
+    [200, 0],
+    [800, 0.25],
+    [1600, 0.35],
+    [3200, 0.45],
+    [6400, 0.55],
+    [12800, 0.7],
+  ];
+
+  const interpolate = (points: [number, number][]): number => {
+    if (iso <= points[0][0]) return points[0][1];
+    const last = points[points.length - 1];
+    if (iso >= last[0]) return last[1];
+    for (let i = 0; i < points.length - 1; i++) {
+      const [isoLo, valLo] = points[i];
+      const [isoHi, valHi] = points[i + 1];
+      if (iso >= isoLo && iso <= isoHi) {
+        const t = (iso - isoLo) / (isoHi - isoLo);
+        return valLo + t * (valHi - valLo);
+      }
+    }
+    return last[1];
+  };
+
+  return {
+    luma: Math.round(interpolate(lumaPoints) * 100) / 100,
+    color: Math.round(interpolate(colorPoints) * 100) / 100,
+  };
+}
+
 const deepCloneCurves = (curves: any): Curves => ({
   blue: curves?.blue?.map((p: Coord) => ({ ...p })) || [
     { x: 0, y: 0 },

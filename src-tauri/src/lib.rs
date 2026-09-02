@@ -85,7 +85,7 @@ use imageproc::drawing::draw_line_segment_mut;
 use imageproc::edges::canny;
 use imageproc::hough::{LineDetectionOptions, detect_lines};
 use imgref::ImgRef;
-use mozjpeg_rs::{Encoder, Preset};
+use mozjpeg_rs::{Encoder, Preset, Subsampling};
 use rayon::prelude::*;
 use rgb::{FromSlice, RGBA8};
 
@@ -597,9 +597,19 @@ fn process_preview_job(
 
         let step_start = std::time::Instant::now();
 
+        // Interactive (slider-dragging) previews prioritize speed and can use
+        // 4:2:0 chroma subsampling; the settled, non-interactive preview is
+        // what the user actually examines the image at, so it uses 4:4:4
+        // (no subsampling) to avoid visible softening/ringing on fine detail.
+        let subsampling = if is_interactive {
+            Subsampling::S420
+        } else {
+            Subsampling::S444
+        };
         let encode_result = Encoder::new(Preset::BaselineFastest)
             .quality(jpeg_quality)
             .fast_color(true)
+            .subsampling(subsampling)
             .encode_imgref(img_ref);
 
         match encode_result {
@@ -2424,6 +2434,7 @@ pub fn run() {
             file_management::save_metadata_and_update_thumbnail,
             file_management::apply_adjustments_to_paths,
             file_management::load_metadata,
+            file_management::get_fast_image_dimensions,
             file_management::load_presets,
             file_management::save_presets,
             file_management::get_or_create_internal_library_root,

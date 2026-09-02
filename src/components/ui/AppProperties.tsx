@@ -79,6 +79,7 @@ export enum Invokes {
   ListImagesRecursive = 'list_images_recursive',
   LoadImage = 'load_image',
   LoadMetadata = 'load_metadata',
+  GetFastImageDimensions = 'get_fast_image_dimensions',
   LoadPresets = 'load_presets',
   LoadSettings = 'load_settings',
   MoveFiles = 'move_files',
@@ -533,8 +534,7 @@ export interface SmartCollection {
 }
 
 export type LibrarySource =
-  | { type: 'filesystem' }
-  | { type: 'catalog'; libraryId: string; dbPath: string; name: string };
+  { type: 'filesystem' } | { type: 'catalog'; libraryId: string; dbPath: string; name: string };
 
 export interface Option {
   color?: string;

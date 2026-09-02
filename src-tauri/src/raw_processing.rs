@@ -250,3 +250,18 @@ pub fn get_fast_demosaic_scale_factor(
     }
     1.0
 }
+
+/// Reads a RAW file's pixel dimensions via rawler's fast (non-demosaic) decode
+/// path - the same one used by `get_fast_demosaic_scale_factor` - so callers can
+/// learn the image's aspect ratio near-instantly, long before a full decode
+/// (which can take several seconds) completes. Dimensions are sensor-native and
+/// do not account for EXIF orientation, so a portrait/landscape mismatch is
+/// possible until the real decode result replaces this estimate.
+pub fn get_fast_raw_dimensions(file_bytes: &[u8]) -> Option<(u32, u32)> {
+    let source = RawSource::new_from_slice(file_bytes);
+    let decoder = rawler::get_decoder(&source).ok()?;
+    let raw_img = decoder
+        .raw_image(&source, &RawDecodeParams::default(), true)
+        .ok()?;
+    Some((raw_img.width as u32, raw_img.height as u32))
+}

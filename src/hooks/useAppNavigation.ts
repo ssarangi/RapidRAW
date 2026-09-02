@@ -238,6 +238,12 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
         previewSize: { width: 0, height: 0 },
         histogram: null,
         waveform: null,
+        // Must be cleared here: otherwise it retains the previous image's preview
+        // blob, which wins over this image's thumbnail in the `finalPreviewUrl ||
+        // thumbnailUrl` display fallback - skipping the embedded-preview placeholder
+        // entirely and making the editor look frozen on the old image while the new
+        // one decodes.
+        finalPreviewUrl: null,
         uncroppedAdjustedPreviewUrl: null,
       });
 
@@ -596,10 +602,7 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
           setLibrary({ currentFolderPath: null, activeAlbumId: null, imageList: [] });
           useUIStore.getState().setUI({ activeView: 'library' });
         }
-      } else if (
-        pathToSelect &&
-        (pathToSelect.startsWith('Library: ') || pathToSelect.startsWith('LibraryFolder:'))
-      ) {
+      } else if (pathToSelect && (pathToSelect.startsWith('Library: ') || pathToSelect.startsWith('LibraryFolder:'))) {
         const activeCatalogRootId = folderState?.activeCatalogRootId;
         if (activeCatalogRootId) {
           try {

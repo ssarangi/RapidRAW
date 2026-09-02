@@ -324,42 +324,68 @@ export function useImageProcessing(
     [selectedImage?.isReady],
   );
 
-  const calculateTargetRes = useCallback(() => {
-    const baseTargetRes = appSettings?.editorPreviewResolution || 1920;
-    if (!(appSettings?.enableZoomHifi ?? true) || displaySize.width === 0) {
-      return baseTargetRes;
-    }
-
-    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
-    const sharpnessFactor = 1.25;
-    const zoomMultiplier = appSettings?.highResZoomMultiplier || 1.0;
-    const effectiveDpr = appSettings?.useFullDpiRendering ? dpr : 1;
-
-    let targetRes = Math.max(displaySize.width, displaySize.height) * effectiveDpr * sharpnessFactor * zoomMultiplier;
-    targetRes = Math.max(targetRes, 512);
-
-    if (originalSize && originalSize.width > 0 && originalSize.height > 0) {
-      const origMax = Math.max(originalSize.width, originalSize.height);
-      targetRes = Math.min(targetRes, origMax);
-      if (targetRes >= origMax * 0.8) {
-        targetRes = origMax;
+  const calculateTargetRes = useCallback(
+    (highFidelity: boolean = false) => {
+      const baseTargetRes = appSettings?.editorPreviewResolution || 1920;
+      if (!(appSettings?.enableZoomHifi ?? true) || displaySize.width === 0) {
+        return baseTargetRes;
       }
-    }
 
-    if (originalSize && targetRes !== Math.max(originalSize.width, originalSize.height)) {
-      targetRes = Math.ceil(targetRes / 256) * 256;
-    }
+      const origMax =
+        originalSize && originalSize.width > 0 && originalSize.height > 0
+          ? Math.max(originalSize.width, originalSize.height)
+          : 0;
 
-    return Math.round(targetRes);
-  }, [
-    appSettings?.enableZoomHifi,
-    appSettings?.editorPreviewResolution,
-    appSettings?.highResZoomMultiplier,
-    appSettings?.useFullDpiRendering,
-    displaySize.width,
-    displaySize.height,
-    originalSize,
-  ]);
+      // The settled (non-interactive) render always covers the FULL frame - the
+      // backend only honors the viewport ROI crop while actively dragging (see
+      // is_interactive gating in lib.rs). That means once the user is zoomed in
+      // past fit, the only way for the full-frame render to look sharp at the
+      // magnified viewport is for it to already be close to native resolution -
+      // a formula based on the visible viewport size undershoots because the
+      // *entire* image still has to be re-rendered, not just the visible crop.
+      // Confirmed by direct GPU-dump comparison: forcing native resolution is
+      // sharp; the formula-derived intermediate resolution below is only
+      // marginally better than the interactive-drag preview. Only applied for
+      // the settled/high-fidelity request - forcing native res while actively
+      // dragging would make the backend regenerate a full native-resolution
+      // base preview on every drag frame, which is a serious perf regression.
+      const liveScale = baseRenderSize && baseRenderSize.width > 0 ? displaySize.width / baseRenderSize.width : 1;
+      if (highFidelity && origMax > 0 && liveScale > 1.02) {
+        return origMax;
+      }
+
+      const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+      const sharpnessFactor = 1.25;
+      const zoomMultiplier = appSettings?.highResZoomMultiplier || 1.0;
+      const effectiveDpr = appSettings?.useFullDpiRendering ? dpr : 1;
+
+      let targetRes = Math.max(displaySize.width, displaySize.height) * effectiveDpr * sharpnessFactor * zoomMultiplier;
+      targetRes = Math.max(targetRes, 512);
+
+      if (origMax > 0) {
+        targetRes = Math.min(targetRes, origMax);
+        if (targetRes >= origMax * 0.8) {
+          targetRes = origMax;
+        }
+      }
+
+      if (origMax > 0 && targetRes !== origMax) {
+        targetRes = Math.ceil(targetRes / 256) * 256;
+      }
+
+      return Math.round(targetRes);
+    },
+    [
+      appSettings?.enableZoomHifi,
+      appSettings?.editorPreviewResolution,
+      appSettings?.highResZoomMultiplier,
+      appSettings?.useFullDpiRendering,
+      displaySize.width,
+      displaySize.height,
+      baseRenderSize,
+      originalSize,
+    ],
+  );
 
   const requestHiFiZoom = useMemo(
     () =>
@@ -382,7 +408,7 @@ export function useImageProcessing(
 
   useEffect(() => {
     if (activeView === 'editor' && selectedImage?.isReady && displaySize.width > 0 && !isSliderDragging) {
-      let baseRes = calculateTargetRes();
+      let baseRes = calculateTargetRes(true);
       if (originalSize.width > 0 && originalSize.height > 0) {
         const maxRes = Math.max(originalSize.width, originalSize.height);
         if (baseRes > maxRes) baseRes = maxRes;
@@ -413,7 +439,7 @@ export function useImageProcessing(
 
     if (dragIdleTimer.current) clearTimeout(dragIdleTimer.current);
 
-    const targetRes = calculateTargetRes();
+    const targetRes = calculateTargetRes(!isSliderDragging);
     const renderAdjustments = previewOverride ?? adjustments;
 
     if (activeView !== 'editor') {

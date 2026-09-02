@@ -24,7 +24,14 @@ import { useShallow } from 'zustand/react/shallow';
 import { useTranslation } from 'react-i18next';
 
 import Filmstrip from './Filmstrip';
-import { BackgroundJob, GLOBAL_KEYS, ImageFile, Invokes, SelectedImage, ThumbnailAspectRatio } from '../ui/AppProperties';
+import {
+  BackgroundJob,
+  GLOBAL_KEYS,
+  ImageFile,
+  Invokes,
+  SelectedImage,
+  ThumbnailAspectRatio,
+} from '../ui/AppProperties';
 import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
 import { useEditorStore } from '../../store/useEditorStore';
@@ -257,7 +264,23 @@ export default function BottomBar({
   const isRawFile = (path: string | null | undefined): boolean => {
     if (!path) return false;
     const ext = path.split('.').pop()?.toLowerCase();
-    return ['arw', 'cr2', 'cr3', 'nef', 'dng', 'orf', 'rw2', 'pef', 'raf', 'raw', 'sr2', 'srf', 'nrw', 'kdc', 'mrw'].includes(ext || '');
+    return [
+      'arw',
+      'cr2',
+      'cr3',
+      'nef',
+      'dng',
+      'orf',
+      'rw2',
+      'pef',
+      'raf',
+      'raw',
+      'sr2',
+      'srf',
+      'nrw',
+      'kdc',
+      'mrw',
+    ].includes(ext || '');
   };
 
   const allColors = [...COLOR_LABELS, { name: 'none', color: '#9ca3af' }];
@@ -270,23 +293,20 @@ export default function BottomBar({
     ['queued', 'running', 'paused', 'cancelling'].includes(job.state),
   );
   const activeBackgroundJob = activeBackgroundJobs[0];
-  const currentDisplayedPath =
-    catalogScan.isActive
-      ? catalogScan.currentPath
-      : activeBackgroundJob?.currentItem || catalogScan.currentPath || null;
+  const currentDisplayedPath = catalogScan.isActive
+    ? catalogScan.currentPath
+    : activeBackgroundJob?.currentItem || catalogScan.currentPath || null;
   const currentThumbnailSrc =
     catalogScan.isActive && catalogScanThumbnail
       ? catalogScanThumbnail
       : currentDisplayedPath
-        ? thumbnails[currentDisplayedPath] || (!isRawFile(currentDisplayedPath) ? convertFileSrc(currentDisplayedPath) : undefined)
+        ? thumbnails[currentDisplayedPath] ||
+          (!isRawFile(currentDisplayedPath) ? convertFileSrc(currentDisplayedPath) : undefined)
         : undefined;
 
   useEffect(() => {
     setThumbError(false);
-    if (
-      currentDisplayedPath &&
-      !thumbnails[currentDisplayedPath]
-    ) {
+    if (currentDisplayedPath && !thumbnails[currentDisplayedPath]) {
       invoke('update_thumbnail_queue', { paths: [{ path: currentDisplayedPath, modified: null }] }).catch(() => {});
     }
   }, [currentDisplayedPath, thumbnails]);
@@ -334,14 +354,27 @@ export default function BottomBar({
     try {
       await invoke(Invokes.CancelBackgroundJob, { jobId });
       setBackgroundJobs((jobs) =>
-        jobs.map((job) => (job.id === jobId ? { ...job, state: 'cancelling', message: 'Cancellation requested' } : job)),
+        jobs.map((job) =>
+          job.id === jobId ? { ...job, state: 'cancelling', message: 'Cancellation requested' } : job,
+        ),
       );
     } catch (error) {
       console.error('Failed to cancel background job:', error);
     }
   };
   const handlePauseBackgroundJob = async (jobId: string, resume: boolean) => {
-    try { await invoke(resume ? Invokes.ResumeBackgroundJob : Invokes.PauseBackgroundJob, { jobId }); setBackgroundJobs((jobs) => jobs.map((job) => job.id === jobId ? { ...job, state: resume ? 'running' : 'paused', message: resume ? 'Resume requested' : 'Pause requested' } : job)); } catch (error) { console.error('Failed to update background job:', error); }
+    try {
+      await invoke(resume ? Invokes.ResumeBackgroundJob : Invokes.PauseBackgroundJob, { jobId });
+      setBackgroundJobs((jobs) =>
+        jobs.map((job) =>
+          job.id === jobId
+            ? { ...job, state: resume ? 'running' : 'paused', message: resume ? 'Resume requested' : 'Pause requested' }
+            : job,
+        ),
+      );
+    } catch (error) {
+      console.error('Failed to update background job:', error);
+    }
   };
   const handleRetryBackgroundJob = async (jobId: string) => {
     try {
@@ -353,8 +386,23 @@ export default function BottomBar({
     }
   };
   const handleRetryAllEligibleJobs = async () => {
-    const retryableKinds = new Set(['catalog_scan', 'cull_analysis', 'model_download', 'ram_plus_tagging', 'ai_tagging', 'face_detection', 'face_recognition', 'raw_denoise', 'rgb_denoise', 'thumbnail_generation', 'metadata_extraction', 'sidecar_metadata']);
-    const eligible = backgroundJobs.filter((job) => retryableKinds.has(job.kind) && ['failed', 'cancelled'].includes(job.state));
+    const retryableKinds = new Set([
+      'catalog_scan',
+      'cull_analysis',
+      'model_download',
+      'ram_plus_tagging',
+      'ai_tagging',
+      'face_detection',
+      'face_recognition',
+      'raw_denoise',
+      'rgb_denoise',
+      'thumbnail_generation',
+      'metadata_extraction',
+      'sidecar_metadata',
+    ]);
+    const eligible = backgroundJobs.filter(
+      (job) => retryableKinds.has(job.kind) && ['failed', 'cancelled'].includes(job.state),
+    );
     const retriedKinds = new Set<string>();
     if (eligible.length === 0) return;
     try {
@@ -422,6 +470,7 @@ export default function BottomBar({
   }, [isZoomActive, isZoomReady, currentOriginalPercent]);
 
   const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!isZoomReady) return;
     const newZoom = parseFloat(e.target.value);
     setLatchedSliderValue(newZoom);
     setLatchedDisplayPercent(Math.round(newZoom * 100));
@@ -429,6 +478,7 @@ export default function BottomBar({
   };
 
   const handleMouseDown = () => {
+    if (!isZoomReady) return;
     isDraggingSlider.current = true;
     setIsZoomActive(true);
   };
@@ -452,6 +502,7 @@ export default function BottomBar({
   };
 
   const handleResetZoom = () => {
+    if (!isZoomReady) return;
     onZoomChange(0, true);
   };
 
@@ -760,18 +811,24 @@ export default function BottomBar({
             <>
               <div className="flex items-center gap-2 w-56">
                 <div
-                  className="relative w-12 h-full flex items-center justify-end cursor-pointer"
+                  className={`relative w-12 h-full flex items-center justify-end ${
+                    isZoomReady ? 'cursor-pointer' : 'cursor-not-allowed'
+                  }`}
                   onClick={handleResetZoom}
                   onMouseEnter={() => setIsZoomLabelHovered(true)}
                   onMouseLeave={() => setIsZoomLabelHovered(false)}
                   data-tooltip={t('ui.bottomBar.tooltips.resetZoom')}
                 >
-                  <span className="absolute right-0 text-xs text-text-secondary select-none text-right w-max transition-colors hover:text-text-primary">
+                  <span
+                    className={`absolute right-0 text-xs text-text-secondary select-none text-right w-max transition-colors ${
+                      isZoomReady ? 'hover:text-text-primary' : 'opacity-50'
+                    }`}
+                  >
                     {isZoomLabelHovered ? t('ui.bottomBar.zoomLabelReset') : t('ui.bottomBar.zoomLabel')}
                   </span>
                 </div>
 
-                <div className="relative flex-1 h-5">
+                <div className={`relative flex-1 h-5 ${isZoomReady ? '' : 'opacity-50'}`}>
                   <div className="absolute top-1/2 left-0 w-full h-1.5 -translate-y-1/2 bg-surface rounded-full pointer-events-none" />
                   <input
                     type="range"
@@ -779,6 +836,7 @@ export default function BottomBar({
                     max={2.0}
                     step="0.05"
                     value={latchedSliderValue}
+                    disabled={!isZoomReady}
                     onChange={handleSliderChange}
                     onKeyDown={handleZoomKeyDown}
                     onMouseDown={handleMouseDown}
@@ -786,13 +844,17 @@ export default function BottomBar({
                     onTouchStart={handleMouseDown}
                     onTouchEnd={handleMouseUp}
                     onDoubleClick={handleResetZoom}
-                    className={`absolute top-1/2 left-0 w-full h-1.5 mt-[-1.5px] appearance-none bg-transparent cursor-pointer p-0 slider-input z-10 ${
-                      isZoomActive ? 'slider-thumb-active' : ''
-                    }`}
+                    className={`absolute top-1/2 left-0 w-full h-1.5 mt-[-1.5px] appearance-none bg-transparent p-0 slider-input z-10 ${
+                      isZoomReady ? 'cursor-pointer' : 'cursor-not-allowed'
+                    } ${isZoomActive ? 'slider-thumb-active' : ''}`}
                   />
                 </div>
 
-                <div className="relative text-xs text-text-secondary w-6 text-right flex items-center justify-end h-5 gap-1">
+                <div
+                  className={`relative text-xs text-text-secondary w-6 text-right flex items-center justify-end h-5 gap-1 ${
+                    isZoomReady ? '' : 'opacity-50'
+                  }`}
+                >
                   {isEditingPercent ? (
                     <input
                       ref={percentInputRef}
@@ -807,7 +869,9 @@ export default function BottomBar({
                   ) : (
                     <span
                       onClick={handlePercentClick}
-                      className="cursor-pointer hover:text-text-primary transition-colors select-none"
+                      className={`transition-colors select-none ${
+                        isZoomReady ? 'cursor-pointer hover:text-text-primary' : 'cursor-not-allowed'
+                      }`}
                       data-tooltip={t('ui.bottomBar.tooltips.customZoom')}
                     >
                       {latchedDisplayPercent}%
@@ -962,7 +1026,12 @@ export default function BottomBar({
 
                 {catalogScan.error && (
                   <div className="rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 select-text">
-                    <Text variant={TextVariants.small} className="text-red-300 select-text break-words whitespace-pre-wrap font-mono text-xs">{catalogScan.error}</Text>
+                    <Text
+                      variant={TextVariants.small}
+                      className="text-red-300 select-text break-words whitespace-pre-wrap font-mono text-xs"
+                    >
+                      {catalogScan.error}
+                    </Text>
                   </div>
                 )}
 
@@ -976,7 +1045,7 @@ export default function BottomBar({
                           alt=""
                           onError={() => setThumbError(true)}
                         />
-                      ) : (catalogScan.isActive || activeBackgroundJobs.length > 0) ? (
+                      ) : catalogScan.isActive || activeBackgroundJobs.length > 0 ? (
                         <Loader2 size={22} className="animate-spin text-accent" />
                       ) : (
                         <Database size={22} className="text-text-secondary" />
@@ -1017,22 +1086,24 @@ export default function BottomBar({
                               Job Type
                             </Text>
                             <Text variant={TextVariants.small}>
-                              {({
-                                catalog_scan: 'Catalog scan',
-                                cull_analysis: 'Culling analysis',
-                                model_download: 'Model download',
-                                ram_plus_tagging: 'RAM++ tagging',
-                                ai_tagging: 'AI tagging',
-                                face_detection: 'Face detection',
-                                face_recognition: 'Face recognition',
-                                raw_denoise: 'RAW AI denoise',
-                                rgb_denoise: 'RGB AI denoise',
-                                thumbnail_generation: 'Thumbnail generation',
-                                metadata_extraction: 'Metadata extraction',
-                                sidecar_metadata: 'Metadata extraction',
-                                deblur: 'AI deblur',
-                                upscale: 'AI upscale',
-                              } as Record<string, string>)[activeBackgroundJob.kind] || activeBackgroundJob.kind}
+                              {(
+                                {
+                                  catalog_scan: 'Catalog scan',
+                                  cull_analysis: 'Culling analysis',
+                                  model_download: 'Model download',
+                                  ram_plus_tagging: 'RAM++ tagging',
+                                  ai_tagging: 'AI tagging',
+                                  face_detection: 'Face detection',
+                                  face_recognition: 'Face recognition',
+                                  raw_denoise: 'RAW AI denoise',
+                                  rgb_denoise: 'RGB AI denoise',
+                                  thumbnail_generation: 'Thumbnail generation',
+                                  metadata_extraction: 'Metadata extraction',
+                                  sidecar_metadata: 'Metadata extraction',
+                                  deblur: 'AI deblur',
+                                  upscale: 'AI upscale',
+                                } as Record<string, string>
+                              )[activeBackgroundJob.kind] || activeBackgroundJob.kind}
                             </Text>
                           </div>
                           <div>
@@ -1103,15 +1174,11 @@ export default function BottomBar({
                     <Text
                       variant={TextVariants.small}
                       className="select-text break-words font-mono text-xs"
-                      color={
-                        activeBackgroundJob?.error || catalogScan.error
-                          ? TextColors.error
-                          : TextColors.primary
-                      }
+                      color={activeBackgroundJob?.error || catalogScan.error ? TextColors.error : TextColors.primary}
                     >
                       {activeBackgroundJob?.message ||
                         (catalogScan.isActive ? catalogScan.message : null) ||
-                        (backgroundJobs[0]?.message) ||
+                        backgroundJobs[0]?.message ||
                         'No background job output yet.'}
                     </Text>
                   </div>
@@ -1121,45 +1188,152 @@ export default function BottomBar({
                   <div className="px-3 py-2 border-b border-border-color flex justify-between items-center">
                     <Text variant={TextVariants.label}>Recent Jobs</Text>
                     <div className="flex items-center gap-2">
-                      <Text variant={TextVariants.small} color={TextColors.secondary}>{backgroundJobs.length}</Text>
-                      {backgroundJobs.some((job) => ['catalog_scan', 'cull_analysis', 'model_download', 'ram_plus_tagging', 'ai_tagging', 'face_detection', 'face_recognition', 'raw_denoise', 'rgb_denoise', 'thumbnail_generation', 'metadata_extraction', 'sidecar_metadata'].includes(job.kind) && ['failed', 'cancelled'].includes(job.state)) && (
-                        <button className="p-1 text-accent hover:bg-surface rounded" onClick={() => void handleRetryAllEligibleJobs()} data-tooltip="Retry all eligible jobs">
+                      <Text variant={TextVariants.small} color={TextColors.secondary}>
+                        {backgroundJobs.length}
+                      </Text>
+                      {backgroundJobs.some(
+                        (job) =>
+                          [
+                            'catalog_scan',
+                            'cull_analysis',
+                            'model_download',
+                            'ram_plus_tagging',
+                            'ai_tagging',
+                            'face_detection',
+                            'face_recognition',
+                            'raw_denoise',
+                            'rgb_denoise',
+                            'thumbnail_generation',
+                            'metadata_extraction',
+                            'sidecar_metadata',
+                          ].includes(job.kind) && ['failed', 'cancelled'].includes(job.state),
+                      ) && (
+                        <button
+                          className="p-1 text-accent hover:bg-surface rounded"
+                          onClick={() => void handleRetryAllEligibleJobs()}
+                          data-tooltip="Retry all eligible jobs"
+                        >
                           <RotateCcw size={14} />
                         </button>
                       )}
                     </div>
                   </div>
                   {backgroundJobsError ? (
-                    <Text variant={TextVariants.small} className="p-3 text-red-300">{backgroundJobsError}</Text>
+                    <Text variant={TextVariants.small} className="p-3 text-red-300">
+                      {backgroundJobsError}
+                    </Text>
                   ) : backgroundJobs.length === 0 ? (
-                    <Text variant={TextVariants.small} className="p-3">No catalog jobs have run in this library.</Text>
+                    <Text variant={TextVariants.small} className="p-3">
+                      No catalog jobs have run in this library.
+                    </Text>
                   ) : (
                     <div className="max-h-48 overflow-y-auto">
                       {backgroundJobs.map((job) => (
                         <div key={job.id} className="px-3 py-2 border-b border-border-color last:border-b-0">
                           <div className="flex gap-3 justify-between items-center">
-                            <Text variant={TextVariants.small}>{({ catalog_scan: 'Catalog scan', cull_analysis: 'Culling analysis', model_download: 'Model download', ram_plus_tagging: 'RAM++ tagging', ai_tagging: 'AI tagging', face_detection: 'Face detection', face_recognition: 'Face recognition', raw_denoise: 'RAW AI denoise', rgb_denoise: 'RGB AI denoise', thumbnail_generation: 'Thumbnail generation', metadata_extraction: 'Metadata extraction', sidecar_metadata: 'Metadata extraction', deblur: 'AI deblur', upscale: 'AI upscale' } as Record<string, string>)[job.kind] || job.kind}</Text>
+                            <Text variant={TextVariants.small}>
+                              {(
+                                {
+                                  catalog_scan: 'Catalog scan',
+                                  cull_analysis: 'Culling analysis',
+                                  model_download: 'Model download',
+                                  ram_plus_tagging: 'RAM++ tagging',
+                                  ai_tagging: 'AI tagging',
+                                  face_detection: 'Face detection',
+                                  face_recognition: 'Face recognition',
+                                  raw_denoise: 'RAW AI denoise',
+                                  rgb_denoise: 'RGB AI denoise',
+                                  thumbnail_generation: 'Thumbnail generation',
+                                  metadata_extraction: 'Metadata extraction',
+                                  sidecar_metadata: 'Metadata extraction',
+                                  deblur: 'AI deblur',
+                                  upscale: 'AI upscale',
+                                } as Record<string, string>
+                              )[job.kind] || job.kind}
+                            </Text>
                             <div className="flex items-center gap-2">
-                              <Text variant={TextVariants.small} color={job.state === 'failed' ? TextColors.error : job.state === 'completed' ? TextColors.success : TextColors.accent}>{job.state}</Text>
-                              {job.kind !== 'model_download' && ['running', 'paused'].includes(job.state) && <button className="p-1 text-text-secondary hover:bg-bg-primary rounded" onClick={() => void handlePauseBackgroundJob(job.id, job.state === 'paused')} data-tooltip={job.state === 'paused' ? 'Resume job' : 'Pause job'}>{job.state === 'paused' ? <Play size={13} /> : <Pause size={13} />}</button>}
+                              <Text
+                                variant={TextVariants.small}
+                                color={
+                                  job.state === 'failed'
+                                    ? TextColors.error
+                                    : job.state === 'completed'
+                                      ? TextColors.success
+                                      : TextColors.accent
+                                }
+                              >
+                                {job.state}
+                              </Text>
+                              {job.kind !== 'model_download' && ['running', 'paused'].includes(job.state) && (
+                                <button
+                                  className="p-1 text-text-secondary hover:bg-bg-primary rounded"
+                                  onClick={() => void handlePauseBackgroundJob(job.id, job.state === 'paused')}
+                                  data-tooltip={job.state === 'paused' ? 'Resume job' : 'Pause job'}
+                                >
+                                  {job.state === 'paused' ? <Play size={13} /> : <Pause size={13} />}
+                                </button>
+                              )}
                               {['queued', 'running', 'paused'].includes(job.state) && (
-                                <button className="p-1 text-red-300 hover:bg-red-500/10 rounded" onClick={() => void handleCancelBackgroundJob(job.id)} data-tooltip="Cancel job">
+                                <button
+                                  className="p-1 text-red-300 hover:bg-red-500/10 rounded"
+                                  onClick={() => void handleCancelBackgroundJob(job.id)}
+                                  data-tooltip="Cancel job"
+                                >
                                   <Square size={13} />
                                 </button>
                               )}
-                              {['catalog_scan', 'cull_analysis', 'model_download', 'ram_plus_tagging', 'ai_tagging', 'face_detection', 'face_recognition', 'raw_denoise', 'rgb_denoise', 'thumbnail_generation', 'metadata_extraction', 'sidecar_metadata'].includes(job.kind) && ['failed', 'cancelled'].includes(job.state) && (
-                                <button className="p-1 text-accent hover:bg-bg-primary rounded" onClick={() => void handleRetryBackgroundJob(job.id)} data-tooltip="Retry job">
-                                  <RotateCcw size={13} />
-                                </button>
-                              )}
+                              {[
+                                'catalog_scan',
+                                'cull_analysis',
+                                'model_download',
+                                'ram_plus_tagging',
+                                'ai_tagging',
+                                'face_detection',
+                                'face_recognition',
+                                'raw_denoise',
+                                'rgb_denoise',
+                                'thumbnail_generation',
+                                'metadata_extraction',
+                                'sidecar_metadata',
+                              ].includes(job.kind) &&
+                                ['failed', 'cancelled'].includes(job.state) && (
+                                  <button
+                                    className="p-1 text-accent hover:bg-bg-primary rounded"
+                                    onClick={() => void handleRetryBackgroundJob(job.id)}
+                                    data-tooltip="Retry job"
+                                  >
+                                    <RotateCcw size={13} />
+                                  </button>
+                                )}
                             </div>
                           </div>
-                          <Text variant={TextVariants.small} color={TextColors.secondary} className="select-text break-words">{job.message}</Text>
-                          {job.currentItem && <Text variant={TextVariants.small} color={TextColors.secondary} className="select-text break-all font-mono text-xs">{job.currentItem.split(/[\\/]/).pop()}</Text>}
-                          {job.total > 0 && <Text variant={TextVariants.small} color={TextColors.secondary}>{job.current}/{job.total}</Text>}
+                          <Text
+                            variant={TextVariants.small}
+                            color={TextColors.secondary}
+                            className="select-text break-words"
+                          >
+                            {job.message}
+                          </Text>
+                          {job.currentItem && (
+                            <Text
+                              variant={TextVariants.small}
+                              color={TextColors.secondary}
+                              className="select-text break-all font-mono text-xs"
+                            >
+                              {job.currentItem.split(/[\\/]/).pop()}
+                            </Text>
+                          )}
+                          {job.total > 0 && (
+                            <Text variant={TextVariants.small} color={TextColors.secondary}>
+                              {job.current}/{job.total}
+                            </Text>
+                          )}
                           {job.error && (
                             <div className="mt-1.5 rounded bg-red-500/10 border border-red-500/30 p-2 select-text">
-                              <Text variant={TextVariants.small} className="text-red-300 select-text break-words whitespace-pre-wrap font-mono text-xs">
+                              <Text
+                                variant={TextVariants.small}
+                                className="text-red-300 select-text break-words whitespace-pre-wrap font-mono text-xs"
+                              >
                                 {job.error}
                               </Text>
                             </div>
