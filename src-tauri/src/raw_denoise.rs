@@ -16,6 +16,8 @@
 //! is both more visually objectionable and less texture-bearing than
 //! luminance noise.
 
+use rayon::prelude::*;
+
 const NUM_LEVELS: usize = 4;
 // Fine-to-coarse per-level attenuation weight at strength = 1.0. Level 0 is
 // the finest (highest-frequency, most noise-like) detail band.
@@ -38,32 +40,36 @@ fn atrous_smooth(src: &[f32], w: usize, h: usize, gap: usize) -> Vec<f32> {
     let gap = gap as isize;
 
     let mut horizontal = vec![0.0f32; src.len()];
-    for y in 0..h {
-        let row = &src[y * w..(y + 1) * w];
-        let out_row = &mut horizontal[y * w..(y + 1) * w];
-        for (x, out) in out_row.iter_mut().enumerate() {
-            let mut acc = 0.0;
-            for (k, &t) in TAPS.iter().enumerate() {
-                let dx = (k as isize - 2) * gap;
-                let sx = (x as isize + dx).clamp(0, w as isize - 1) as usize;
-                acc += t * row[sx];
+    horizontal
+        .par_chunks_mut(w)
+        .zip(src.par_chunks(w))
+        .for_each(|(out_row, row)| {
+            for (x, out) in out_row.iter_mut().enumerate() {
+                let mut acc = 0.0;
+                for (k, &t) in TAPS.iter().enumerate() {
+                    let dx = (k as isize - 2) * gap;
+                    let sx = (x as isize + dx).clamp(0, w as isize - 1) as usize;
+                    acc += t * row[sx];
+                }
+                *out = acc;
             }
-            *out = acc;
-        }
-    }
+        });
 
     let mut vertical = vec![0.0f32; src.len()];
-    for y in 0..h {
-        for x in 0..w {
-            let mut acc = 0.0;
-            for (k, &t) in TAPS.iter().enumerate() {
-                let dy = (k as isize - 2) * gap;
-                let sy = (y as isize + dy).clamp(0, h as isize - 1) as usize;
-                acc += t * horizontal[sy * w + x];
+    vertical
+        .par_chunks_mut(w)
+        .enumerate()
+        .for_each(|(y, out_row)| {
+            for (x, out) in out_row.iter_mut().enumerate() {
+                let mut acc = 0.0;
+                for (k, &t) in TAPS.iter().enumerate() {
+                    let dy = (k as isize - 2) * gap;
+                    let sy = (y as isize + dy).clamp(0, h as isize - 1) as usize;
+                    acc += t * horizontal[sy * w + x];
+                }
+                *out = acc;
             }
-            vertical[y * w + x] = acc;
-        }
-    }
+        });
 
     vertical
 }
@@ -109,36 +115,30 @@ pub fn wavelet_denoise(rgb: &mut [[f32; 3]], width: usize, height: usize, streng
         return;
     }
 
-    let mut y_plane = vec![0.0f32; rgb.len()];
-    let mut cb_plane = vec![0.0f32; rgb.len()];
-    let mut cr_plane = vec![0.0f32; rgb.len()];
-    for (i, px) in rgb.iter().enumerate() {
-        let (y, cb, cr) = crate::image_processing::rgb_to_yc_only(px[0], px[1], px[2]);
-        y_plane[i] = y;
-        cb_plane[i] = cb;
-        cr_plane[i] = cr;
-    }
+    let planes: Vec<(f32, f32, f32)> = rgb
+        .par_iter()
+        .map(|px| crate::image_processing::rgb_to_yc_only(px[0], px[1], px[2]))
+        .collect();
+    let mut y_plane: Vec<f32> = planes.iter().map(|p| p.0).collect();
+    let mut cb_plane: Vec<f32> = planes.iter().map(|p| p.1).collect();
+    let mut cr_plane: Vec<f32> = planes.iter().map(|p| p.2).collect();
 
-    denoise_plane(&mut y_plane, width, height, strength, &LUMA_LEVEL_WEIGHTS);
-    denoise_plane(
-        &mut cb_plane,
-        width,
-        height,
-        strength,
-        &CHROMA_LEVEL_WEIGHTS,
-    );
-    denoise_plane(
-        &mut cr_plane,
-        width,
-        height,
-        strength,
-        &CHROMA_LEVEL_WEIGHTS,
+    // Luminance and the two chroma planes are fully independent - denoise
+    // them concurrently rather than one after another.
+    let (_, (_, _)) = rayon::join(
+        || denoise_plane(&mut y_plane, width, height, strength, &LUMA_LEVEL_WEIGHTS),
+        || {
+            rayon::join(
+                || denoise_plane(&mut cb_plane, width, height, strength, &CHROMA_LEVEL_WEIGHTS),
+                || denoise_plane(&mut cr_plane, width, height, strength, &CHROMA_LEVEL_WEIGHTS),
+            )
+        },
     );
 
-    for (i, px) in rgb.iter_mut().enumerate() {
+    rgb.par_iter_mut().enumerate().for_each(|(i, px)| {
         let (r, g, b) = crate::image_processing::yc_to_rgb(y_plane[i], cb_plane[i], cr_plane[i]);
         px[0] = r.max(0.0);
         px[1] = g.max(0.0);
         px[2] = b.max(0.0);
-    }
+    });
 }

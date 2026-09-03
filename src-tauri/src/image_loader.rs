@@ -27,6 +27,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 use std::time::Instant;
+use tauri::{Emitter, Manager};
 
 #[derive(serde::Serialize)]
 pub struct LoadImageResult {
@@ -78,6 +79,7 @@ pub fn load_and_composite(
         use_fast_raw_dev,
         settings,
         Some(adjustments),
+        true,
         cancel_token,
     )?;
     composite_patches_on_image(&base_image, adjustments)
@@ -90,12 +92,18 @@ pub fn load_and_composite(
 /// doesn't have (or care about) per-image overrides, which falls back to
 /// ISO-auto behavior for RAW files, identical to passing all-default
 /// overrides explicitly.
+///
+/// `allow_custom_pipeline` gates whether a full-quality (non-`fast`) RAW
+/// decode is allowed to try our own AMaZE/IGV/LMMSE pipeline at all - pass
+/// `false` for a "phase 1" fast-first-paint decode (see
+/// `load_image`'s two-phase load), `true` everywhere else.
 pub fn load_base_image_from_bytes(
     bytes: &[u8],
     path_for_ext_check: &str,
     use_fast_raw_dev: bool,
     settings: &AppSettings,
     raw_develop_adjustments: Option<&Value>,
+    allow_custom_pipeline: bool,
     cancel_token: Option<(Arc<AtomicUsize>, usize)>,
 ) -> Result<DynamicImage> {
     let highlight_compression = settings.raw_highlight_compression.unwrap_or(2.5);
@@ -124,6 +132,7 @@ pub fn load_base_image_from_bytes(
                 highlight_compression,
                 linear_mode,
                 raw_develop_adjustments,
+                allow_custom_pipeline,
                 cancel_token,
             )
         }) {
@@ -912,6 +921,10 @@ pub async fn load_image(
     let metadata: ImageMetadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
     let settings = load_settings(app_handle.clone()).unwrap_or_default();
+    // Cloned so the original `settings` binding survives past this decode
+    // for the phase-2 background upgrade below - moved into the
+    // spawn_blocking closure instead of `settings` itself.
+    let settings_for_decode = settings.clone();
 
     let path_clone = source_path_str.clone();
     let metadata_adjustments = metadata.adjustments.clone();
@@ -933,6 +946,7 @@ pub async fn load_image(
         }
 
         let (pristine_img, exif_data_loaded) = tokio::task::spawn_blocking(move || {
+            let settings = settings_for_decode;
             if generation_tracker.load(Ordering::SeqCst) != my_generation {
                 return Err("Load cancelled".to_string());
             }
@@ -944,12 +958,19 @@ pub async fn load_image(
                             return Err("Load cancelled".to_string());
                         }
 
+                        // Phase 1 of the two-phase load: always the fast
+                        // rawler-PPG path (allow_custom_pipeline: false),
+                        // never our own slower AMaZE/IGV/LMMSE pipeline -
+                        // see the background upgrade spawned below, which
+                        // reruns this decode with allow_custom_pipeline:
+                        // true and swaps in the result once ready.
                         let img = load_base_image_from_bytes(
                             &mmap,
                             &path_clone,
                             false,
                             &settings,
                             Some(&metadata_adjustments),
+                            false,
                             cancel_token.clone(),
                         )
                         .map_err(|e| e.to_string())?;
@@ -970,12 +991,14 @@ pub async fn load_image(
                             return Err("Load cancelled".to_string());
                         }
 
+                        // Phase 1, see comment above.
                         let img = load_base_image_from_bytes(
                             &bytes,
                             &path_clone,
                             false,
                             &settings,
                             Some(&metadata_adjustments),
+                            false,
                             cancel_token.clone(),
                         )
                         .map_err(|e| e.to_string())?;
@@ -1012,10 +1035,118 @@ pub async fn load_image(
     let (orig_width, orig_height) = pristine_arc.dimensions();
 
     *state.original_image.lock().unwrap() = Some(LoadedImage {
-        path,
+        path: path.clone(),
         image: pristine_arc,
         is_raw,
     });
+
+    // Phase 2 of the two-phase load: phase 1 above always decoded with
+    // allow_custom_pipeline: false (fast rawler-PPG, full resolution) so
+    // this command returns quickly - our own AMaZE/IGV/LMMSE pipeline is
+    // meaningfully slower (denoise/sharpen especially) and isn't worth
+    // blocking first paint on. Re-decode with the full pipeline in the
+    // background and swap it in via the "raw-develop-upgraded" event once
+    // ready, so the editor updates in place rather than waiting on it.
+    if is_raw {
+        let upgrade_path = path.clone();
+        let upgrade_source_path_str = source_path_str.clone();
+        let upgrade_adjustments = metadata.adjustments.clone();
+        let upgrade_settings = settings.clone();
+        let upgrade_app_handle = app_handle.clone();
+        let upgrade_generation_tracker = state.load_image_generation.clone();
+        let upgrade_generation = my_generation;
+
+        std::thread::spawn(move || {
+            let bytes = match read_file_mapped(Path::new(&upgrade_source_path_str)) {
+                Ok(mmap) => mmap.to_vec(),
+                Err(_) => match fs::read(&upgrade_source_path_str) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        log::warn!(
+                            "raw-develop background upgrade: failed to read '{}': {}",
+                            upgrade_source_path_str,
+                            e
+                        );
+                        return;
+                    }
+                },
+            };
+
+            if upgrade_generation_tracker.load(Ordering::SeqCst) != upgrade_generation {
+                return; // user navigated away before the upgrade even started
+            }
+
+            let upgraded = match load_base_image_from_bytes(
+                &bytes,
+                &upgrade_source_path_str,
+                false,
+                &upgrade_settings,
+                Some(&upgrade_adjustments),
+                true,
+                None,
+            ) {
+                Ok(img) => img,
+                Err(e) => {
+                    log::info!(
+                        "raw-develop background upgrade failed for '{}', keeping fast decode: {}",
+                        upgrade_source_path_str,
+                        e
+                    );
+                    return;
+                }
+            };
+
+            if upgrade_generation_tracker.load(Ordering::SeqCst) != upgrade_generation {
+                return; // stale by the time the (slower) upgrade finished
+            }
+
+            let state = upgrade_app_handle.state::<AppState>();
+            let arc_img = Arc::new(upgraded);
+
+            {
+                let mut guard = state.original_image.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(loaded) = guard.as_ref()
+                    && loaded.path == upgrade_path
+                {
+                    *guard = Some(LoadedImage {
+                        path: upgrade_path.clone(),
+                        image: arc_img.clone(),
+                        is_raw: true,
+                    });
+                } else {
+                    return; // a different image is open now; drop this result
+                }
+            }
+
+            // Clear the same downstream caches load_image itself clears on a
+            // fresh load, since original_image just changed under them.
+            *state.cached_preview.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            *state.gpu_image_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            *state.full_warped_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            *state.full_transformed_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            state.mask_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+            state.patch_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+            state.geometry_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+
+            let exif = {
+                let mut cache = state.decoded_image_cache.lock().unwrap();
+                cache
+                    .get(&upgrade_source_path_str)
+                    .map(|(_, exif)| exif)
+                    .unwrap_or_default()
+            };
+            state
+                .decoded_image_cache
+                .lock()
+                .unwrap()
+                .insert(upgrade_source_path_str.clone(), arc_img, exif);
+
+            let _ = upgrade_app_handle.emit(
+                "raw-develop-upgraded",
+                serde_json::json!({ "path": upgrade_path }),
+            );
+        });
+    }
 
     Ok(LoadImageResult {
         width: orig_width,

@@ -67,15 +67,24 @@ pub fn develop_raw_image(
 /// `rawDenoiseAmount`/`rawSharpenAmount`/`rawSharpenMethod`/
 /// `rawPreprocessEnabled` are read from it here, with `None`/missing/"auto"
 /// falling back to ISO-auto behavior, exactly as if no override were set.
+///
+/// `allow_custom_pipeline` is a separate gate from `fast_demosaic`: it lets
+/// a caller force the fast rawler-PPG path even for a full-quality decode -
+/// used for the editor's "phase 1" fast-first-paint load (see
+/// `image_loader::load_image`), which needs a fast, full-resolution
+/// decode (unlike `fast_demosaic`, which is rawler's quarter-resolution
+/// thumbnail mode), with the slower custom pipeline applied moments later
+/// as a background "phase 2" upgrade once it's ready.
 pub fn develop_raw_image_for_editor(
     file_bytes: &[u8],
     fast_demosaic: bool,
     highlight_compression: f32,
     linear_mode: String,
     raw_develop_adjustments: Option<&serde_json::Value>,
+    allow_custom_pipeline: bool,
     cancel_token: Option<(Arc<AtomicUsize>, usize)>,
 ) -> Result<DynamicImage> {
-    if !fast_demosaic {
+    if !fast_demosaic && allow_custom_pipeline {
         let demosaic_override = raw_develop_adjustments
             .and_then(|a| a.get("rawDemosaicAlgorithm"))
             .and_then(|v| v.as_str());

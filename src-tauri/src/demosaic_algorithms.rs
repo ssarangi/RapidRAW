@@ -32,6 +32,7 @@
 
 use crate::custom_raw_pipeline::RawSensorData;
 use rawler::cfa::CFAColor;
+use rayon::prelude::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DemosaicAlgorithm {
@@ -100,14 +101,16 @@ pub fn demosaic(sensor: &RawSensorData, algo: DemosaicAlgorithm) -> Vec<[f32; 3]
         DemosaicAlgorithm::LMMSE => lmmse_green_plane(sensor),
     };
 
-    let red_diff = interpolate_color_diff(sensor, &green, CFAColor::RED);
-    let blue_diff = interpolate_color_diff(sensor, &green, CFAColor::BLUE);
+    let (red_diff, blue_diff) = rayon::join(
+        || interpolate_color_diff(sensor, &green, CFAColor::RED),
+        || interpolate_color_diff(sensor, &green, CFAColor::BLUE),
+    );
 
     let (w, h) = (sensor.width, sensor.height);
     let mut out = vec![[0.0f32; 3]; w * h];
-    for i in 0..w * h {
-        out[i] = [green[i] + red_diff[i], green[i], green[i] + blue_diff[i]];
-    }
+    out.par_iter_mut().enumerate().for_each(|(i, px)| {
+        *px = [green[i] + red_diff[i], green[i], green[i] + blue_diff[i]];
+    });
     out
 }
 
@@ -185,11 +188,11 @@ fn directional_estimate(sensor: &RawSensorData, row: isize, col: isize) -> Direc
 fn amaze_green_plane(sensor: &RawSensorData) -> Vec<f32> {
     let (w, h) = (sensor.width, sensor.height);
     let mut out = vec![0.0f32; w * h];
-    for row in 0..h {
-        for col in 0..w {
+    out.par_chunks_mut(w).enumerate().for_each(|(row, out_row)| {
+        for (col, out_px) in out_row.iter_mut().enumerate() {
             let idx = row * w + col;
             if (sensor.cfa_at)(row, col) == CFAColor::GREEN {
-                out[idx] = sensor.data[idx];
+                *out_px = sensor.data[idx];
                 continue;
             }
             let e = directional_estimate(sensor, row as isize, col as isize);
@@ -198,13 +201,13 @@ fn amaze_green_plane(sensor: &RawSensorData) -> Vec<f32> {
             // Hard direction choice: interpolate along the lower-gradient
             // axis (i.e. along the edge, not across it) - this is the
             // aliasing/zipper-avoiding behavior AMaZE is built around.
-            out[idx] = if grad_h < grad_v {
+            *out_px = if grad_h < grad_v {
                 (e.grad_w * e.e + e.grad_e * e.w) / (e.grad_e + e.grad_w)
             } else {
                 (e.grad_s * e.n + e.grad_n * e.s) / (e.grad_n + e.grad_s)
             };
         }
-    }
+    });
     out
 }
 
@@ -217,22 +220,25 @@ fn igv_green_plane(sensor: &RawSensorData) -> Vec<f32> {
     // cross-weighted by the OTHER direction's gradient (a lower gradient
     // means "trust this direction's neighbor more"), verified against
     // demosaic_algos.cc's igv_interpolate.
-    for row in 0..h {
-        for col in 0..w {
-            let idx = row * w + col;
-            if (sensor.cfa_at)(row, col) == CFAColor::GREEN {
-                out[idx] = sensor.data[idx];
-                continue;
+    out.par_chunks_mut(w)
+        .zip(is_interpolated.par_chunks_mut(w))
+        .enumerate()
+        .for_each(|(row, (out_row, interp_row))| {
+            for (col, out_px) in out_row.iter_mut().enumerate() {
+                let idx = row * w + col;
+                if (sensor.cfa_at)(row, col) == CFAColor::GREEN {
+                    *out_px = sensor.data[idx];
+                    continue;
+                }
+                let d = directional_estimate(sensor, row as isize, col as isize);
+                let v = (d.grad_s * d.n + d.grad_n * d.s) / (d.grad_n + d.grad_s);
+                let hh = (d.grad_w * d.e + d.grad_e * d.w) / (d.grad_e + d.grad_w);
+                let gv = 1.0 / (d.grad_n + d.grad_s);
+                let gh = 1.0 / (d.grad_e + d.grad_w);
+                *out_px = (gh * v + gv * hh) / (gh + gv);
+                interp_row[col] = true;
             }
-            let d = directional_estimate(sensor, row as isize, col as isize);
-            let v = (d.grad_s * d.n + d.grad_n * d.s) / (d.grad_n + d.grad_s);
-            let hh = (d.grad_w * d.e + d.grad_e * d.w) / (d.grad_e + d.grad_w);
-            let gv = 1.0 / (d.grad_n + d.grad_s);
-            let gh = 1.0 / (d.grad_e + d.grad_w);
-            out[idx] = (gh * v + gv * hh) / (gh + gv);
-            is_interpolated[idx] = true;
-        }
-    }
+        });
 
     // Pass 2: refine each interpolated site against its already-known
     // green neighbors - a cheap stand-in for the "integrated Gaussian
@@ -240,8 +246,8 @@ fn igv_green_plane(sensor: &RawSensorData) -> Vec<f32> {
     // neighborhood of the color-difference planes, which was not ported
     // in full given its complexity.
     let pass1 = out.clone();
-    for row in 0..h {
-        for col in 0..w {
+    out.par_chunks_mut(w).enumerate().for_each(|(row, out_row)| {
+        for (col, out_px) in out_row.iter_mut().enumerate() {
             let idx = row * w + col;
             if !is_interpolated[idx] {
                 continue;
@@ -259,9 +265,9 @@ fn igv_green_plane(sensor: &RawSensorData) -> Vec<f32> {
                     n += 1.0;
                 }
             }
-            out[idx] = sum / n;
+            *out_px = sum / n;
         }
-    }
+    });
 
     out
 }
@@ -319,23 +325,26 @@ fn lmmse_green_plane(sensor: &RawSensorData) -> Vec<f32> {
     // red/blue site.
     let mut diff_h = vec![0.0f32; w * h];
     let mut diff_v = vec![0.0f32; w * h];
-    for row in 0..h {
-        for col in 0..w {
-            if (sensor.cfa_at)(row, col) == CFAColor::GREEN {
-                continue;
+    diff_h
+        .par_chunks_mut(w)
+        .zip(diff_v.par_chunks_mut(w))
+        .enumerate()
+        .for_each(|(row, (dh_row, dv_row))| {
+            for col in 0..w {
+                if (sensor.cfa_at)(row, col) == CFAColor::GREEN {
+                    continue;
+                }
+                dh_row[col] = diff_estimate(sensor, row as isize, col as isize, true);
+                dv_row[col] = diff_estimate(sensor, row as isize, col as isize, false);
             }
-            let idx = row * w + col;
-            diff_h[idx] = diff_estimate(sensor, row as isize, col as isize, true);
-            diff_v[idx] = diff_estimate(sensor, row as isize, col as isize, false);
-        }
-    }
+        });
 
     // Stage 2: smooth each difference plane along its own axis with the
     // real 9-tap Gaussian - this is LMMSE's actual noise-reduction step.
     let smooth = |plane: &[f32], horizontal: bool| -> Vec<f32> {
         let mut out = vec![0.0f32; w * h];
-        for row in 0..h {
-            for col in 0..w {
+        out.par_chunks_mut(w).enumerate().for_each(|(row, out_row)| {
+            for (col, out_px) in out_row.iter_mut().enumerate() {
                 let mut acc = 0.0;
                 for (i, &tap) in taps.iter().enumerate() {
                     if i == 0 {
@@ -360,13 +369,12 @@ fn lmmse_green_plane(sensor: &RawSensorData) -> Vec<f32> {
                     };
                     acc += tap * (plane[r1 * w + c1] + plane[r2 * w + c2]);
                 }
-                out[row * w + col] = acc;
+                *out_px = acc;
             }
-        }
+        });
         out
     };
-    let smoothed_h = smooth(&diff_h, true);
-    let smoothed_v = smooth(&diff_v, false);
+    let (smoothed_h, smoothed_v) = rayon::join(|| smooth(&diff_h, true), || smooth(&diff_v, false));
 
     // Stage 3: combine the two smoothed directional estimates by local
     // variance (lower-variance/"quieter" direction trusted more) - a
@@ -374,27 +382,31 @@ fn lmmse_green_plane(sensor: &RawSensorData) -> Vec<f32> {
     // minimum-mean-square-error weighting, though RT's own combination
     // logic (further in lmmse_demosaic.cc) was not ported line-for-line.
     let mut out = vec![0.0f32; w * h];
-    for row in 0..h {
-        for col in 0..w {
+    out.par_chunks_mut(w).enumerate().for_each(|(row, out_row)| {
+        for (col, out_px) in out_row.iter_mut().enumerate() {
             let idx = row * w + col;
             if (sensor.cfa_at)(row, col) == CFAColor::GREEN {
-                out[idx] = sensor.data[idx];
+                *out_px = sensor.data[idx];
                 continue;
             }
-            let mut h_window = Vec::with_capacity(5);
-            let mut v_window = Vec::with_capacity(5);
-            for offset in -2isize..=2 {
+            // Fixed-size arrays, not Vec: this loop runs once per red/blue
+            // pixel (~half the image), and a heap allocation per pixel here
+            // was a real, measured performance bug (millions of tiny
+            // allocations dominating this stage's wall time).
+            let mut h_window = [0.0f32; 5];
+            let mut v_window = [0.0f32; 5];
+            for (i, offset) in (-2isize..=2).enumerate() {
                 let hc = (col as isize + offset).clamp(0, w as isize - 1) as usize;
-                h_window.push(smoothed_h[row * w + hc]);
+                h_window[i] = smoothed_h[row * w + hc];
                 let vr = (row as isize + offset).clamp(0, h as isize - 1) as usize;
-                v_window.push(smoothed_v[vr * w + col]);
+                v_window[i] = smoothed_v[vr * w + col];
             }
             let wh = 1.0 / local_variance(&h_window).max(1e-6);
             let wv = 1.0 / local_variance(&v_window).max(1e-6);
             let diff = (smoothed_h[idx] * wh + smoothed_v[idx] * wv) / (wh + wv);
-            out[idx] = sensor.data[idx] + diff;
+            *out_px = sensor.data[idx] + diff;
         }
-    }
+    });
 
     out
 }
@@ -409,19 +421,22 @@ fn interpolate_color_diff(sensor: &RawSensorData, green: &[f32], target: CFAColo
     let mut diff = vec![0.0f32; w * h];
     let mut has_diff = vec![false; w * h];
 
-    for row in 0..h {
-        for col in 0..w {
-            if (sensor.cfa_at)(row, col) == target {
-                let idx = row * w + col;
-                diff[idx] = sensor.data[idx] - green[idx];
-                has_diff[idx] = true;
+    diff.par_chunks_mut(w)
+        .zip(has_diff.par_chunks_mut(w))
+        .enumerate()
+        .for_each(|(row, (diff_row, has_row))| {
+            for (col, diff_px) in diff_row.iter_mut().enumerate() {
+                if (sensor.cfa_at)(row, col) == target {
+                    let idx = row * w + col;
+                    *diff_px = sensor.data[idx] - green[idx];
+                    has_row[col] = true;
+                }
             }
-        }
-    }
+        });
 
     let known = diff.clone();
-    for row in 0..h {
-        for col in 0..w {
+    diff.par_chunks_mut(w).enumerate().for_each(|(row, diff_row)| {
+        for (col, diff_px) in diff_row.iter_mut().enumerate() {
             let idx = row * w + col;
             if has_diff[idx] {
                 continue;
@@ -442,9 +457,9 @@ fn interpolate_color_diff(sensor: &RawSensorData, green: &[f32], target: CFAColo
                     }
                 }
             }
-            diff[idx] = if n > 0.0 { sum / n } else { 0.0 };
+            *diff_px = if n > 0.0 { sum / n } else { 0.0 };
         }
-    }
+    });
 
     diff
 }

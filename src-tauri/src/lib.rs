@@ -1257,6 +1257,7 @@ async fn generate_all_community_previews(
             true,
             &settings,
             None,
+            true,
             None,
         )
         .map_err(|e| e.to_string())?;
@@ -1580,6 +1581,7 @@ async fn generate_preview_for_path(
                         false,
                         &settings,
                         Some(&js_adjustments),
+                        true,
                         None,
                     )
                     .map_err(|e| e.to_string())?;
@@ -1599,6 +1601,7 @@ async fn generate_preview_for_path(
                         false,
                         &settings,
                         Some(&js_adjustments),
+                        true,
                         None,
                     )
                     .map_err(|e| e.to_string())?;

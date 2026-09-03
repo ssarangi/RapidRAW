@@ -288,6 +288,7 @@ pub async fn get_or_generate_gemini_critique(
         true,
         &settings,
         None,
+        true,
         None,
     )
     .map_err(|error| error.to_string())?;

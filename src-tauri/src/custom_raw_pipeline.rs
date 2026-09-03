@@ -13,9 +13,11 @@
 use anyhow::{Result, anyhow};
 use image::{DynamicImage, ImageBuffer, Rgba};
 use nalgebra::Matrix3;
+use rayon::prelude::*;
 use rawler::{
     cfa::CFAColor,
     decoders::{Orientation, RawDecodeParams},
+    imgop::xyz::Illuminant,
     rawimage::{RawImage, RawImageData, RawPhotometricInterpretation},
     rawsource::RawSource,
 };
@@ -153,16 +155,30 @@ pub fn decode_raw_sensor_data(file_bytes: &[u8]) -> Result<RawSensorData> {
         .copied()
         .unwrap_or(u16::MAX as u32) as f32;
 
+    // `raw_image.xyz_to_cam` is explicitly marked deprecated by rawler
+    // itself ("TODO: deprecated, use color_matrix") and was the actual
+    // cause of a strong magenta/purple color cast on every image - it does
+    // not reliably hold the file's real calibrated matrix. rawler's own
+    // production Calibrate step (`imgop::develop::RawDevelop`) reads
+    // `color_matrix` instead, preferring the D65 illuminant entry and
+    // falling back to whatever's first available; mirror that exactly.
     let mut xyz_to_cam = Matrix3::identity();
-    for r in 0..3 {
-        for c in 0..3 {
-            xyz_to_cam[(r, c)] = raw_image.xyz_to_cam[r][c];
+    let found_matrix = raw_image
+        .color_matrix
+        .iter()
+        .find(|(illuminant, _m)| **illuminant == Illuminant::D65)
+        .or_else(|| raw_image.color_matrix.iter().next());
+    if let Some((_illuminant, color_matrix)) = found_matrix
+        && color_matrix.len() >= 9
+    {
+        for r in 0..3 {
+            for c in 0..3 {
+                xyz_to_cam[(r, c)] = color_matrix[r * 3 + c];
+            }
         }
-    }
-    // rawler leaves unset rows/matrices as zero; fall back to identity so we
-    // don't divide by a singular matrix downstream.
-    if xyz_to_cam == Matrix3::zeros() {
-        xyz_to_cam = Matrix3::identity();
+        if xyz_to_cam == Matrix3::zeros() {
+            xyz_to_cam = Matrix3::identity();
+        }
     }
 
     let cfa = raw_image.camera.cfa.clone();
@@ -292,13 +308,13 @@ fn apply_white_balance(rgb: &mut [[f32; 3]], sensor: &RawSensorData) {
         .max(if wb[3] > 0.0 { wb[3] } else { 0.0 });
     let denom = (sensor.white_level - bl[0]).max(1.0);
 
-    for px in rgb.iter_mut() {
+    rgb.par_iter_mut().for_each(|px| {
         for c in 0..3 {
             let black = bl[c];
             let gain = if wb_max > 0.0 { wb[c] / wb_max } else { 1.0 };
             px[c] = ((px[c] - black) * gain / denom).max(0.0);
         }
-    }
+    });
 }
 
 // Standard sRGB (D65) <- XYZ matrix (IEC 61966-2-1).
@@ -340,13 +356,13 @@ fn apply_color_matrix(rgb: &mut [[f32; 3]], xyz_to_cam: &Matrix3<f32>) {
     ]);
     let cam_to_srgb = xyz_to_srgb * cam_to_xyz;
 
-    for px in rgb.iter_mut() {
+    rgb.par_iter_mut().for_each(|px| {
         let v = nalgebra::Vector3::new(px[0], px[1], px[2]);
         let out = cam_to_srgb * v;
         px[0] = out[0];
         px[1] = out[1];
         px[2] = out[2];
-    }
+    });
 }
 
 /// Same as `apply_color_matrix`, but also applies sRGB gamma - used only by
@@ -354,11 +370,11 @@ fn apply_color_matrix(rgb: &mut [[f32; 3]], xyz_to_cam: &Matrix3<f32>) {
 /// image rather than the linear intermediate the live app pipeline expects.
 fn apply_color_matrix_and_gamma(rgb: &mut [[f32; 3]], xyz_to_cam: &Matrix3<f32>) {
     apply_color_matrix(rgb, xyz_to_cam);
-    for px in rgb.iter_mut() {
+    rgb.par_iter_mut().for_each(|px| {
         px[0] = srgb_gamma(px[0]);
         px[1] = srgb_gamma(px[1]);
         px[2] = srgb_gamma(px[2]);
-    }
+    });
 }
 
 /// Production entry point: develops a RAW file into the same LINEAR,
@@ -449,16 +465,22 @@ pub fn develop_raw_image_custom_with_algorithm(
         ));
     }
 
+    let _t_preprocess = std::time::Instant::now();
     if options.preprocess {
         crate::raw_preprocess::correct_pdaf_pixels(&mut sensor);
         crate::raw_preprocess::correct_hot_dead_pixels(&mut sensor, 0.15);
         crate::raw_preprocess::correct_cfa_line_banding(&mut sensor, 0.5);
         crate::raw_preprocess::equalize_green_channels(&mut sensor);
     }
+    log::debug!("[raw develop timing] preprocess: {:?}", _t_preprocess.elapsed());
 
+    let _t_demosaic = std::time::Instant::now();
     let mut rgb = crate::demosaic_algorithms::demosaic(&sensor, algo);
+    log::debug!("[raw develop timing] demosaic ({:?}): {:?}", algo, _t_demosaic.elapsed());
+    let _t_wbcm = std::time::Instant::now();
     apply_white_balance(&mut rgb, &sensor);
     apply_color_matrix(&mut rgb, &sensor.xyz_to_cam);
+    log::debug!("[raw develop timing] wb+colormatrix: {:?}", _t_wbcm.elapsed());
 
     // Mirrors raw_processing::develop_internal's rescale + highlight
     // compression: apply_white_balance already normalized by
@@ -466,7 +488,7 @@ pub fn develop_raw_image_custom_with_algorithm(
     // and we only need the highlight-compression clamp/desaturation.
     let safe_highlight_compression = highlight_compression.max(1.01);
     let clamp_limit = safe_highlight_compression;
-    for px in rgb.iter_mut() {
+    rgb.par_iter_mut().for_each(|px| {
         let (r, g, b) = (px[0].max(0.0), px[1].max(0.0), px[2].max(0.0));
         let max_c = r.max(g).max(b);
         let (final_r, final_g, final_b) = if max_c > 1.0 {
@@ -493,8 +515,9 @@ pub fn develop_raw_image_custom_with_algorithm(
         px[0] = final_r.clamp(0.0, clamp_limit);
         px[1] = final_g.clamp(0.0, clamp_limit);
         px[2] = final_b.clamp(0.0, clamp_limit);
-    }
+    });
 
+    let _t_denoise = std::time::Instant::now();
     if options.denoise_strength > 0.0 {
         crate::raw_denoise::wavelet_denoise(
             &mut rgb,
@@ -503,6 +526,8 @@ pub fn develop_raw_image_custom_with_algorithm(
             options.denoise_strength,
         );
     }
+    log::debug!("[raw develop timing] denoise: {:?}", _t_denoise.elapsed());
+    let _t_sharpen = std::time::Instant::now();
     if options.sharpen_amount > 0.0 {
         crate::raw_sharpen::sharpen(
             &mut rgb,
@@ -513,6 +538,7 @@ pub fn develop_raw_image_custom_with_algorithm(
             1.0,
         );
     }
+    log::debug!("[raw develop timing] sharpen: {:?}", _t_sharpen.elapsed());
 
     // Crop to active area, then to the default crop (crop_area), matching
     // rawler's CropActiveArea + CropDefault steps in that order.
@@ -785,5 +811,41 @@ mod tests {
             .save(&out_path)
             .expect("save wired dump");
         println!("saved {} ({}x{})", out_path, wired.width(), wired.height());
+    }
+
+    // Clean timing of develop_raw_image_custom (the actual production
+    // path the live app calls, minus PNG encoding - the app never encodes
+    // PNG mid-pipeline, it hands the linear Rgba32F straight to the GPU
+    // shader, so PNG-encode time in the other dump tests above is not
+    // representative of real in-app latency). Run with:
+    //   RAPIDRAW_TEST_RAW_PATH=/path/to/file.arw \
+    //     cargo test --release --lib custom_raw_pipeline::tests::time_develop_only -- --nocapture
+    #[test]
+    fn time_develop_only() {
+        let path = match std::env::var("RAPIDRAW_TEST_RAW_PATH") {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("RAPIDRAW_TEST_RAW_PATH not set, skipping");
+                return;
+            }
+        };
+        let bytes = std::fs::read(&path).expect("read raw file");
+
+        let t0 = std::time::Instant::now();
+        let sensor = decode_raw_sensor_data(&bytes).expect("decode");
+        let t_decode = t0.elapsed();
+
+        let t1 = std::time::Instant::now();
+        let img = develop_raw_image_custom(&bytes, 2.5).expect("develop_raw_image_custom");
+        let t_develop = t1.elapsed();
+
+        println!(
+            "decode={:?} develop_total={:?} iso={} dims={}x{}",
+            t_decode,
+            t_develop,
+            sensor.iso,
+            img.width(),
+            img.height()
+        );
     }
 }

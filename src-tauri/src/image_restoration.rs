@@ -815,6 +815,7 @@ pub fn run_restoration_worker(
                                     false,
                                     &crate::app_settings::AppSettings::default(),
                                     Some(&raw_develop_metadata.adjustments),
+                                    true,
                                     None,
                                 ) {
                                     Ok(loaded) => loaded,
@@ -885,6 +886,7 @@ pub fn run_restoration_worker(
                 false,
                 &crate::app_settings::AppSettings::default(),
                 Some(&raw_develop_metadata.adjustments),
+                true,
                 None,
             ) {
                 Ok(loaded) => loaded,

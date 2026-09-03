@@ -2095,6 +2095,7 @@ fn decode_frame(
         false,
         settings,
         Some(&metadata.adjustments),
+        true,
         None,
     )
     .map_err(|e| format!("Failed to decode {}: {}", path, e))?;

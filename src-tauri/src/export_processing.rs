@@ -1578,7 +1578,7 @@ pub async fn estimate_export_sizes(
         };
 
         let original_image =
-            load_base_image_from_bytes(file_data, &source_path_str, true, &settings, None, None)
+            load_base_image_from_bytes(file_data, &source_path_str, true, &settings, None, true, None)
                 .map_err(|e| e.to_string())?;
 
         let raw_scale_factor = if is_raw {

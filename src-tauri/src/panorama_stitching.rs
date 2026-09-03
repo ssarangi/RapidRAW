@@ -218,6 +218,7 @@ fn stitch_images(image_paths: Vec<String>, app_handle: AppHandle) -> Result<Dyna
                 false,
                 &settings,
                 Some(&metadata.adjustments),
+                true,
                 None,
             )
             .map_err(|e| format!("Failed to load image {}: {}", filename, e))?;

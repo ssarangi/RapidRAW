@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useMemo } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import debounce from 'lodash.debounce';
 import { useEditorStore } from '../store/useEditorStore';
 import { useUIStore } from '../store/useUIStore';
@@ -511,6 +512,25 @@ export function useImageProcessing(
     appSettings?.copyPasteSettings?.autoSync,
     isWaveformVisible,
   ]);
+
+  // Phase 2 of the two-phase RAW load (see image_loader::load_image): the
+  // editor opens with a fast rawler-PPG decode, and our own slower AMaZE/
+  // IGV/LMMSE + denoise/sharpen pipeline finishes moments later in the
+  // background and swaps into the backend's original_image. Re-render once
+  // that happens so the on-screen image quietly upgrades in place, without
+  // the user having to touch an adjustment or reselect the image.
+  useEffect(() => {
+    const unlistenPromise = listen('raw-develop-upgraded', (event: any) => {
+      const path = event.payload?.path;
+      const current = useEditorStore.getState();
+      if (!path || current.selectedImage?.path !== path || !current.selectedImage?.isReady) return;
+      const { adjustments, previewOverride } = current;
+      applyAdjustments(previewOverride ?? adjustments, false, calculateTargetRes(true));
+    });
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, [applyAdjustments, calculateTargetRes]);
 
   return {
     applyAdjustments,

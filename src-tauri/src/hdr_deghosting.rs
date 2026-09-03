@@ -62,6 +62,7 @@ pub fn load_hdr_frames(
                 false,
                 settings,
                 Some(&metadata.adjustments),
+                true,
                 None,
             )
             .map_err(|e| format!("Failed to load image {}: {}", path, e))?;

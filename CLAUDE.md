@@ -282,3 +282,85 @@ pipeline and user feedback flagged the naming/placement as confusing.
 - Dark frame / flat field subtraction - a separate feature (calibration
   frame library: capture, store, match by camera/ISO/exposure), not part
   of this pipeline.
+
+## Fixed: color cast + missing parallelism + two-phase progressive load
+
+After the pipeline above went live by default, real usage surfaced two
+serious bugs and a UX problem that weren't caught by CLI/visual spot-checks
+during development. Root causes and fixes, in case anything like this
+resurfaces:
+
+- **Strong purple/magenta color cast on every image.** Root cause:
+  `custom_raw_pipeline.rs`'s `decode_raw_sensor_data` read
+  `raw_image.xyz_to_cam` for the camera-to-XYZ matrix - a field rawler's
+  own source (`rawimage.rs`) explicitly marks `// TODO: deprecated, use
+  color_matrix`. It doesn't reliably hold the file's real calibrated
+  matrix. Fixed to read `raw_image.color_matrix` instead (a
+  `HashMap<Illuminant, FlatColorMatrix>`), preferring the `Illuminant::D65`
+  entry and falling back to whatever's first available - exactly mirroring
+  rawler's own real `Calibrate` step in `imgop::develop::RawDevelop`
+  (`pub(crate)`, so this was re-derived, not called directly). **Lesson**:
+  when reading a field from an external crate for something
+  correctness-critical (a color matrix, not a cosmetic value), check the
+  crate's own doc comments/TODOs on that field before trusting it, even if
+  it type-checks and looks plausible.
+- **No parallelism anywhere in the new pipeline.** None of
+  `demosaic_algorithms.rs`, `custom_raw_pipeline.rs`, `raw_denoise.rs`,
+  `raw_sharpen.rs`, `raw_preprocess.rs` used `rayon`, while the rest of
+  this codebase parallelizes exactly this kind of per-row/per-pixel work
+  throughout (`image_processing.rs`, `image_restoration.rs`, etc.). Added
+  `rayon::prelude::*` and converted the hot loops (demosaic per-pixel
+  passes, à trous wavelet smoothing, Gaussian blur, preprocess corrections)
+  to `par_chunks_mut`/`par_iter_mut`/`rayon::join`. Also found and fixed a
+  compounding allocation bug in `demosaic_algorithms.rs`'s LMMSE final
+  combine stage: `Vec::with_capacity(5)` called twice per red/blue pixel -
+  ~21 million heap allocations for a 42MP image - replaced with fixed-size
+  `[f32; 5]` arrays.
+- **Even after both fixes, the full pipeline (demosaic + denoise + sharpen)
+  still takes several seconds** (measured cleanly, machine otherwise idle:
+  ~7.7s total for a 42MP ISO-3200 file - demosaic ~2.1s, denoise ~3.7s,
+  sharpen ~0.8s, preprocess ~0.7s). This is real algorithmic cost (AMaZE/
+  IGV/LMMSE + wavelet denoise + sharpening are inherently far more
+  expensive than rawler's PPG demosaic, the same tradeoff RawTherapee/ART
+  make with their own equivalent pipeline), not a residual bug - not
+  something to keep chasing with more micro-optimization.
+
+**Fix: two-phase progressive load**, instead of blocking first paint on
+the slow pipeline:
+- `raw_processing::develop_raw_image_for_editor` gained an
+  `allow_custom_pipeline: bool` parameter (separate from `fast_demosaic`,
+  which is rawler's own quarter-resolution thumbnail mode, not a fast
+  full-res option) - `false` forces the fast rawler-PPG path even for a
+  full-quality decode. Threaded through `image_loader::load_base_image_from_bytes`
+  the same mechanical way as `raw_develop_adjustments` was - `true` at every
+  existing call site (preserves current behavior everywhere), `false` only
+  at `load_image`'s own two decode call sites.
+- `image_loader::load_image` (the real editor-open command) now decodes
+  **phase 1** with `allow_custom_pipeline: false` (fast, full-resolution,
+  matches the pre-this-session ~1s baseline) and returns immediately. If
+  the image is RAW, it then spawns a background OS thread (`std::thread::spawn`,
+  matching the existing pattern in `generate_uncropped_preview` - not
+  `tokio::spawn`, since `tauri::State`'s borrow can't outlive the command)
+  that re-decodes with `allow_custom_pipeline: true` (**phase 2**, the real
+  AMaZE/IGV/LMMSE+denoise+sharpen pipeline). On success, guarded by the
+  same `load_image_generation` atomic-counter cancellation mechanism
+  already used everywhere else in this function (so a stale phase-2 result
+  from an image the user has since navigated away from is silently
+  dropped), it swaps the upgraded image into `state.original_image`,
+  clears the same downstream caches `load_image` itself clears on a fresh
+  load (`cached_preview`, `gpu_image_cache`, `full_warped_cache`,
+  `full_transformed_cache`, `mask_cache`, `patch_cache`, `geometry_cache`),
+  updates `decoded_image_cache`, and emits a `"raw-develop-upgraded"`
+  Tauri event with `{ path }`.
+- Frontend: `useImageProcessing.ts` listens for `raw-develop-upgraded` and,
+  if it's for the currently-selected+ready image, calls the same
+  `applyAdjustments` the normal adjustment-change path uses - so the
+  on-screen image quietly upgrades in place a few seconds after first
+  paint, with no user action needed and no new UI chrome added.
+- **Not independently verified live** (no GUI access in this environment):
+  compiles cleanly, TS diffed clean against baseline, and the logic was
+  traced carefully against the existing cancellation/cache-clearing
+  patterns already established in this exact file - but the actual
+  runtime behavior (does the event fire, does the swap look smooth, is
+  there a visible "pop" when phase 2 lands) needs a real test in the
+  running app.

@@ -15,6 +15,7 @@
 
 use crate::custom_raw_pipeline::RawSensorData;
 use rawler::cfa::CFAColor;
+use rayon::prelude::*;
 
 /// Detects and replaces hot/dead (stuck) pixels: sensor sites whose value is
 /// a statistical outlier compared to the same-color pixels immediately
@@ -40,8 +41,8 @@ pub fn correct_hot_dead_pixels(sensor: &mut RawSensorData, threshold: f32) {
         original[row * w + col]
     };
 
-    for row in 0..h {
-        for col in 0..w {
+    sensor.data.par_chunks_mut(w).enumerate().for_each(|(row, out_row)| {
+        for (col, out_px) in out_row.iter_mut().enumerate() {
             let center = original[row * w + col];
             let mut neighbors = [
                 get(row as isize - 2, col as isize),
@@ -53,10 +54,10 @@ pub fn correct_hot_dead_pixels(sensor: &mut RawSensorData, threshold: f32) {
             let median = (neighbors[1] + neighbors[2]) * 0.5;
 
             if (center - median).abs() > abs_threshold {
-                sensor.data[row * w + col] = median;
+                *out_px = median;
             }
         }
-    }
+    });
 }
 
 /// Corrects per-row banding (a fixed or slowly-varying horizontal-line
@@ -118,15 +119,15 @@ pub fn correct_cfa_line_banding(sensor: &mut RawSensorData, strength: f32) {
         }
     }
 
-    for row in 0..h {
+    sensor.data.par_chunks_mut(w).enumerate().for_each(|(row, row_data)| {
         let offset = offsets[row];
         if offset.abs() < 1e-6 {
-            continue;
+            return;
         }
-        for col in 0..w {
-            sensor.data[row * w + col] = (sensor.data[row * w + col] - offset).max(0.0);
+        for px in row_data.iter_mut() {
+            *px = (*px - offset).max(0.0);
         }
-    }
+    });
 }
 
 /// Corrects on-sensor PDAF (phase-detect autofocus) pixels for cameras
@@ -238,26 +239,39 @@ pub fn equalize_green_channels(sensor: &mut RawSensorData) {
         return;
     }
 
-    let mut sum_even = 0.0f64;
-    let mut count_even = 0u64;
-    let mut sum_odd = 0.0f64;
-    let mut count_odd = 0u64;
-
-    for row in 0..h {
-        for col in 0..w {
-            if (sensor.cfa_at)(row, col) != CFAColor::GREEN {
-                continue;
+    let cfa_at = &sensor.cfa_at;
+    let (sum_even, count_even, sum_odd, count_odd) = sensor
+        .data
+        .par_chunks(w)
+        .enumerate()
+        .map(|(row, row_data)| {
+            let mut sum = 0.0f64;
+            let mut count = 0u64;
+            for (col, &value) in row_data.iter().enumerate() {
+                if cfa_at(row, col) == CFAColor::GREEN {
+                    sum += value as f64;
+                    count += 1;
+                }
             }
-            let value = sensor.data[row * w + col] as f64;
-            if row % 2 == 0 {
-                sum_even += value;
-                count_even += 1;
-            } else {
-                sum_odd += value;
-                count_odd += 1;
-            }
-        }
-    }
+            (row % 2, sum, count)
+        })
+        .fold(
+            || (0.0f64, 0u64, 0.0f64, 0u64),
+            |(mut se, mut ce, mut so, mut co), (row_parity, sum, count)| {
+                if row_parity == 0 {
+                    se += sum;
+                    ce += count;
+                } else {
+                    so += sum;
+                    co += count;
+                }
+                (se, ce, so, co)
+            },
+        )
+        .reduce(
+            || (0.0f64, 0u64, 0.0f64, 0u64),
+            |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2, a.3 + b.3),
+        );
 
     if count_even == 0 || count_odd == 0 {
         return;
@@ -274,15 +288,16 @@ pub fn equalize_green_channels(sensor: &mut RawSensorData) {
     let scale_even = (target / avg_even) as f32;
     let scale_odd = (target / avg_odd) as f32;
 
-    for row in 0..h {
+    let cfa_at = &sensor.cfa_at;
+    sensor.data.par_chunks_mut(w).enumerate().for_each(|(row, row_data)| {
         let scale = if row % 2 == 0 { scale_even } else { scale_odd };
         if (scale - 1.0).abs() < 1e-4 {
-            continue;
+            return;
         }
-        for col in 0..w {
-            if (sensor.cfa_at)(row, col) == CFAColor::GREEN {
-                sensor.data[row * w + col] *= scale;
+        for (col, px) in row_data.iter_mut().enumerate() {
+            if cfa_at(row, col) == CFAColor::GREEN {
+                *px *= scale;
             }
         }
-    }
+    });
 }

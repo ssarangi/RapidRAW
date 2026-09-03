@@ -6,6 +6,8 @@
 //! third method, "psf", uses a real measured per-lens PSF and is not
 //! implemented here).
 
+use rayon::prelude::*;
+
 /// Which sharpening algorithm to use - mirrors `demosaic_algorithms`'s
 /// naming/parsing pattern.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,26 +42,24 @@ pub fn suggest_amount_for_iso(iso: u32) -> f32 {
 
 /// Splits a demosaiced RGB buffer into independent Y/Cb/Cr planes.
 fn split_yc(rgb: &[[f32; 3]]) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
-    let mut y_plane = vec![0.0f32; rgb.len()];
-    let mut cb_plane = vec![0.0f32; rgb.len()];
-    let mut cr_plane = vec![0.0f32; rgb.len()];
-    for (i, px) in rgb.iter().enumerate() {
-        let (y, cb, cr) = crate::image_processing::rgb_to_yc_only(px[0], px[1], px[2]);
-        y_plane[i] = y;
-        cb_plane[i] = cb;
-        cr_plane[i] = cr;
-    }
+    let planes: Vec<(f32, f32, f32)> = rgb
+        .par_iter()
+        .map(|px| crate::image_processing::rgb_to_yc_only(px[0], px[1], px[2]))
+        .collect();
+    let y_plane = planes.iter().map(|p| p.0).collect();
+    let cb_plane = planes.iter().map(|p| p.1).collect();
+    let cr_plane = planes.iter().map(|p| p.2).collect();
     (y_plane, cb_plane, cr_plane)
 }
 
 /// Recombines Y/Cb/Cr planes back into `rgb` in place.
 fn merge_yc(rgb: &mut [[f32; 3]], y_plane: &[f32], cb_plane: &[f32], cr_plane: &[f32]) {
-    for (i, px) in rgb.iter_mut().enumerate() {
+    rgb.par_iter_mut().enumerate().for_each(|(i, px)| {
         let (r, g, b) = crate::image_processing::yc_to_rgb(y_plane[i], cb_plane[i], cr_plane[i]);
         px[0] = r.max(0.0);
         px[1] = g.max(0.0);
         px[2] = b.max(0.0);
-    }
+    });
 }
 
 /// Dispatches to the selected sharpening method - the entry point
@@ -94,32 +94,36 @@ fn gaussian_blur(src: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
     }
 
     let mut horizontal = vec![0.0f32; src.len()];
-    for y in 0..h {
-        let row = &src[y * w..(y + 1) * w];
-        let out_row = &mut horizontal[y * w..(y + 1) * w];
-        for (x, out) in out_row.iter_mut().enumerate() {
-            let mut acc = 0.0;
-            for (k, &weight) in kernel.iter().enumerate() {
-                let dx = k as isize - radius;
-                let sx = (x as isize + dx).clamp(0, w as isize - 1) as usize;
-                acc += weight * row[sx];
+    horizontal
+        .par_chunks_mut(w)
+        .zip(src.par_chunks(w))
+        .for_each(|(out_row, row)| {
+            for (x, out) in out_row.iter_mut().enumerate() {
+                let mut acc = 0.0;
+                for (k, &weight) in kernel.iter().enumerate() {
+                    let dx = k as isize - radius;
+                    let sx = (x as isize + dx).clamp(0, w as isize - 1) as usize;
+                    acc += weight * row[sx];
+                }
+                *out = acc;
             }
-            *out = acc;
-        }
-    }
+        });
 
     let mut vertical = vec![0.0f32; src.len()];
-    for y in 0..h {
-        for x in 0..w {
-            let mut acc = 0.0;
-            for (k, &weight) in kernel.iter().enumerate() {
-                let dy = k as isize - radius;
-                let sy = (y as isize + dy).clamp(0, h as isize - 1) as usize;
-                acc += weight * horizontal[sy * w + x];
+    vertical
+        .par_chunks_mut(w)
+        .enumerate()
+        .for_each(|(y, out_row)| {
+            for (x, out) in out_row.iter_mut().enumerate() {
+                let mut acc = 0.0;
+                for (k, &weight) in kernel.iter().enumerate() {
+                    let dy = k as isize - radius;
+                    let sy = (y as isize + dy).clamp(0, h as isize - 1) as usize;
+                    acc += weight * horizontal[sy * w + x];
+                }
+                *out = acc;
             }
-            vertical[y * w + x] = acc;
-        }
-    }
+        });
 
     vertical
 }
@@ -133,9 +137,8 @@ fn build_blend_mask(y: &[f32], w: usize, h: usize, contrast_threshold: f32) -> V
     let mut mask = vec![1.0f32; y.len()];
     let threshold = contrast_threshold.max(1e-4);
 
-    for row in 0..h {
-        for col in 0..w {
-            let idx = row * w + col;
+    mask.par_chunks_mut(w).enumerate().for_each(|(row, out_row)| {
+        for (col, out) in out_row.iter_mut().enumerate() {
             let left = y[row * w + col.saturating_sub(1)];
             let right = y[row * w + (col + 1).min(w - 1)];
             let up = y[row.saturating_sub(1) * w + col];
@@ -145,9 +148,9 @@ fn build_blend_mask(y: &[f32], w: usize, h: usize, contrast_threshold: f32) -> V
             let gradient = (gx * gx + gy * gy).sqrt();
             // Smoothstep-like ramp from 0 to 1 around the threshold.
             let t = (gradient / (threshold * 2.0)).clamp(0.0, 1.0);
-            mask[idx] = t * t * (3.0 - 2.0 * t);
+            *out = t * t * (3.0 - 2.0 * t);
         }
-    }
+    });
 
     mask
 }

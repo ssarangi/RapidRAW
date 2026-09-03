@@ -3101,6 +3101,7 @@ pub async fn apply_auto_adjustments_to_paths(
                     true,
                     &settings,
                     None,
+                    true,
                     None,
                 )
                 .map_err(|e| e.to_string())?;

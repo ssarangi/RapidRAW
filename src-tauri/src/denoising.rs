@@ -320,6 +320,7 @@ fn denoise_image(
         false,
         &settings,
         Some(&metadata.adjustments),
+        true,
         None,
     )
     .map_err(|e| e.to_string())?;

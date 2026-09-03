@@ -217,6 +217,7 @@ pub async fn preview_negative_conversion(
                                 false,
                                 &settings,
                                 Some(&raw_develop_metadata.adjustments),
+                                true,
                                 None,
                             )
                             .map_err(|e| e.to_string())?,
@@ -228,7 +229,8 @@ pub async fn preview_negative_conversion(
                                     &source_path_str,
                                     false,
                                     &settings,
-                                    None,
+                                    Some(&raw_develop_metadata.adjustments),
+                                    true,
                                     None,
                                 )
                                 .map_err(|e| e.to_string())?
@@ -246,6 +248,7 @@ pub async fn preview_negative_conversion(
                             false,
                             &settings,
                             Some(&raw_develop_metadata.adjustments),
+                            true,
                             None,
                         )
                         .map_err(|e| e.to_string())?,
@@ -258,6 +261,7 @@ pub async fn preview_negative_conversion(
                                 false,
                                 &settings,
                                 Some(&raw_develop_metadata.adjustments),
+                                true,
                                 None,
                             )
                             .map_err(|e| e.to_string())?
@@ -317,6 +321,7 @@ pub async fn convert_negatives(
                     false,
                     &settings,
                     Some(&raw_develop_metadata.adjustments),
+                    true,
                     None,
                 ),
                 Err(_) => {
@@ -327,6 +332,7 @@ pub async fn convert_negatives(
                         false,
                         &settings,
                         Some(&raw_develop_metadata.adjustments),
+                        true,
                         None,
                     )
                 }
