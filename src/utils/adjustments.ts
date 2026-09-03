@@ -59,6 +59,7 @@ export enum RawDevelopAdjustment {
 
 export enum DemosaicAlgorithm {
   Auto = 'auto',
+  Ppg = 'ppg',
   Amaze = 'amaze',
   Igv = 'igv',
   Lmmse = 'lmmse',

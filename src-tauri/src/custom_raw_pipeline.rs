@@ -906,5 +906,22 @@ mod tests {
         println!("wb_coeffs: {:?}", raw_image.wb_coeffs);
         let sensor = decode_raw_sensor_data(&bytes).expect("decode_raw_sensor_data");
         println!("resolved sensor.xyz_to_cam: {:?}", sensor.xyz_to_cam);
+        println!(
+            "black_level: {:?} white_level: {} wb_coeffs: {:?}",
+            sensor.black_level, sensor.white_level, sensor.wb_coeffs
+        );
+        let mut sorted = sensor.data.clone();
+        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let n = sorted.len();
+        let pct = |p: f64| sorted[((n - 1) as f64 * p) as usize];
+        println!(
+            "raw ADU stats: min={} p50={} p90={} p99={} p99.9={} max={}",
+            sorted[0],
+            pct(0.5),
+            pct(0.9),
+            pct(0.99),
+            pct(0.999),
+            sorted[n - 1]
+        );
     }
 }

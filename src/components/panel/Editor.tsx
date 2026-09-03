@@ -335,21 +335,25 @@ export default function Editor({ onBackToLibrary, onContextMenu, onImageSelect, 
   const isAiEditing = activePanel === Panel.Ai;
 
   const croppedDimensions = useMemo<ImageDimensions | null>(() => {
-    if (!selectedImage?.width || !selectedImage?.height) {
+    // Fall back to originalSize (set near-instantly by the fast-dimensions
+    // probe in useImageLoader.ts) while selectedImage.width/height are still
+    // 0 - otherwise the embedded-preview thumbnail has nothing to size the
+    // WebGL canvas to and renders as a 0x0 (invisible) quad until the full,
+    // possibly multi-second, RAW decode finishes.
+    const rawWidth = selectedImage?.width || originalSize?.width;
+    const rawHeight = selectedImage?.height || originalSize?.height;
+    if (!rawWidth || !rawHeight) {
       return null;
     }
     if (adjustments.crop) {
       return { width: adjustments.crop.width, height: adjustments.crop.height } as ImageDimensions;
     }
-    if (selectedImage) {
-      const orientationSteps = adjustments.orientationSteps || 0;
-      const isSwapped = orientationSteps === 1 || orientationSteps === 3;
-      const width = isSwapped ? selectedImage.height : selectedImage.width;
-      const height = isSwapped ? selectedImage.width : selectedImage.height;
-      return { width, height } as ImageDimensions;
-    }
-    return null;
-  }, [selectedImage, adjustments.crop, adjustments.orientationSteps]);
+    const orientationSteps = adjustments.orientationSteps || 0;
+    const isSwapped = orientationSteps === 1 || orientationSteps === 3;
+    const width = isSwapped ? rawHeight : rawWidth;
+    const height = isSwapped ? rawWidth : rawHeight;
+    return { width, height } as ImageDimensions;
+  }, [selectedImage?.width, selectedImage?.height, originalSize, adjustments.crop, adjustments.orientationSteps]);
 
   const imageRenderSize = useImageRenderSize(imageContainerRef, croppedDimensions);
   const imageRenderSizeRef = useRef(imageRenderSize);

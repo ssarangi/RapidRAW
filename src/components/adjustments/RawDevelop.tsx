@@ -1,12 +1,10 @@
 import { useTranslation } from 'react-i18next';
-import { Loader2 } from 'lucide-react';
 import Slider from '../ui/Slider';
 import Switch from '../ui/Switch';
 import Dropdown from '../ui/Dropdown';
 import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
 import { Adjustments, DemosaicAlgorithm, RawDevelopAdjustment, SharpenMethod } from '../../utils/adjustments';
-import { useEditorStore } from '../../store/useEditorStore';
 
 interface RawDevelopPanelProps {
   adjustments: Adjustments;
@@ -24,7 +22,6 @@ export default function RawDevelopPanel({
   onDragStateChange,
 }: RawDevelopPanelProps) {
   const { t } = useTranslation();
-  const isRawReprocessing = useEditorStore((s) => s.isRawReprocessing);
 
   const demosaicOptions = Object.values(DemosaicAlgorithm).map((value) => ({
     value,
@@ -80,19 +77,9 @@ export default function RawDevelopPanel({
 
   return (
     <div>
-      <div className="flex items-center justify-between gap-3 mb-3">
-        <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
-          {t('editor.adjustments.rawDevelop.description')}
-        </Text>
-        {isRawReprocessing && (
-          <div className="flex items-center gap-1.5 shrink-0" title={t('editor.adjustments.rawDevelop.reprocessing')}>
-            <Loader2 size={13} className="animate-spin text-text-secondary" />
-            <Text variant={TextVariants.small} color={TextColors.secondary}>
-              {t('editor.adjustments.rawDevelop.reprocessing')}
-            </Text>
-          </div>
-        )}
-      </div>
+      <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mb-3">
+        {t('editor.adjustments.rawDevelop.description')}
+      </Text>
 
       <div className="mb-4">
         <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mb-1">

@@ -4,7 +4,8 @@ import ReactCrop from 'react-image-crop';
 import 'react-image-crop/dist/ReactCrop.css';
 import { Stage, Layer, Ellipse, Line, Transformer, Group, Circle, Rect, Arrow } from 'react-konva';
 import { PercentCrop, Crop } from 'react-image-crop';
-import { Stamp, Bandage, Spline, BrushCleaning } from 'lucide-react';
+import { Stamp, Bandage, Spline, BrushCleaning, Loader2 } from 'lucide-react';
+import { useEditorStore } from '../../../store/useEditorStore';
 import { Adjustments, AiPatch, Coord, MaskContainer } from '../../../utils/adjustments';
 import { Mask, SubMask, SubMaskMode, ToolType } from '../right/Masks';
 import { AppSettings, BrushSettings, SelectedImage } from '../../ui/AppProperties';
@@ -1337,6 +1338,7 @@ const ImageCanvas = memo(
     portalContainerRef,
     onFirstPaintPendingChange,
   }: ImageCanvasProps) => {
+    const isRawReprocessing = useEditorStore((s) => s.isRawReprocessing);
     const [isCropViewVisible, setIsCropViewVisible] = useState(false);
     const cropImageRef = useRef<HTMLImageElement>(null);
     const [displayedMaskUrl, setDisplayedMaskUrl] = useState<string | null>(null);
@@ -2855,6 +2857,21 @@ const ImageCanvas = memo(
                         }}
                       >
                         {t('editor.canvas.embeddedPreviewBadge')}
+                      </div>
+                    )}
+
+                    {isRawReprocessing && (
+                      <div
+                        className="absolute top-2 right-2 flex items-center gap-1.5 px-2 py-1 rounded-md text-xs font-medium select-none pointer-events-none"
+                        style={{
+                          zIndex: 1,
+                          backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                          color: '#ffffff',
+                          boxShadow: '0 1px 3px rgba(0, 0, 0, 0.5)',
+                        }}
+                      >
+                        <Loader2 size={12} className="animate-spin" />
+                        {t('editor.adjustments.rawDevelop.reprocessing')}
                       </div>
                     )}
                   </div>,

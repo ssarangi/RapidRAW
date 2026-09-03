@@ -84,10 +84,17 @@ pub fn develop_raw_image_for_editor(
     allow_custom_pipeline: bool,
     cancel_token: Option<(Arc<AtomicUsize>, usize)>,
 ) -> Result<DynamicImage> {
-    if !fast_demosaic && allow_custom_pipeline {
-        let demosaic_override = raw_develop_adjustments
-            .and_then(|a| a.get("rawDemosaicAlgorithm"))
-            .and_then(|v| v.as_str());
+    let demosaic_override = raw_develop_adjustments
+        .and_then(|a| a.get("rawDemosaicAlgorithm"))
+        .and_then(|v| v.as_str());
+    // "ppg" is rawler's own demosaic (not one of our AMaZE/IGV/LMMSE/
+    // Bilinear algorithms) - an explicit user choice to skip this pipeline
+    // entirely and fall straight through to the rawler-PPG path below,
+    // rather than an override `develop_raw_image_custom_resolved` could
+    // ever satisfy itself.
+    let wants_ppg = demosaic_override == Some("ppg");
+
+    if !fast_demosaic && allow_custom_pipeline && !wants_ppg {
         // Sliders store 0..100 with a negative sentinel meaning "auto"
         // (ISO-based suggestion) - matches how other percentage-style
         // adjustments in this app are already stored.

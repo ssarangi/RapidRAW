@@ -65,7 +65,19 @@ export function useImageLoader(cachedEditStateRef: React.RefObject<any>) {
           const current = useEditorStore.getState();
           if (current.selectedImage?.path !== selectedImage.path) return;
           if (current.originalSize.width > 0) return; // the real decode already won the race
-          setEditor({ originalSize: { width: dims.width, height: dims.height } });
+          setEditor((state) => ({
+            originalSize: { width: dims.width, height: dims.height },
+            // Also mirrored onto selectedImage: Editor.tsx's croppedDimensions
+            // (and therefore imageRenderSize, and therefore the WebGL canvas's
+            // draw size) reads selectedImage.width/height, not originalSize -
+            // leaving only originalSize set here meant the embedded-preview
+            // placeholder had a real thumbnail to show but a 0x0 box to draw
+            // it into until the full (slow, for RAW) decode finished.
+            selectedImage:
+              state.selectedImage && state.selectedImage.path === selectedImage.path
+                ? { ...state.selectedImage, width: dims.width, height: dims.height }
+                : state.selectedImage,
+          }));
         } catch (err) {
           console.warn('Failed to load fast image dimensions:', err);
         }

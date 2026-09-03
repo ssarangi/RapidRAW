@@ -314,6 +314,7 @@
         "demosaicLabel": "Demosaic Algorithm",
         "demosaicOptions": {
           "auto": "Auto (by ISO)",
+          "ppg": "PPG (Default)",
           "amaze": "AMaZE",
           "igv": "IGV",
           "lmmse": "LMMSE",

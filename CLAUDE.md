@@ -523,3 +523,94 @@ ILCE-7RM3, ISO 3200) compared directly against its in-camera JPEG:
     for the reported "text and toggle with no gap" look, but this was
     **not visually confirmed** (no GUI access in this environment) - if it
     persists, the actual screenshot is needed to diagnose further.
+    **Follow-up**: the "Reprocessing..." indicator itself turned out to be
+    the actual cause of a *different* layout complaint - putting it inline
+    with the panel description text made that text wrap and the whole
+    panel shift height every time reprocessing started/stopped. Moved it
+    out of `RawDevelop.tsx` entirely and onto the canvas instead
+    (`ImageCanvas.tsx`, a small pill top-right, mirroring the existing
+    "Embedded Preview" pill top-left) - it now overlays the rendered image
+    rather than pushing panel content around, and is anchored to the thing
+    that's actually changing.
+
+## Fixed: severely underexposed RAW file misread as a decode bug (it wasn't)
+
+A different RAW file (`_DSC9252.ARW`, same Sony ILCE-7RM3) rendered
+extremely dark in the app, while ART and darktable showed it reasonably
+exposed - reported as "what gives?", i.e. suspected as a pipeline bug like
+the earlier color-cast one. **It is not a bug.** Added a temporary raw-ADU
+percentile dump to `custom_raw_pipeline.rs`'s existing `debug_color_matrix`
+test (gated behind `RAPIDRAW_TEST_RAW_PATH`, kept as a permanent
+diagnostic) and confirmed: `black_level=512`, `white_level=15360`, and the
+actual raw sensor data's `p50=524` (12 units above black - the median
+pixel), `p99.9=2881`, `max=4561` (~30% of the sensor's full range even at
+the single brightest pixel in the frame). This is a real, severely
+underexposed capture (roughly 3-4 stops under a full-range exposure), not
+a metadata or color-matrix misread - confirmed further by rendering the
+same file through `raw_processing::develop_raw_image` (rawler's own PPG
+pipeline, completely independent code path from `custom_raw_pipeline.rs`)
+and getting the *same* near-black average brightness (`14.3, 9.6, 8.4` vs
+the custom pipeline's `14.25, 9.57, 8.41`) - both pipelines agree, because
+both are rendering the real (dark) sensor data faithfully.
+
+**Why ART/darktable look different**: this app's pipeline is deliberately
+linear/scene-referred up through a single tonemap step (AgX/ACES in the
+GPU shader, see the "Tone curve: not needed, already solved" note above) -
+it doesn't apply any automatic exposure compensation. ART and darktable's
+*default* views typically DO apply an automatic base curve / filmic
+exposure boost that actively brightens an underexposed capture as part of
+their out-of-the-box rendering intent. Both are legitimate rendering
+philosophies for the same underlying (genuinely dark) raw data - this is
+a product/UX difference in default rendering intent, not a correctness
+bug, and the shot is recoverable via a manual `+3`-ish EV push in the
+Basic panel's Exposure slider, the same way it would need pushing in
+ART/darktable if their auto-exposure heuristic didn't already do it for
+you.
+
+**If auto-exposure-on-load is ever wanted**: that would be a real,
+deliberate feature (estimate a default exposure compensation from the
+raw histogram, e.g. targeting a scene-average or highlight-relative
+midpoint) - it isn't something to bolt onto the RAW Develop pipeline
+itself, since the underlying color/demosaic pipeline is already correct
+here. Not started.
+
+## Added: PPG as an explicit selectable Demosaic Algorithm option
+
+`DemosaicAlgorithm` (`adjustments.ts`) gained a `Ppg = 'ppg'` value,
+listed right after `Auto` and labeled `"PPG (Default)"` - rawler's own
+demosaic, i.e. what a RAW file gets when this custom pipeline doesn't run
+at all. Wired in `raw_processing::develop_raw_image_for_editor`: computes
+`demosaic_override` once (previously only computed inside the
+custom-pipeline branch) and short-circuits past
+`develop_raw_image_custom_resolved` entirely when it's `Some("ppg")`,
+falling straight through to the existing `develop_raw_image` (rawler PPG)
+call at the bottom of the function - this is the same fallback path
+already used when the custom pipeline errors out (ineligible sensor,
+etc.), just reached deliberately instead of via an `Err`.
+
+## Fixed: embedded-preview thumbnail rendered as a 0x0 (invisible) WebGL quad
+
+Reported as "the Embedded Preview badge shows but no image is visible."
+Root-caused (diagnosis credited to an external analysis the user ran
+independently, verified line-by-line against the actual current code
+before acting on it - it was accurate): `Editor.tsx`'s `croppedDimensions`
+- which feeds `useImageRenderSize`, which sizes the actual WebGL canvas
+quad in `WebglTexturedCanvas.tsx` - reads only `selectedImage.width`/
+`selectedImage.height`. Those stay `0` until the *full* image decode
+resolves (`useImageLoader.ts`'s `loadFullImageData`), which for a RAW
+file can take seconds. Meanwhile `originalSize` gets a real value almost
+immediately, via a separate fast/non-demosaic dimension probe
+(`loadFastDimensions`, `GetFastImageDimensions`) - but `croppedDimensions`
+never looked at `originalSize`, and `loadFastDimensions` never wrote to
+`selectedImage.width`/`height` either. Net effect: the embedded-preview
+thumbnail (already loaded, ready to show) had a real image to display but
+a `{width:0, height:0}` box computed for the canvas to draw it into, so
+the WebGL vertex shader collapsed the quad to a single point - zero
+pixels rasterized, fully transparent, while the badge (driven by a
+different, correct condition) still showed. Fixed both ends: `Editor.tsx`
+now falls back to `originalSize` when `selectedImage.width/height` are
+`0`, and `loadFastDimensions` now also mirrors its result onto
+`selectedImage.width`/`height` (not just `originalSize`), so the
+placeholder gets a correct-aspect-ratio box to render into within
+whatever the fast dimensions probe takes (near-instant), not whatever the
+full RAW decode takes.
