@@ -302,27 +302,26 @@ fn average_neighbors(sensor: &RawSensorData, row: isize, col: isize, cross: bool
 fn apply_white_balance(rgb: &mut [[f32; 3]], sensor: &RawSensorData) {
     let bl = sensor.black_level;
     let wb = sensor.wb_coeffs;
-    let wb_max = wb[0]
-        .max(wb[1])
-        .max(wb[2])
-        .max(if wb[3] > 0.0 { wb[3] } else { 0.0 });
     let denom = (sensor.white_level - bl[0]).max(1.0);
 
+    // wb_coeffs are already the direct per-channel multipliers a neutral
+    // subject needs (green is conventionally the reference at ~1.0, e.g.
+    // [1.47, 1.0, 2.93] for a warm/tungsten-lit scene needing more blue) -
+    // they must be applied AS-IS, not re-normalized by dividing by
+    // whichever channel happens to be numerically largest. Doing that
+    // (the previous bug here) inverts the correction: it suppresses the
+    // channels that actually needed boosting instead of boosting them,
+    // producing a strong, systematic color cast on every image regardless
+    // of the color-matrix step downstream. A channel legitimately going
+    // above the original white point after this (e.g. blue at 2.93x) is
+    // expected and handled by the highlight-compression step that follows.
     rgb.par_iter_mut().for_each(|px| {
         for c in 0..3 {
             let black = bl[c];
-            let gain = if wb_max > 0.0 { wb[c] / wb_max } else { 1.0 };
-            px[c] = ((px[c] - black) * gain / denom).max(0.0);
+            px[c] = ((px[c] - black) * wb[c] / denom).max(0.0);
         }
     });
 }
-
-// Standard sRGB (D65) <- XYZ matrix (IEC 61966-2-1).
-const XYZ_TO_SRGB: [[f32; 3]; 3] = [
-    [3.2406, -1.5372, -0.4986],
-    [-0.9689, 1.8758, 0.0415],
-    [0.0557, -0.2040, 1.0570],
-];
 
 #[inline]
 fn srgb_gamma(v: f32) -> f32 {
@@ -334,27 +333,62 @@ fn srgb_gamma(v: f32) -> f32 {
     }
 }
 
+// Standard sRGB (D65) -> XYZ matrix, matching rawler's own
+// `imgop::xyz::SRGB_TO_XYZ_D65` constant exactly (IEC 61966-2-1).
+const SRGB_TO_XYZ: [[f32; 3]; 3] = [
+    [0.4124564, 0.3575761, 0.1804375],
+    [0.2126729, 0.7151522, 0.0721750],
+    [0.0193339, 0.1191920, 0.9503041],
+];
+
 /// Converts white-balanced camera-RGB triples to (still-linear) sRGB
 /// primaries, via the camera's own XYZ<->camera-RGB calibration matrix
-/// (rawler's `xyz_to_cam`). No gamma is applied here - this mirrors rawler's
-/// own `Calibrate` step, which also leaves the result linear.
+/// (rawler's `color_matrix`). No gamma is applied here - this mirrors
+/// rawler's own `Calibrate` step, which also leaves the result linear.
+///
+/// This is a direct port of rawler's actual (but `pub(crate)`-only, hence
+/// unreachable) `imgop::raw::map_3ch_to_rgb` - read from the vendored
+/// source rather than reverse-engineered, after an earlier attempt (invert
+/// xyz_to_cam, multiply by XYZ_TO_SRGB, *then* row-normalize the combined
+/// camera->sRGB matrix) turned out to only fix neutral gray while leaving
+/// other colors wrong - measurably: it still produced a strong cast on a
+/// real photo. rawler's actual order is different in a way that matters:
+/// it builds the *forward* sRGB->camera matrix first
+/// (`xyz_to_cam * srgb_to_xyz`), row-normalizes *that* (so sRGB-white
+/// truly maps to equal-RGB camera values), and only *then* inverts to get
+/// camera->sRGB - normalizing before inverting is not the same operation
+/// as inverting then normalizing the result.
 fn apply_color_matrix(rgb: &mut [[f32; 3]], xyz_to_cam: &Matrix3<f32>) {
-    let cam_to_xyz = match xyz_to_cam.try_inverse() {
+    let srgb_to_xyz = Matrix3::from_row_slice(&[
+        SRGB_TO_XYZ[0][0],
+        SRGB_TO_XYZ[0][1],
+        SRGB_TO_XYZ[0][2],
+        SRGB_TO_XYZ[1][0],
+        SRGB_TO_XYZ[1][1],
+        SRGB_TO_XYZ[1][2],
+        SRGB_TO_XYZ[2][0],
+        SRGB_TO_XYZ[2][1],
+        SRGB_TO_XYZ[2][2],
+    ]);
+    // sRGB -> camera, fused (rawler's `rgb2cam`).
+    let mut rgb_to_cam = xyz_to_cam * srgb_to_xyz;
+    // rawler's `normalize`: each row scaled to sum to 1.0, so sRGB-white
+    // [1,1,1] maps to equal-valued camera RGB.
+    for r in 0..3 {
+        let row_sum = rgb_to_cam[(r, 0)] + rgb_to_cam[(r, 1)] + rgb_to_cam[(r, 2)];
+        if row_sum.abs() > 1e-8 {
+            rgb_to_cam[(r, 0)] /= row_sum;
+            rgb_to_cam[(r, 1)] /= row_sum;
+            rgb_to_cam[(r, 2)] /= row_sum;
+        }
+    }
+    // camera -> sRGB, fused (rawler's `cam2rgb`, via pseudo-inverse for
+    // the general 4-channel case - a plain inverse is equivalent here
+    // since we only ever build a full-rank 3x3 matrix).
+    let cam_to_srgb = match rgb_to_cam.try_inverse() {
         Some(m) => m,
         None => Matrix3::identity(),
     };
-    let xyz_to_srgb = Matrix3::from_row_slice(&[
-        XYZ_TO_SRGB[0][0],
-        XYZ_TO_SRGB[0][1],
-        XYZ_TO_SRGB[0][2],
-        XYZ_TO_SRGB[1][0],
-        XYZ_TO_SRGB[1][1],
-        XYZ_TO_SRGB[1][2],
-        XYZ_TO_SRGB[2][0],
-        XYZ_TO_SRGB[2][1],
-        XYZ_TO_SRGB[2][2],
-    ]);
-    let cam_to_srgb = xyz_to_srgb * cam_to_xyz;
 
     rgb.par_iter_mut().for_each(|px| {
         let v = nalgebra::Vector3::new(px[0], px[1], px[2]);
@@ -847,5 +881,30 @@ mod tests {
             img.width(),
             img.height()
         );
+    }
+
+    #[test]
+    fn debug_color_matrix() {
+        let path = match std::env::var("RAPIDRAW_TEST_RAW_PATH") {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("RAPIDRAW_TEST_RAW_PATH not set, skipping");
+                return;
+            }
+        };
+        let bytes = std::fs::read(&path).expect("read raw file");
+        let source = RawSource::new_from_slice(&bytes);
+        let decoder = rawler::get_decoder(&source).expect("get_decoder");
+        let raw_image: RawImage = decoder
+            .raw_image(&source, &RawDecodeParams::default(), false)
+            .expect("raw_image");
+        println!("color_matrix entries: {}", raw_image.color_matrix.len());
+        for (illuminant, matrix) in raw_image.color_matrix.iter() {
+            println!("  {:?}: len={} values={:?}", illuminant, matrix.len(), matrix);
+        }
+        println!("deprecated xyz_to_cam: {:?}", raw_image.xyz_to_cam);
+        println!("wb_coeffs: {:?}", raw_image.wb_coeffs);
+        let sensor = decode_raw_sensor_data(&bytes).expect("decode_raw_sensor_data");
+        println!("resolved sensor.xyz_to_cam: {:?}", sensor.xyz_to_cam);
     }
 }

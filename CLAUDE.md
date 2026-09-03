@@ -304,6 +304,75 @@ resurfaces:
   correctness-critical (a color matrix, not a cosmetic value), check the
   crate's own doc comments/TODOs on that field before trusting it, even if
   it type-checks and looks plausible.
+  **This fix alone was insufficient** - real usage still showed a strong
+  cast after it shipped. Two more bugs were compounding it, found only by
+  reading rawler's actual (private, `pub(crate)`) `map_3ch_to_rgb` source
+  directly from the vendored git checkout on disk rather than
+  reverse-engineering behavior from output alone:
+  - `apply_white_balance` normalized `wb_coeffs` by dividing by whichever
+    channel had the numerically largest raw coefficient
+    (`gain = wb[c] / wb_max`) before applying it. `wb_coeffs` are already
+    the direct per-channel multipliers a neutral subject needs (green is
+    the ~1.0 reference channel by convention) - dividing by the max
+    channel *inverts* the correction, suppressing exactly the channels
+    that needed boosting. Fixed to apply `wb_coeffs` as-is, matching
+    rawler's real `Calibrate` step (`let wb = rawimage.wb_coeffs;`, used
+    directly with no re-normalization).
+  - `apply_color_matrix` built the camera->sRGB matrix by inverting
+    `xyz_to_cam` first and *then* row-normalizing the result so it would
+    be neutral-preserving. This is mathematically the wrong matrix to
+    normalize: rawler's real algorithm builds the *forward* sRGB->camera
+    matrix (`xyz_to_cam * srgb_to_xyz`), row-normalizes *that* first, and
+    only then inverts it to get camera->sRGB. Normalizing after inverting
+    is not the same operation as normalizing before inverting (they only
+    coincide for special-case matrices), even though both trivially pass
+    a "does pure gray map to pure gray" sanity check in isolation - the
+    bug only shows up on real, non-neutral colors. Fixed to replicate
+    rawler's actual order exactly (see `apply_color_matrix`'s doc comment
+    for the full derivation).
+  Verified via a debug pixel dump comparing `develop_raw_image_custom_with_algorithm`
+  against `raw_processing::develop_raw_image`'s rawler-PPG reference output
+  for the *same real photo* at the *same pixel* - both fixes were confirmed
+  by checking that `wb_coeffs`/`color_matrix`/`black_level`/`white_level`
+  inputs matched exactly between the two pipelines, then that the actual
+  matrix arithmetic (re-derived independently in Python/numpy from the
+  same inputs) reproduced the Rust output bit-for-bit.
+- **A third, separate, much larger color-cast bug specific to LMMSE**:
+  even after the two fixes above, LMMSE (the ISO>=1600 auto-selected
+  algorithm - so any high-ISO low-light shot, exactly the case that
+  triggered the original bug report) still showed a strong magenta/purple
+  cast, while AMaZE, IGV, and plain bilinear all demosaiced the *same*
+  file correctly. This was the actual dominant cause of the originally
+  reported cast, not the two matrix bugs above (which were real but
+  comparatively minor). Root cause, in `demosaic_algorithms.rs`'s
+  `lmmse_green_plane`: stage 1 computes a (green - same_channel)
+  difference estimate only at native red/blue sites, leaving every
+  interleaved green site's slot at a placeholder `0.0`. Stage 2's 9-tap
+  Gaussian smoothing pass then walked that plane with *unit* pixel
+  offsets (`offset = i`) - but a Bayer CFA's red (or blue) sites repeat
+  with period 2 along any row/column, so half of the "neighbor" taps a
+  unit-offset kernel reads are actually those bogus green-slot zeros, not
+  real same-color difference samples. This systematically pulled every
+  smoothed diff toward 0, which pulled LMMSE's reconstructed green
+  (`sensor.data[idx] + diff`) toward the raw same-channel value instead of
+  the true local green level - and since a camera's raw blue channel
+  reads low under warm/tungsten light (exactly why `wb_coeffs` needs a
+  large blue gain), this specifically under-estimated green in the blue
+  channel's own reconstructed positions, which is what a magenta/purple
+  cast *is*. Fixed by changing the tap offset to `i * 2` (stride 2), so
+  every tap lands on the same-color lattice the diff plane actually has
+  data on. **Diagnosis method**: bisected by algorithm first (AMaZE/IGV/
+  bilinear all correct, only LMMSE wrong - ruled out the shared WB/
+  color-matrix/preprocess code, which is identical across all four),
+  *then* by pixel-level dbgpx comparison of the LMMSE green plane against
+  the others, not by staring at the matrix math in isolation - the actual
+  numeric divergence (LMMSE's green channel at a sampled dark pixel came
+  out roughly half of AMaZE/IGV/bilinear's value for the same pixel) is
+  what pointed at the green-plane reconstruction rather than anything
+  downstream. Verified fixed via the same reference-pipeline pixel-patch
+  comparison: a 40x40 dark-background patch went from `[49, 35, 72]`
+  (LMMSE, broken) to `[44.7, 47.9, 56.6]` (matching the rawler-PPG
+  reference's `[43.9, 48.1, 57.0]` almost exactly).
 - **No parallelism anywhere in the new pipeline.** None of
   `demosaic_algorithms.rs`, `custom_raw_pipeline.rs`, `raw_denoise.rs`,
   `raw_sharpen.rs`, `raw_preprocess.rs` used `rayon`, while the rest of

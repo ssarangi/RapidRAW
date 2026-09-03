@@ -351,7 +351,18 @@ fn lmmse_green_plane(sensor: &RawSensorData) -> Vec<f32> {
                         acc += tap * plane[row * w + col];
                         continue;
                     }
-                    let offset = i as isize;
+                    // Stride 2, not 1: `plane` only has real (non-placeholder)
+                    // values at every OTHER pixel along this axis (the same
+                    // CFA color repeats with period 2 in a Bayer row/column -
+                    // the interleaved slots are the opposite color/green and
+                    // were left as 0.0 in stage 1). A stride-1 tap pattern
+                    // averaged in those zero placeholders, systematically
+                    // pulling every diff estimate toward 0 and producing a
+                    // strong, systematic green-channel deficiency (visible as
+                    // a magenta/purple cast) - unit-offset taps only make
+                    // sense on a plane that's dense at every pixel, which
+                    // this one deliberately isn't.
+                    let offset = (i as isize) * 2;
                     let (r1, c1, r2, c2) = if horizontal {
                         (
                             row,
