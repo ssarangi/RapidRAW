@@ -621,9 +621,12 @@ pub async fn download_visual_model_pack(
                     }
                 };
                 let Some(chunk) = chunk else { break };
-                let chunk = chunk.map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
-                file.write_all(&chunk)
-                    .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
+                let chunk = chunk.map_err(|error| {
+                    fail_download_job(&job, &state, error.to_string(), current, total)
+                })?;
+                file.write_all(&chunk).map_err(|error| {
+                    fail_download_job(&job, &state, error.to_string(), current, total)
+                })?;
                 downloaded += chunk.len() as u64;
                 let _ = app_handle.emit(
                     "visual-model-download-progress",
@@ -658,8 +661,9 @@ pub async fn download_visual_model_pack(
             let extracted = extract_zip_member(&temporary, member)
                 .map_err(|error| fail_download_job(&job, &state, error, current, total))?;
             let _ = fs::remove_file(&temporary);
-            fs::write(&temporary, &extracted)
-                .map_err(|error| fail_download_job(&job, &state, error.to_string(), current, total))?;
+            fs::write(&temporary, &extracted).map_err(|error| {
+                fail_download_job(&job, &state, error.to_string(), current, total)
+            })?;
         }
 
         if let Some(ref expected) = artifact.expected_sha256 {

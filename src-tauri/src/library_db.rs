@@ -452,7 +452,9 @@ pub fn find_active_model_download_job(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     for (id, payload_json) in rows {
-        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload_json) else { continue };
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload_json) else {
+            continue;
+        };
         if payload.get("registry").and_then(|v| v.as_str()) == Some(registry)
             && payload.get("packId").and_then(|v| v.as_str()) == Some(pack_id)
         {
@@ -1552,8 +1554,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
         drop(connection);
 
@@ -1568,7 +1580,8 @@ mod tests {
             |_cur, _tot, _path| {
                 progress_calls += 1;
             },
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(report.total, 1);
         assert_eq!(report.generated, 1);
@@ -1587,8 +1600,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
         drop(connection);
 
@@ -1623,8 +1646,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
         drop(connection);
 
@@ -1658,10 +1691,10 @@ mod tests {
         let mut data = Vec::new();
         // Header (8 bytes): "II" (little endian), magic 42, offset to IFD0 = 8
         data.extend_from_slice(b"II\x2a\x00\x08\x00\x00\x00");
-        
+
         let num_entries: u16 = 3;
         data.extend_from_slice(&num_entries.to_le_bytes());
-        
+
         let offset_to_jpeg = (8 + 2 + 12 * 3 + 4) as u32;
         let len_of_jpeg = jpeg_bytes.len() as u32;
 
@@ -1705,7 +1738,9 @@ mod tests {
         let sample = image::RgbImage::new(800, 600);
         let mut jpeg_bytes = Vec::new();
         let mut cursor = std::io::Cursor::new(&mut jpeg_bytes);
-        sample.write_to(&mut cursor, image::ImageFormat::Jpeg).unwrap();
+        sample
+            .write_to(&mut cursor, image::ImageFormat::Jpeg)
+            .unwrap();
 
         let tiff_dng_bytes = create_test_tiff_with_embedded_jpeg(&jpeg_bytes);
         fs::write(&raw_path, &tiff_dng_bytes).unwrap();
@@ -1713,8 +1748,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.dng', 'photo.dng', 0, 0, 0, 'present')", []).unwrap();
         drop(connection);
 
@@ -1726,7 +1771,8 @@ mod tests {
             false,
             control,
             |_cur, _tot, _path| {},
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(report.total, 1);
         assert_eq!(report.generated, 1);
@@ -1757,8 +1803,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'valid.jpg', 'valid.jpg', 0, 0, 0, 'present')", []).unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(2, 1, 1, 'corrupt.jpg', 'corrupt.jpg', 0, 0, 0, 'present')", []).unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(3, 1, 1, 'missing.jpg', 'missing.jpg', 0, 0, 0, 'present')", []).unwrap();
@@ -1772,7 +1828,8 @@ mod tests {
             false,
             control,
             |_cur, _tot, _path| {},
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(report.total, 3);
         assert_eq!(report.generated, 1);
@@ -1795,8 +1852,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
         connection.execute("INSERT INTO image_versions(id, image_id, copy_id, display_name, sidecar_path, rating, is_edited, created_at, updated_at) VALUES(1, 1, '', 'photo.jpg', '', 0, 0, 0, 0)", []).unwrap();
         drop(connection);
@@ -1811,7 +1878,8 @@ mod tests {
             |_cur, _tot, _path| {
                 progress_calls += 1;
             },
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(report.total, 1);
         assert_eq!(report.processed, 1);
@@ -1829,8 +1897,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
         drop(connection);
 
@@ -1863,8 +1941,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
         connection.execute("INSERT INTO image_versions(id, image_id, copy_id, display_name, sidecar_path, rating, is_edited, created_at, updated_at) VALUES(1, 1, '', 'photo.jpg', '', 0, 0, 0, 0)", []).unwrap();
         drop(connection);
@@ -1908,8 +1996,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         // Insert image but omit image_versions row to cause query_row failure during transaction
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
         drop(connection);
@@ -1923,7 +2021,10 @@ mod tests {
             |_cur, _tot, _path| {},
         );
 
-        assert!(result.is_err(), "Expected transaction to fail when version row is missing");
+        assert!(
+            result.is_err(),
+            "Expected transaction to fail when version row is missing"
+        );
         assert!(result.unwrap_err().contains("Failed to query version id"));
     }
 
@@ -1949,8 +2050,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo1.jpg', 'photo1.jpg', 0, 0, 0, 'present')", []).unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(2, 1, 1, 'photo2.jpg', 'photo2.jpg', 0, 0, 0, 'present')", []).unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(3, 1, 1, 'photo3.jpg', 'photo3.jpg', 0, 0, 0, 'present')", []).unwrap();
@@ -1958,7 +2069,12 @@ mod tests {
         connection.execute("INSERT INTO image_versions(id, image_id, copy_id, display_name, sidecar_path, rating, is_edited, created_at, updated_at) VALUES(1, 1, '', 'photo1.jpg', '', 0, 0, 0, 0)", []).unwrap();
         drop(connection);
 
-        let job_id = create_background_job(&db_path, "metadata_extraction", serde_json::json!({ "rootId": 1 })).unwrap();
+        let job_id = create_background_job(
+            &db_path,
+            "metadata_extraction",
+            serde_json::json!({ "rootId": 1 }),
+        )
+        .unwrap();
         let control = crate::app_state::BackgroundJobControl::new();
 
         let progress_db = db_path.clone();
@@ -2002,7 +2118,8 @@ mod tests {
             total,
             current_item.as_deref(),
             Some(&err_msg),
-        ).unwrap();
+        )
+        .unwrap();
 
         let (state, current, total, current_item, error): (String, i64, i64, Option<String>, Option<String>) = conn.query_row(
             "SELECT state, current, total, current_item, error FROM background_jobs WHERE id = ?1",
@@ -2024,8 +2141,20 @@ mod tests {
         connection.execute("INSERT INTO background_jobs(id, kind, state, payload_json, message, created_at, updated_at) VALUES('meta-job', 'metadata_extraction', 'paused', '{\"rootId\": 1}', 'Extracting metadata', 0, 0)", []).unwrap();
         recover_interrupted_jobs(&connection).unwrap();
 
-        let thumb_state: String = connection.query_row("SELECT state FROM background_jobs WHERE id = 'thumb-job'", [], |row| row.get(0)).unwrap();
-        let meta_state: String = connection.query_row("SELECT state FROM background_jobs WHERE id = 'meta-job'", [], |row| row.get(0)).unwrap();
+        let thumb_state: String = connection
+            .query_row(
+                "SELECT state FROM background_jobs WHERE id = 'thumb-job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let meta_state: String = connection
+            .query_row(
+                "SELECT state FROM background_jobs WHERE id = 'meta-job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(thumb_state, "failed");
         assert_eq!(meta_state, "failed");
     }
@@ -2391,7 +2520,10 @@ pub fn remove_library_root(
     let db_path = active_library_path(&state)?;
     let conn = open_connection(&db_path)?;
     let changed = conn
-        .execute("DELETE FROM collection_roots WHERE id = ?1", params![root_id])
+        .execute(
+            "DELETE FROM collection_roots WHERE id = ?1",
+            params![root_id],
+        )
         .map_err(|e| e.to_string())?;
     if changed == 0 {
         return Err("Collection root was not found".to_string());
@@ -3386,9 +3518,10 @@ pub fn start_catalog_scan(
                 if settings.enable_ai_tagging.unwrap_or(false) {
                     let tagging_app_handle = app_for_task.clone();
                     let tagging_state = tagging_app_handle.state::<crate::AppState>();
-                    if let Err(error) =
-                        crate::tagging::start_catalog_ram_plus_tagging(tagging_app_handle.clone(), tagging_state)
-                    {
+                    if let Err(error) = crate::tagging::start_catalog_ram_plus_tagging(
+                        tagging_app_handle.clone(),
+                        tagging_state,
+                    ) {
                         eprintln!("Failed to auto-start RAM++ tagging after catalog scan: {error}");
                     }
 
@@ -3402,7 +3535,9 @@ pub fn start_catalog_scan(
                         face_app_handle.clone(),
                         face_state,
                     ) {
-                        eprintln!("Failed to auto-start face detection after catalog scan: {error}");
+                        eprintln!(
+                            "Failed to auto-start face detection after catalog scan: {error}"
+                        );
                     }
                 }
             }
@@ -3644,14 +3779,13 @@ where
             continue;
         }
 
-        let cache_hash = crate::file_management::compute_thumbnail_cache_hash(
-            &path_str,
-            &[],
-            modified,
-        );
+        let cache_hash =
+            crate::file_management::compute_thumbnail_cache_hash(&path_str, &[], modified);
         let Some(cache_hash) = cache_hash else {
             failed += 1;
-            failure_reasons.push(format!("{path_str}: failed to compute thumbnail cache hash"));
+            failure_reasons.push(format!(
+                "{path_str}: failed to compute thumbnail cache hash"
+            ));
             continue;
         };
 
@@ -3662,21 +3796,20 @@ where
         }
 
         let image_result = if crate::formats::is_raw_file(&source_path) {
-            crate::face_detection::load_image_for_local_ai(&source_path)
-                .or_else(|_| {
-                    fs::read(&source_path)
+            crate::face_detection::load_image_for_local_ai(&source_path).or_else(|_| {
+                fs::read(&source_path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|bytes| {
+                        crate::raw_processing::develop_raw_image(
+                            &bytes,
+                            true,
+                            0.0,
+                            "sRGB".to_string(),
+                            None,
+                        )
                         .map_err(|e| e.to_string())
-                        .and_then(|bytes| {
-                            crate::raw_processing::develop_raw_image(
-                                &bytes,
-                                true,
-                                0.0,
-                                "sRGB".to_string(),
-                                None,
-                            )
-                            .map_err(|e| e.to_string())
-                        })
-                })
+                    })
+            })
         } else {
             image::open(&source_path).map_err(|e| e.to_string())
         };
@@ -3770,7 +3903,8 @@ fn run_catalog_thumbnail_generation_impl(
         }
 
         let current = (index + 1) as i64;
-        let should_update_db = last_progress_update.elapsed() > std::time::Duration::from_millis(500)
+        let should_update_db = last_progress_update.elapsed()
+            > std::time::Duration::from_millis(500)
             || index == 0
             || current == total as i64;
 
@@ -3795,11 +3929,8 @@ fn run_catalog_thumbnail_generation_impl(
             continue;
         }
 
-        let cache_hash = crate::file_management::compute_thumbnail_cache_hash(
-            &path_str,
-            &[],
-            modified,
-        );
+        let cache_hash =
+            crate::file_management::compute_thumbnail_cache_hash(&path_str, &[], modified);
         // This bulk pass only needs the small thumbnail (see need_medium: false
         // below), so only that file's presence determines whether it's cached.
         if !force_regenerate
@@ -4016,7 +4147,8 @@ where
         }
 
         let sidecar_path = parse_virtual_path(&path_str).1;
-        let (is_edited, rating, tags) = sidecar_metadata_with_settings(&path_buf, &sidecar_path, &settings);
+        let (is_edited, rating, tags) =
+            sidecar_metadata_with_settings(&path_buf, &sidecar_path, &settings);
         let tags_json = tags.as_ref().and_then(|t| serde_json::to_string(t).ok());
         let sidecar_modified = if sidecar_path.exists() {
             Some(unix_modified(&sidecar_path) as i64)
@@ -4025,7 +4157,9 @@ where
         };
         let now = now_secs();
 
-        let tx = conn.transaction().map_err(|e| format!("Failed to start transaction for {}: {}", path_str, e))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Failed to start transaction for {}: {}", path_str, e))?;
         tx.execute(
             "UPDATE image_versions
              SET rating = ?2, color_label = ?3, is_edited = ?4, tags_json = ?5, sidecar_modified_at = ?6, updated_at = ?7
@@ -4040,17 +4174,24 @@ where
                 now
             ],
         ).map_err(|e| format!("Failed to update image version for {}: {}", path_str, e))?;
-        let version_id: i64 = tx.query_row(
-            "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
-            params![image_id],
-            |row| row.get(0),
-        ).map_err(|e| format!("Failed to query version id for {}: {}", path_str, e))?;
+        let version_id: i64 = tx
+            .query_row(
+                "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
+                params![image_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to query version id for {}: {}", path_str, e))?;
         let exif = read_catalog_exif(&path_buf);
         upsert_image_metadata(&tx, image_id, &path_buf, &exif, now)
             .map_err(|e| format!("Failed to upsert image metadata for {}: {}", path_str, e))?;
         sync_image_tags(&tx, version_id, tags.as_ref())
             .map_err(|e| format!("Failed to sync tags for {}: {}", path_str, e))?;
-        tx.commit().map_err(|e| format!("Failed to commit metadata transaction for {}: {}", path_str, e))?;
+        tx.commit().map_err(|e| {
+            format!(
+                "Failed to commit metadata transaction for {}: {}",
+                path_str, e
+            )
+        })?;
 
         processed += 1;
     }
@@ -4116,7 +4257,8 @@ fn run_catalog_metadata_extraction_impl(
 
         let current = (index + 1) as i64;
         let path_str = path_buf.to_string_lossy().to_string();
-        let should_update_db = last_progress_update.elapsed() > std::time::Duration::from_millis(500)
+        let should_update_db = last_progress_update.elapsed()
+            > std::time::Duration::from_millis(500)
             || index == 0
             || current == total as i64;
 
@@ -4141,7 +4283,8 @@ fn run_catalog_metadata_extraction_impl(
         }
 
         let sidecar_path = parse_virtual_path(&path_str).1;
-        let (is_edited, rating, tags) = sidecar_metadata_with_settings(&path_buf, &sidecar_path, &settings);
+        let (is_edited, rating, tags) =
+            sidecar_metadata_with_settings(&path_buf, &sidecar_path, &settings);
         let tags_json = tags.as_ref().and_then(|t| serde_json::to_string(t).ok());
         let sidecar_modified = if sidecar_path.exists() {
             Some(unix_modified(&sidecar_path) as i64)
@@ -4150,7 +4293,9 @@ fn run_catalog_metadata_extraction_impl(
         };
         let now = now_secs();
 
-        let tx = conn.transaction().map_err(|e| format!("Failed to start transaction for {}: {}", path_str, e))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Failed to start transaction for {}: {}", path_str, e))?;
         tx.execute(
             "UPDATE image_versions
              SET rating = ?2, color_label = ?3, is_edited = ?4, tags_json = ?5, sidecar_modified_at = ?6, updated_at = ?7
@@ -4165,24 +4310,27 @@ fn run_catalog_metadata_extraction_impl(
                 now
             ],
         ).map_err(|e| format!("Failed to update image version for {}: {}", path_str, e))?;
-        let version_id: i64 = tx.query_row(
-            "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
-            params![image_id],
-            |row| row.get(0),
-        ).map_err(|e| format!("Failed to query version id for {}: {}", path_str, e))?;
+        let version_id: i64 = tx
+            .query_row(
+                "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
+                params![image_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to query version id for {}: {}", path_str, e))?;
         let exif = read_catalog_exif(&path_buf);
         upsert_image_metadata(&tx, image_id, &path_buf, &exif, now)
             .map_err(|e| format!("Failed to upsert image metadata for {}: {}", path_str, e))?;
         sync_image_tags(&tx, version_id, tags.as_ref())
             .map_err(|e| format!("Failed to sync tags for {}: {}", path_str, e))?;
-        tx.commit().map_err(|e| format!("Failed to commit metadata transaction for {}: {}", path_str, e))?;
+        tx.commit().map_err(|e| {
+            format!(
+                "Failed to commit metadata transaction for {}: {}",
+                path_str, e
+            )
+        })?;
 
         crate::file_management::emit_image_metadata_loaded(
-            app,
-            &path_str,
-            rating,
-            is_edited,
-            &tags,
+            app, &path_str, rating, is_edited, &tags,
         );
         processed += 1;
     }
@@ -5465,7 +5613,11 @@ pub fn delete_cull_sessions(
         return Ok(());
     }
     let connection = open_connection(&active_library_path(&state)?)?;
-    let placeholders = session_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let placeholders = session_ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
     let sql = format!("DELETE FROM cull_sessions WHERE id IN ({placeholders})");
     connection
         .execute(&sql, rusqlite::params_from_iter(session_ids.iter()))

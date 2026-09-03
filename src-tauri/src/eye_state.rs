@@ -34,7 +34,9 @@ pub(crate) struct EyeStateClassifier {
     session: Mutex<Session>,
 }
 
-pub(crate) fn load_eye_state_classifier(app_handle: &AppHandle) -> Result<EyeStateClassifier, String> {
+pub(crate) fn load_eye_state_classifier(
+    app_handle: &AppHandle,
+) -> Result<EyeStateClassifier, String> {
     let visual_models_dir = app_handle
         .path()
         .app_data_dir()
@@ -152,9 +154,8 @@ pub(crate) fn classify_face_eye_state(
 ) -> Option<EyeOpennessEstimate> {
     let right_eye = landmarks[0];
     let left_eye = landmarks[1];
-    let inter_eye_distance = ((right_eye[0] - left_eye[0]).powi(2)
-        + (right_eye[1] - left_eye[1]).powi(2))
-    .sqrt();
+    let inter_eye_distance =
+        ((right_eye[0] - left_eye[0]).powi(2) + (right_eye[1] - left_eye[1]).powi(2)).sqrt();
 
     let mut session = classifier.session.lock().ok()?;
     let mut probs = Vec::new();
@@ -201,6 +202,9 @@ mod tests {
     fn eye_input_tensor_has_the_shape_ocec_expects() {
         let image = DynamicImage::new_rgb8(64, 64);
         let tensor = eye_input_tensor(&image);
-        assert_eq!(tensor.shape(), &[1, 3, EYE_INPUT_HEIGHT as usize, EYE_INPUT_WIDTH as usize]);
+        assert_eq!(
+            tensor.shape(),
+            &[1, 3, EYE_INPUT_HEIGHT as usize, EYE_INPUT_WIDTH as usize]
+        );
     }
 }

@@ -454,6 +454,9 @@ pub async fn test_gemini_api_key(api_key: String) -> Result<String, String> {
     } else if response.status().as_u16() == 400 || response.status().as_u16() == 403 {
         Err("Gemini rejected this key - double check it was copied correctly.".to_string())
     } else {
-        Err(format!("Gemini returned an unexpected error (HTTP {})", response.status()))
+        Err(format!(
+            "Gemini returned an unexpected error (HTTP {})",
+            response.status()
+        ))
     }
 }

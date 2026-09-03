@@ -746,7 +746,10 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// subject. Fails open: if BioCLIP isn't installed, or a specific image
 /// can't be embedded, the hash-based grouping for that image is left as-is
 /// rather than losing a real duplicate to a transient failure.
-fn verify_duplicate_groups_with_bioclip(suggestions: &mut CullingSuggestions, app_handle: &AppHandle) {
+fn verify_duplicate_groups_with_bioclip(
+    suggestions: &mut CullingSuggestions,
+    app_handle: &AppHandle,
+) {
     let Ok(bioclip) = crate::tagging::load_bioclip_models(app_handle) else {
         return;
     };
