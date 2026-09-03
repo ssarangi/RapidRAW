@@ -39,6 +39,12 @@ pub struct DevelopOptions {
     /// Which sharpening algorithm `sharpen_amount` drives. See
     /// `raw_sharpen::SharpenMethod`.
     pub sharpen_method: crate::raw_sharpen::SharpenMethod,
+    /// Flat linear gain applied to the white-balanced, color-matrixed RGB
+    /// before highlight compression - 1.0 is a no-op. See
+    /// `estimate_exposure_gain`: this exists only to keep a severely
+    /// underexposed capture from rendering essentially black by default: a
+    /// normally- or deliberately-low-key-exposed shot always gets 1.0.
+    pub exposure_gain: f32,
 }
 
 impl Default for DevelopOptions {
@@ -48,21 +54,71 @@ impl Default for DevelopOptions {
             denoise_strength: 0.0,
             sharpen_amount: 0.0,
             sharpen_method: crate::raw_sharpen::SharpenMethod::UnsharpMask,
+            exposure_gain: 1.0,
         }
     }
 }
 
 impl DevelopOptions {
-    /// Auto-selected options for a given ISO, matching the same
-    /// "auto by ISO" pattern as `demosaic_algorithms::select_by_iso`.
-    pub fn auto_for_iso(iso: u32) -> Self {
+    /// Auto-selected options for a given (possibly exposure-gain-adjusted)
+    /// ISO, matching the same "auto by ISO" pattern as
+    /// `demosaic_algorithms::select_by_iso`. `effective_iso` should already
+    /// have `estimate_exposure_gain`'s boost folded in by the caller (see
+    /// `develop_raw_image_custom`/`develop_raw_image_custom_resolved`) -
+    /// denoise/sharpen strength need to react to the *post-boost* noise
+    /// level, not the camera's nominal ISO.
+    pub fn auto_for_iso(effective_iso: u32, exposure_gain: f32) -> Self {
         Self {
             preprocess: true,
-            denoise_strength: crate::raw_denoise::suggest_strength_for_iso(iso),
-            sharpen_amount: crate::raw_sharpen::suggest_amount_for_iso(iso),
+            denoise_strength: crate::raw_denoise::suggest_strength_for_iso(effective_iso),
+            sharpen_amount: crate::raw_sharpen::suggest_amount_for_iso(effective_iso),
             sharpen_method: crate::raw_sharpen::SharpenMethod::UnsharpMask,
+            exposure_gain,
         }
     }
+}
+
+/// Estimates a flat linear exposure gain for a severely underexposed
+/// capture, so it doesn't render essentially black by default - a
+/// deliberate, conservative "expose to the right"-style correction, not a
+/// general auto-exposure algorithm. A normally-exposed frame, or one that's
+/// genuinely dark by intent (a deliberate low-key/night shot with real
+/// content only in the shadows), is left at gain 1.0: the trigger is
+/// specifically "even the near-brightest real signal in the whole frame
+/// never got close to using the sensor's headroom," which a deliberately
+/// dark scene with a bright subject wouldn't hit.
+pub fn estimate_exposure_gain(sensor: &RawSensorData) -> f32 {
+    // Prime-ish stride so the sample doesn't alias with the 2x2 CFA tile -
+    // this only needs to be a fast, rough scene-brightness estimate (it
+    // informs a single scalar gain), not a precise per-channel histogram.
+    const STRIDE: usize = 7;
+    const TRIGGER_BELOW: f32 = 0.20;
+    const TARGET_PEAK: f32 = 0.7;
+    const MAX_GAIN: f32 = 8.0; // +3 stops
+
+    let black = sensor.black_level[1];
+    let denom = (sensor.white_level - black).max(1.0);
+
+    let mut samples: Vec<f32> = sensor
+        .data
+        .iter()
+        .step_by(STRIDE)
+        .map(|&v| ((v - black) / denom).max(0.0))
+        .collect();
+    if samples.len() < 100 {
+        return 1.0;
+    }
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let peak = samples[((samples.len() - 1) as f32 * 0.999) as usize];
+
+    // Below the noise floor entirely (lens cap, corrupt frame) - a huge
+    // gain here would just amplify noise into nothing meaningful. Also
+    // skip if already reasonably exposed.
+    if !(1e-4..TRIGGER_BELOW).contains(&peak) {
+        return 1.0;
+    }
+
+    (TARGET_PEAK / peak).clamp(1.0, MAX_GAIN)
 }
 
 /// Raw (pre-demosaic) sensor data plus everything needed to develop it,
@@ -399,18 +455,6 @@ fn apply_color_matrix(rgb: &mut [[f32; 3]], xyz_to_cam: &Matrix3<f32>) {
     });
 }
 
-/// Same as `apply_color_matrix`, but also applies sRGB gamma - used only by
-/// the standalone test-dump path below, which produces a display-ready
-/// image rather than the linear intermediate the live app pipeline expects.
-fn apply_color_matrix_and_gamma(rgb: &mut [[f32; 3]], xyz_to_cam: &Matrix3<f32>) {
-    apply_color_matrix(rgb, xyz_to_cam);
-    rgb.par_iter_mut().for_each(|px| {
-        px[0] = srgb_gamma(px[0]);
-        px[1] = srgb_gamma(px[1]);
-        px[2] = srgb_gamma(px[2]);
-    });
-}
-
 /// Production entry point: develops a RAW file into the same LINEAR,
 /// pre-tonemap `Rgba32F` intermediate that `raw_processing::develop_raw_image`
 /// produces (values scaled so ~1.0 is the white point, up to
@@ -431,8 +475,10 @@ pub fn develop_raw_image_custom(
             "not a standard Bayer CFA; custom pipeline not applicable"
         ));
     }
-    let algo = crate::demosaic_algorithms::select_by_iso(sensor.iso);
-    let options = DevelopOptions::auto_for_iso(sensor.iso);
+    let exposure_gain = estimate_exposure_gain(&sensor);
+    let effective_iso = ((sensor.iso as f32) * exposure_gain).round() as u32;
+    let algo = crate::demosaic_algorithms::select_by_iso(effective_iso);
+    let options = DevelopOptions::auto_for_iso(effective_iso, exposure_gain);
     develop_raw_image_custom_with_algorithm(file_bytes, algo, highlight_compression, &options)
 }
 
@@ -460,8 +506,11 @@ pub fn develop_raw_image_custom_resolved(
         ));
     }
 
+    let exposure_gain = estimate_exposure_gain(&sensor);
+    let effective_iso = ((sensor.iso as f32) * exposure_gain).round() as u32;
+
     let algo = match demosaic_override {
-        None | Some("auto") | Some("") => crate::demosaic_algorithms::select_by_iso(sensor.iso),
+        None | Some("auto") | Some("") => crate::demosaic_algorithms::select_by_iso(effective_iso),
         Some(name) => crate::demosaic_algorithms::parse_algorithm_name(name)
             .ok_or_else(|| anyhow!("unknown demosaic override '{name}'"))?,
     };
@@ -473,10 +522,11 @@ pub fn develop_raw_image_custom_resolved(
     let options = DevelopOptions {
         preprocess,
         denoise_strength: denoise_override
-            .unwrap_or_else(|| crate::raw_denoise::suggest_strength_for_iso(sensor.iso)),
+            .unwrap_or_else(|| crate::raw_denoise::suggest_strength_for_iso(effective_iso)),
         sharpen_amount: sharpen_override
-            .unwrap_or_else(|| crate::raw_sharpen::suggest_amount_for_iso(sensor.iso)),
+            .unwrap_or_else(|| crate::raw_sharpen::suggest_amount_for_iso(effective_iso)),
         sharpen_method,
+        exposure_gain,
     };
     develop_raw_image_custom_with_algorithm(file_bytes, algo, highlight_compression, &options)
 }
@@ -515,6 +565,20 @@ pub fn develop_raw_image_custom_with_algorithm(
     apply_white_balance(&mut rgb, &sensor);
     apply_color_matrix(&mut rgb, &sensor.xyz_to_cam);
     log::debug!("[raw develop timing] wb+colormatrix: {:?}", _t_wbcm.elapsed());
+
+    // Auto-exposure boost for severely underexposed captures (see
+    // `estimate_exposure_gain`) - applied here, before highlight
+    // compression, as a flat linear gain so the compression step still
+    // gets a chance to soften any highlights the boost pushes over 1.0.
+    // A no-op (1.0) for anything normally- or deliberately-exposed.
+    if options.exposure_gain != 1.0 {
+        let gain = options.exposure_gain;
+        rgb.par_iter_mut().for_each(|px| {
+            px[0] *= gain;
+            px[1] *= gain;
+            px[2] *= gain;
+        });
+    }
 
     // Mirrors raw_processing::develop_internal's rescale + highlight
     // compression: apply_white_balance already normalized by
@@ -647,7 +711,23 @@ pub fn develop_raw_custom_with_options(
 
     let mut rgb = crate::demosaic_algorithms::demosaic(&sensor, algo);
     apply_white_balance(&mut rgb, &sensor);
-    apply_color_matrix_and_gamma(&mut rgb, &sensor.xyz_to_cam);
+    apply_color_matrix(&mut rgb, &sensor.xyz_to_cam);
+    // Exposure gain must land here - after the (linear) color matrix, before
+    // gamma - not via `apply_color_matrix_and_gamma`, which would apply
+    // gamma first and make a linear multiply afterward meaningless.
+    if options.exposure_gain != 1.0 {
+        let gain = options.exposure_gain;
+        rgb.par_iter_mut().for_each(|px| {
+            px[0] *= gain;
+            px[1] *= gain;
+            px[2] *= gain;
+        });
+    }
+    rgb.par_iter_mut().for_each(|px| {
+        px[0] = srgb_gamma(px[0]);
+        px[1] = srgb_gamma(px[1]);
+        px[2] = srgb_gamma(px[2]);
+    });
 
     if options.denoise_strength > 0.0 {
         crate::raw_denoise::wavelet_denoise(

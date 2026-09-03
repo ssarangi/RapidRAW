@@ -1514,7 +1514,9 @@ fn run_raw_inspect_cli(arguments: &[String]) -> Result<serde_json::Value, String
     let bytes = fs::read(&input_path).map_err(|error| error.to_string())?;
     let sensor = rapidraw_lib::custom_raw_pipeline::decode_raw_sensor_data(&bytes)
         .map_err(|error| error.to_string())?;
-    let selected = rapidraw_lib::demosaic_algorithms::select_by_iso(sensor.iso);
+    let exposure_gain = rapidraw_lib::custom_raw_pipeline::estimate_exposure_gain(&sensor);
+    let effective_iso = ((sensor.iso as f32) * exposure_gain).round() as u32;
+    let selected = rapidraw_lib::demosaic_algorithms::select_by_iso(effective_iso);
     let pdaf_known = rapidraw_lib::raw_pdaf_data::lookup(&sensor.camera_name).is_some();
     Ok(json!({
         "width": sensor.width,
@@ -1527,6 +1529,8 @@ fn run_raw_inspect_cli(arguments: &[String]) -> Result<serde_json::Value, String
         "autoSelectedAlgorithm": rapidraw_lib::demosaic_algorithms::algorithm_name(selected),
         "cameraName": sensor.camera_name,
         "pdafPatternKnown": pdaf_known,
+        "exposureGain": exposure_gain,
+        "effectiveIso": effective_iso,
     }))
 }
 
@@ -1574,13 +1578,23 @@ fn run_raw_develop_cli(arguments: &[String]) -> Result<serde_json::Value, String
     let preprocess = !arguments
         .iter()
         .any(|argument| argument == "--no-preprocess");
+    let auto_exposure = !arguments
+        .iter()
+        .any(|argument| argument == "--no-auto-exposure");
 
     let bytes = fs::read(&input_path).map_err(|error| error.to_string())?;
     let sensor = rapidraw_lib::custom_raw_pipeline::decode_raw_sensor_data(&bytes)
         .map_err(|error| error.to_string())?;
 
+    let exposure_gain = if auto_exposure {
+        rapidraw_lib::custom_raw_pipeline::estimate_exposure_gain(&sensor)
+    } else {
+        1.0
+    };
+    let effective_iso = ((sensor.iso as f32) * exposure_gain).round() as u32;
+
     let algo = if demosaic_arg.eq_ignore_ascii_case("auto") {
-        rapidraw_lib::demosaic_algorithms::select_by_iso(sensor.iso)
+        rapidraw_lib::demosaic_algorithms::select_by_iso(effective_iso)
     } else {
         rapidraw_lib::demosaic_algorithms::parse_algorithm_name(&demosaic_arg).ok_or_else(|| {
             format!(
@@ -1605,11 +1619,11 @@ fn run_raw_develop_cli(arguments: &[String]) -> Result<serde_json::Value, String
     };
     let denoise_strength = parse_stage_arg(
         "--denoise",
-        rapidraw_lib::raw_denoise::suggest_strength_for_iso(sensor.iso),
+        rapidraw_lib::raw_denoise::suggest_strength_for_iso(effective_iso),
     )?;
     let sharpen_amount = parse_stage_arg(
         "--sharpen",
-        rapidraw_lib::raw_sharpen::suggest_amount_for_iso(sensor.iso),
+        rapidraw_lib::raw_sharpen::suggest_amount_for_iso(effective_iso),
     )?;
     let sharpen_method_arg = arguments
         .windows(2)
@@ -1625,6 +1639,7 @@ fn run_raw_develop_cli(arguments: &[String]) -> Result<serde_json::Value, String
         denoise_strength,
         sharpen_amount,
         sharpen_method,
+        exposure_gain,
     };
 
     let image = if linear_intermediate {
@@ -1681,6 +1696,8 @@ fn run_raw_develop_cli(arguments: &[String]) -> Result<serde_json::Value, String
         "iso": sensor.iso,
         "demosaic": rapidraw_lib::demosaic_algorithms::algorithm_name(algo),
         "linear": linear_intermediate,
+        "exposureGain": exposure_gain,
+        "effectiveIso": effective_iso,
     }))
 }
 

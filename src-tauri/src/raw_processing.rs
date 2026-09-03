@@ -368,14 +368,33 @@ pub fn get_fast_demosaic_scale_factor(
 /// Reads a RAW file's pixel dimensions via rawler's fast (non-demosaic) decode
 /// path - the same one used by `get_fast_demosaic_scale_factor` - so callers can
 /// learn the image's aspect ratio near-instantly, long before a full decode
-/// (which can take several seconds) completes. Dimensions are sensor-native and
-/// do not account for EXIF orientation, so a portrait/landscape mismatch is
-/// possible until the real decode result replaces this estimate.
+/// (which can take several seconds) completes. Swaps width/height for a 90/270
+/// EXIF orientation so the result matches what the real decode eventually
+/// produces (the real decode always ends with `apply_orientation`) - this used
+/// to be documented as a known sensor-native-only limitation, but once a
+/// caller actually renders a box sized from this result (rather than just
+/// using it for an early aspect-ratio guess that gets silently replaced), a
+/// portrait file reported as landscape stretches the on-screen image visibly,
+/// so it's worth getting right here too.
 pub fn get_fast_raw_dimensions(file_bytes: &[u8]) -> Option<(u32, u32)> {
     let source = RawSource::new_from_slice(file_bytes);
     let decoder = rawler::get_decoder(&source).ok()?;
     let raw_img = decoder
         .raw_image(&source, &RawDecodeParams::default(), true)
         .ok()?;
-    Some((raw_img.width as u32, raw_img.height as u32))
+    let (width, height) = (raw_img.width as u32, raw_img.height as u32);
+
+    let orientation = decoder
+        .raw_metadata(&source, &RawDecodeParams::default())
+        .ok()
+        .and_then(|metadata| metadata.exif.orientation)
+        .map(Orientation::from_u16)
+        .unwrap_or(Orientation::Normal);
+
+    match orientation {
+        Orientation::Rotate90 | Orientation::Rotate270 | Orientation::Transpose | Orientation::Transverse => {
+            Some((height, width))
+        }
+        _ => Some((width, height)),
+    }
 }

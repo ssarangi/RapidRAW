@@ -852,9 +852,11 @@ pub fn composite_patches_on_image(
 /// pattern `load_image` uses elsewhere) so a stale result - the user
 /// navigated to a different image, or changed the raw-develop settings again
 /// before this finished - is silently dropped rather than clobbering newer
-/// state. Shared by `load_image`'s initial "phase 2" upgrade and
-/// `reprocess_raw_develop`'s on-demand re-run when the user edits the RAW
-/// Develop panel.
+/// state. Used by `reprocess_raw_develop`'s on-demand re-run when the user
+/// edits the RAW Develop panel after the image is already loaded -
+/// `load_image` itself now decodes with the full pipeline directly and has
+/// no separate "phase 2" of its own (see the comment there for why the
+/// earlier two-phase approach was dropped).
 pub fn spawn_raw_develop_upgrade(
     app_handle: tauri::AppHandle,
     upgrade_path: String,
@@ -964,17 +966,15 @@ pub fn spawn_raw_develop_upgrade(
     });
 }
 
-/// On-demand counterpart to `load_image`'s phase-2 upgrade: called whenever
-/// the user edits the "Raw Develop" panel (demosaic algorithm, denoise/
-/// sharpen amount or method, preprocess toggle) on an already-loaded RAW
-/// image, so the change actually takes effect without requiring the user to
-/// re-select/reopen the image. Re-decodes in the background with the
-/// current in-editor `js_adjustments` (not the last-saved sidecar, which
-/// may be stale) and reuses the exact same generation-guarded swap-in +
-/// `"raw-develop-upgraded"` event the initial load's phase 2 uses, so the
-/// frontend's existing listener picks up either one identically. Bumping
-/// `load_image_generation` here also means a still-in-flight upgrade from a
-/// previous call (or from the initial load) is superseded rather than
+/// Called whenever the user edits the "Raw Develop" panel (demosaic
+/// algorithm, denoise/sharpen amount or method, preprocess toggle) on an
+/// already-loaded RAW image, so the change actually takes effect without
+/// requiring the user to re-select/reopen the image. Re-decodes in the
+/// background with the current in-editor `js_adjustments` (not the
+/// last-saved sidecar, which may be stale) via `spawn_raw_develop_upgrade`,
+/// emitting the same `"raw-develop-upgraded"` event `useImageProcessing.ts`
+/// already listens for. Bumping `load_image_generation` here also means a
+/// still-in-flight upgrade from a previous call is superseded rather than
 /// racing this one to clobber `original_image`.
 #[tauri::command]
 pub fn reprocess_raw_develop(
@@ -1087,11 +1087,7 @@ pub async fn load_image(
 
     let metadata: ImageMetadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
-    let settings = load_settings(app_handle.clone()).unwrap_or_default();
-    // Cloned so the original `settings` binding survives past this decode
-    // for the phase-2 background upgrade below - moved into the
-    // spawn_blocking closure instead of `settings` itself.
-    let settings_for_decode = settings.clone();
+    let settings_for_decode = load_settings(app_handle.clone()).unwrap_or_default();
 
     let path_clone = source_path_str.clone();
     let metadata_adjustments = metadata.adjustments.clone();
@@ -1125,19 +1121,27 @@ pub async fn load_image(
                             return Err("Load cancelled".to_string());
                         }
 
-                        // Phase 1 of the two-phase load: always the fast
-                        // rawler-PPG path (allow_custom_pipeline: false),
-                        // never our own slower AMaZE/IGV/LMMSE pipeline -
-                        // see the background upgrade spawned below, which
-                        // reruns this decode with allow_custom_pipeline:
-                        // true and swaps in the result once ready.
+                        // Decode directly with our own custom pipeline
+                        // (allow_custom_pipeline: true) - not a fast
+                        // rawler-PPG pass followed by a background upgrade.
+                        // That two-phase approach used to make sense when
+                        // the fast pass was the only thing on screen while
+                        // the slower pipeline ran, but now that the
+                        // embedded-preview thumbnail covers "something
+                        // visible immediately" on its own, decoding twice
+                        // was pure wasted work: the PPG pass was never
+                        // shown, just thrown away the moment this (slower)
+                        // decode finished. `reprocess_raw_develop` still
+                        // reuses the same background-upgrade path for
+                        // re-decoding on demand when the user changes RAW
+                        // Develop settings after this initial load.
                         let img = load_base_image_from_bytes(
                             &mmap,
                             &path_clone,
                             false,
                             &settings,
                             Some(&metadata_adjustments),
-                            false,
+                            true,
                             cancel_token.clone(),
                         )
                         .map_err(|e| e.to_string())?;
@@ -1158,14 +1162,14 @@ pub async fn load_image(
                             return Err("Load cancelled".to_string());
                         }
 
-                        // Phase 1, see comment above.
+                        // See the comment on the mmap branch above.
                         let img = load_base_image_from_bytes(
                             &bytes,
                             &path_clone,
                             false,
                             &settings,
                             Some(&metadata_adjustments),
-                            false,
+                            true,
                             cancel_token.clone(),
                         )
                         .map_err(|e| e.to_string())?;
@@ -1206,25 +1210,6 @@ pub async fn load_image(
         image: pristine_arc,
         is_raw,
     });
-
-    // Phase 2 of the two-phase load: phase 1 above always decoded with
-    // allow_custom_pipeline: false (fast rawler-PPG, full resolution) so
-    // this command returns quickly - our own AMaZE/IGV/LMMSE pipeline is
-    // meaningfully slower (denoise/sharpen especially) and isn't worth
-    // blocking first paint on. Re-decode with the full pipeline in the
-    // background and swap it in via the "raw-develop-upgraded" event once
-    // ready, so the editor updates in place rather than waiting on it.
-    if is_raw {
-        spawn_raw_develop_upgrade(
-            app_handle.clone(),
-            path.clone(),
-            source_path_str.clone(),
-            metadata.adjustments.clone(),
-            settings.clone(),
-            state.load_image_generation.clone(),
-            my_generation,
-        );
-    }
 
     Ok(LoadImageResult {
         width: orig_width,

@@ -614,3 +614,94 @@ now falls back to `originalSize` when `selectedImage.width/height` are
 placeholder gets a correct-aspect-ratio box to render into within
 whatever the fast dimensions probe takes (near-instant), not whatever the
 full RAW decode takes.
+
+## Added: default exposure boost for severely underexposed RAW captures
+
+Requested after the `_DSC9252.ARW` investigation above confirmed some
+files are genuinely, severely underexposed (not a decode bug) and the
+user wanted the app to compensate by default, the way ART/darktable's
+default auto-exposure/base-curve views already do.
+
+`custom_raw_pipeline::estimate_exposure_gain(sensor: &RawSensorData) -> f32`:
+samples the raw sensor data at a stride (fast, not a full per-pixel pass),
+computes the ~99.9th-percentile ("near-brightest real signal in the
+frame") black-subtracted/white-level-normalized brightness, and if it's
+below 20% of full range, computes a gain to bring it up to ~70%, clamped
+to a max of 8x (+3 stops). A normally-exposed file, or a deliberately
+low-key one with a bright subject (portrait against a dark background,
+say), won't trigger this - the metric is the frame's peak, not its
+median, specifically so a dark scene with real bright content isn't
+"corrected" away. Verified against `_DSC9252.ARW`: gain 4.39x (effective
+ISO 800 -> 3510), average rendered brightness moved from `(14, 10, 8)` to
+`(34, 25, 23)` - a real, visible recovery of a formerly near-black image.
+
+Wired into `DevelopOptions` as a new `exposure_gain: f32` field (1.0 =
+no-op default). `develop_raw_image_custom`/`develop_raw_image_custom_resolved`
+compute it right after decoding `sensor`, fold it into an `effective_iso`
+(`sensor.iso * exposure_gain`) used for `select_by_iso`/
+`suggest_strength_for_iso`/`suggest_amount_for_iso` instead of the
+camera's nominal ISO - denoise and sharpen need to react to the actual
+post-boost noise level, not the nominal ISO, since amplifying a dark
+signal amplifies its noise right along with it. Applied as a flat linear
+multiply on the white-balanced, color-matrixed RGB, *before* highlight
+compression (so newly-created highlights still get softened) - in
+`develop_raw_image_custom_with_algorithm` after `apply_color_matrix`, and
+in `develop_raw_custom_with_options` between `apply_color_matrix` and the
+manual gamma step (NOT via the old `apply_color_matrix_and_gamma` helper,
+which applied gamma first - multiplying gamma-encoded values by a linear
+gain is wrong; that helper was deleted, its one call site inlined). The
+CLI's `raw develop`/`raw inspect` commands also compute and report
+`exposureGain`/`effectiveIso`, and `raw develop` accepts `--no-auto-exposure`
+to disable it for comparison.
+
+**Also fixed while wiring the embedded-preview fix above into this**:
+`raw_processing::get_fast_raw_dimensions` (the fast, non-demosaic
+dimension probe used to size the embedded-preview placeholder before the
+real decode finishes) returned sensor-native width/height with no EXIF
+orientation applied - already documented as a known limitation in its own
+doc comment, but never actually hit until the embedded-preview 0x0 fix
+above made `originalSize` actually load-bearing for on-screen sizing. For
+a portrait file (`_DSC9252.ARW`, `Rotate270`) this stretched the
+placeholder into a landscape box - visibly wrong, not just an early
+estimate that gets silently replaced. Fixed to read the EXIF orientation
+and swap width/height for a 90/270-degree rotation, matching what
+`apply_orientation` does to the real decode result.
+
+## Changed: single-phase RAW load (the two-phase progressive load above was removed)
+
+Directly supersedes the "two-phase progressive load" fix documented
+above. That approach decoded twice: a fast rawler-PPG "phase 1" (so
+`load_image` returned quickly and something appeared on screen), then a
+slower "phase 2" with the real AMaZE/IGV/LMMSE + denoise/sharpen pipeline
+in the background, swapping in via `"raw-develop-upgraded"` once ready.
+
+Once the embedded-preview 0x0 bug (above) was fixed, this became visibly
+wrong in a different way: the user correctly pointed out that phase 1's
+result was never worth showing at all (the embedded-preview thumbnail
+already covers "something correct-looking on screen immediately" better
+than an un-boosted, un-denoised PPG decode does) - so decoding phase 1 at
+all was pure wasted work that only delayed how soon phase 2 could start
+(phase 2 previously only began *after* phase 1 returned). The user's own
+diagnosis: "why do we need to go through the PPG route if we are not
+doing Phase 1 \[i.e. not showing it\] - rendering the RAW as fast as
+possible and just doing the PPG and then not using it sounds like a
+waste."
+
+**Fix**: `image_loader::load_image` now decodes RAW files directly with
+`allow_custom_pipeline: true` - one decode, no separate background
+upgrade for the initial load. Both call sites (the mmap path and its
+fallback plain-`fs::read` path) changed from `false` to `true`; the
+phase-2 `spawn_raw_develop_upgrade` call that used to follow the decode
+was deleted from `load_image` entirely. The command now simply takes as
+long as the real pipeline takes (the user is looking at the embedded
+preview during that time regardless, so there's nothing to gain by
+returning early with a result nobody sees).
+
+`spawn_raw_develop_upgrade` (the background-thread decode-and-swap-in
+helper) and the `reprocess_raw_develop` command built on it are
+unchanged and still used - just no longer by `load_image`'s initial load.
+They're still exactly what's needed when the user edits the RAW Develop
+panel's settings *after* an image is already open, which is a genuinely
+different situation (an image is already on screen and correct; a
+background re-decode-and-swap is the right shape there, unlike at initial
+load where nothing correct is on screen yet to preserve).
