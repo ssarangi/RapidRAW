@@ -3,9 +3,14 @@ use std::fs;
 use std::path::PathBuf;
 
 use rapidraw_lib::BackgroundJobControl;
-use rapidraw_lib::face_detection::{run_face_detection_headless, run_face_recognition_headless};
-use rapidraw_lib::face_model_registry::installed_face_model_path_in_dir;
-use rapidraw_lib::face_model_registry::{InstalledFaceModelPack, face_model_packs};
+use rapidraw_lib::face_detection::{
+    run_face_detection_headless_for_pack, run_face_recognition_headless_for_pack,
+};
+use rapidraw_lib::face_model_registry::{
+    FaceModelPackId, FaceModelRuntimeSupport, FaceModelSelectionPolicy, InstalledFaceModelPack,
+    face_model_packs, installed_face_runtime_paths_for_pack_in_dir,
+    installed_face_runtime_paths_in_dir, runtime_file_names,
+};
 use rapidraw_lib::image_restoration::{
     RestorationRecipe, run_restoration_worker, validate_restoration_recipe,
 };
@@ -58,6 +63,50 @@ fn optional_numeric_argument(arguments: &[String], flag: &str) -> Result<Option<
                 .map_err(|_| format!("{flag} must be an integer"))
         })
         .transpose()
+}
+
+fn optional_face_model_policy(arguments: &[String]) -> Result<FaceModelSelectionPolicy, String> {
+    let Some(index) = arguments.iter().position(|argument| argument == "--policy") else {
+        return Ok(FaceModelSelectionPolicy::Accuracy);
+    };
+    let value = arguments
+        .get(index + 1)
+        .ok_or_else(|| "Missing value for --policy".to_string())?;
+    match value.as_str() {
+        "accuracy" => Ok(FaceModelSelectionPolicy::Accuracy),
+        "balanced" => Ok(FaceModelSelectionPolicy::Balanced),
+        "speed" => Ok(FaceModelSelectionPolicy::Speed),
+        "automatic" => Ok(FaceModelSelectionPolicy::Automatic),
+        _ => Err("--policy must be accuracy, balanced, speed, or automatic".to_string()),
+    }
+}
+
+fn optional_face_model_pack(arguments: &[String]) -> Result<Option<FaceModelPackId>, String> {
+    let Some(index) = arguments.iter().position(|argument| argument == "--pack") else {
+        return Ok(None);
+    };
+    let value = arguments
+        .get(index + 1)
+        .ok_or_else(|| "Missing value for --pack".to_string())?;
+    FaceModelPackId::try_from(value.as_str()).map(Some)
+}
+
+fn resolve_face_runtime_for_cli(
+    arguments: &[String],
+    face_models_dir: &std::path::Path,
+) -> Result<rapidraw_lib::face_model_registry::FaceRuntimePaths, String> {
+    let pack = optional_face_model_pack(arguments)?;
+    let has_policy = arguments.iter().any(|argument| argument == "--policy");
+    if pack.is_some() && has_policy {
+        return Err("Use either --pack or --policy, not both".to_string());
+    }
+    match pack {
+        Some(pack_id) => installed_face_runtime_paths_for_pack_in_dir(face_models_dir, pack_id),
+        None => installed_face_runtime_paths_in_dir(
+            face_models_dir,
+            optional_face_model_policy(arguments)?,
+        ),
+    }
 }
 
 fn exit_code_for_error(error: &str) -> i32 {
@@ -117,7 +166,7 @@ fn main() {
         Some("restore") if arguments.get(1).map(String::as_str) == Some("run") => run_restore_cli(&arguments),
         Some("raw") if arguments.get(1).map(String::as_str) == Some("develop") => run_raw_develop_cli(&arguments),
         Some("raw") if arguments.get(1).map(String::as_str) == Some("inspect") => run_raw_inspect_cli(&arguments),
-        _ => Err("Usage: rapidraw-cli library create --name <name> --database <catalog.db> | rapidraw-cli library open --database <catalog.db> | rapidraw-cli library add-root --database <catalog.db> --path <folder> [--label <name>] | rapidraw-cli library remove-root --database <catalog.db> --root <id> | rapidraw-cli library inspect|roots|metrics|scan|thumbnails|metadata --database <catalog.db> | rapidraw-cli library scan --database <catalog.db> --root <id> [--non-recursive] | rapidraw-cli library thumbnails --database <catalog.db> [--root <id>] [--force] | rapidraw-cli library metadata --database <catalog.db> [--root <id>] | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli faces detect|recognize --database <catalog.db> --face-models-dir <models/face> [--root <id>] | rapidraw-cli people list|images --database <catalog.db> | rapidraw-cli people images --database <catalog.db> --person <id> | rapidraw-cli tags status|top|export-suggestions|review|run --database <catalog.db> | rapidraw-cli tags review --database <catalog.db> --id <rowid> --state accepted|rejected | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli species list|review --database <catalog.db> | rapidraw-cli species review --database <catalog.db> --id <id> --state accepted|rejected | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions|decisions|analyze --database <catalog.db> | rapidraw-cli cull analyze --database <catalog.db> --root <id> [--similarity-threshold <n>] [--blur-threshold <n>] | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>] | rapidraw-cli raw inspect --input <file.raw> | rapidraw-cli raw develop --input <file.raw> --output <file.png> [--demosaic auto|amaze|igv|lmmse|bilinear] [--denoise auto|<0-1>] [--sharpen auto|<0-1>] [--sharpen-method unsharp|rld] [--no-preprocess] [--highlight-compression <f32>] [--linear]".to_string()),
+        _ => Err("Usage: rapidraw-cli library create --name <name> --database <catalog.db> | rapidraw-cli library open --database <catalog.db> | rapidraw-cli library add-root --database <catalog.db> --path <folder> [--label <name>] | rapidraw-cli library remove-root --database <catalog.db> --root <id> | rapidraw-cli library inspect|roots|metrics|scan|thumbnails|metadata --database <catalog.db> | rapidraw-cli library scan --database <catalog.db> --root <id> [--non-recursive] | rapidraw-cli library thumbnails --database <catalog.db> [--root <id>] [--force] | rapidraw-cli library metadata --database <catalog.db> [--root <id>] | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli faces detect|recognize --database <catalog.db> --face-models-dir <models/face> [--root <id>] [--policy accuracy|balanced|speed|automatic | --pack <pack-id>] | rapidraw-cli people list|images --database <catalog.db> | rapidraw-cli people images --database <catalog.db> --person <id> | rapidraw-cli tags status|top|export-suggestions|review|run --database <catalog.db> | rapidraw-cli tags review --database <catalog.db> --id <rowid> --state accepted|rejected | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli species list|review --database <catalog.db> | rapidraw-cli species review --database <catalog.db> --id <id> --state accepted|rejected | rapidraw-cli collections list|show --database <catalog.db> | rapidraw-cli cull sessions|decisions|analyze --database <catalog.db> | rapidraw-cli cull analyze --database <catalog.db> --root <id> [--similarity-threshold <n>] [--blur-threshold <n>] | rapidraw-cli models list|info|verify | rapidraw-cli restore list|run --database <catalog.db> | rapidraw-cli raw inspect|develop".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -662,21 +711,19 @@ fn run_face_detection_cli(arguments: &[String]) -> Result<serde_json::Value, Str
     let db_path = database_argument(arguments)?;
     let face_models_dir = PathBuf::from(named_argument(arguments, "--face-models-dir")?);
     let root_id = optional_numeric_argument(arguments, "--root")?;
-    let model_path = installed_face_model_path_in_dir(
-        &face_models_dir,
-        "opencv-yunet-sface",
-        "face_detection_yunet_2023mar.onnx",
-    )?;
+    let policy = optional_face_model_policy(arguments)?;
+    let runtime = resolve_face_runtime_for_cli(arguments, &face_models_dir)?;
     let job_id = rapidraw_lib::create_background_job(
         &db_path,
         "face_detection",
-        json!({ "rootId": root_id, "modelPackId": "opencv-yunet-sface", "headless": true }),
+        json!({ "rootId": root_id, "modelPackId": runtime.pack_id.as_str(), "policy": policy, "headless": true }),
     )?;
     let control = BackgroundJobControl::new();
-    if let Err(error) = run_face_detection_headless(
+    if let Err(error) = run_face_detection_headless_for_pack(
         &db_path,
         root_id,
-        &model_path,
+        runtime.pack_id.as_str(),
+        &runtime.detector,
         &job_id,
         &control,
         Arc::new(tokio::sync::Semaphore::new(1)),
@@ -697,21 +744,19 @@ fn run_face_recognition_cli(arguments: &[String]) -> Result<serde_json::Value, S
     let db_path = database_argument(arguments)?;
     let face_models_dir = PathBuf::from(named_argument(arguments, "--face-models-dir")?);
     let root_id = optional_numeric_argument(arguments, "--root")?;
-    let model_path = installed_face_model_path_in_dir(
-        &face_models_dir,
-        "opencv-yunet-sface",
-        "face_recognition_sface_2021dec.onnx",
-    )?;
+    let policy = optional_face_model_policy(arguments)?;
+    let runtime = resolve_face_runtime_for_cli(arguments, &face_models_dir)?;
     let job_id = rapidraw_lib::create_background_job(
         &db_path,
         "face_recognition",
-        json!({ "rootId": root_id, "modelPackId": "opencv-yunet-sface", "headless": true }),
+        json!({ "rootId": root_id, "modelPackId": runtime.pack_id.as_str(), "policy": policy, "headless": true }),
     )?;
     let control = BackgroundJobControl::new();
-    if let Err(error) = run_face_recognition_headless(
+    if let Err(error) = run_face_recognition_headless_for_pack(
         &db_path,
         root_id,
-        &model_path,
+        runtime.pack_id.as_str(),
+        &runtime.recognizer,
         &job_id,
         &control,
         Arc::new(tokio::sync::Semaphore::new(1)),
@@ -1195,7 +1240,7 @@ fn verify_model(arguments: &[String]) -> Result<serde_json::Value, String> {
             "displayName": pack.display_name,
             "detector": pack.detector,
             "recognizer": pack.recognizer,
-            "runnable": pack.id == "opencv-yunet-sface",
+            "runnable": pack.runtime_support == FaceModelRuntimeSupport::Supported,
             "license": pack.license_name,
             "sourceUrl": pack.model_source_url,
         })),
@@ -1244,15 +1289,17 @@ fn verify_visual_runtime(directory: &std::path::Path, model_id: &str) -> Result<
 }
 
 fn verify_face_runtime(directory: &std::path::Path, model_id: &str) -> Result<(), String> {
-    if model_id != "opencv-yunet-sface" {
-        return Err("No runtime adapter is available in this build".to_string());
-    }
-    for model_name in [
-        "face_detection_yunet_2023mar.onnx",
-        "face_recognition_sface_2021dec.onnx",
-    ] {
+    let (detector, recognizer) = runtime_file_names(FaceModelPackId::try_from(model_id)?);
+    for model_name in [detector, recognizer] {
+        let model_path = directory.join(model_name);
+        if !model_path.is_file() {
+            return Err(format!(
+                "{model_name} is not installed in {}",
+                directory.display()
+            ));
+        }
         ort::session::Session::builder()
-            .and_then(|builder| builder.commit_from_file(directory.join(model_name)))
+            .and_then(|builder| builder.commit_from_file(&model_path))
             .map_err(|error| format!("{model_name} could not create an ONNX session: {error}"))?;
     }
     Ok(())
@@ -1639,7 +1686,10 @@ fn run_raw_develop_cli(arguments: &[String]) -> Result<serde_json::Value, String
 
 #[cfg(test)]
 mod tests {
-    use super::{exit_code_for_error, verify_face_runtime, verify_visual_runtime};
+    use super::{
+        exit_code_for_error, optional_face_model_pack, verify_face_runtime, verify_visual_runtime,
+    };
+    use rapidraw_lib::face_model_registry::FaceModelPackId;
     use std::path::Path;
 
     #[test]
@@ -1650,13 +1700,42 @@ mod tests {
     }
 
     #[test]
+    fn explicit_face_pack_arguments_are_typed_and_reject_unknown_ids() {
+        let arguments = vec![
+            "faces".to_string(),
+            "detect".to_string(),
+            "--pack".to_string(),
+            FaceModelPackId::InsightFaceAntelopeV2.as_str().to_string(),
+        ];
+        assert_eq!(
+            optional_face_model_pack(&arguments).unwrap(),
+            Some(FaceModelPackId::InsightFaceAntelopeV2)
+        );
+        assert!(
+            optional_face_model_pack(&[
+                "faces".to_string(),
+                "detect".to_string(),
+                "--pack".to_string(),
+                "not-a-face-pack".to_string(),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
     fn visual_runtime_verification_never_claims_unknown_models_are_runnable() {
         assert!(verify_visual_runtime(Path::new("/tmp"), "unknown-model").is_err());
     }
 
     #[test]
     fn face_runtime_verification_never_claims_conversion_packs_are_runnable() {
-        assert!(verify_face_runtime(Path::new("/tmp"), "insightface-buffalo-sc").is_err());
+        assert!(
+            verify_face_runtime(
+                Path::new("/tmp"),
+                FaceModelPackId::InsightFaceBuffaloSc.as_str()
+            )
+            .is_err()
+        );
     }
 
     #[test]

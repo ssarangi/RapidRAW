@@ -16,7 +16,7 @@ use crate::file_management::{ImageFile, parse_virtual_path};
 use crate::file_management::{assign_group_ids, read_file_mapped};
 use crate::formats::{is_raw_file, is_supported_image_file};
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 13;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +25,14 @@ pub struct LibraryInfo {
     pub name: String,
     pub db_path: String,
     pub schema_version: i64,
+}
+
+/// The user-facing face-processing preference belongs to the catalog, not an
+/// individual import. This keeps one consistent embedding space per catalog.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogFaceProcessingSettings {
+    pub face_model_policy: crate::face_model_registry::FaceModelSelectionPolicy,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -260,6 +268,8 @@ pub struct CatalogFace {
     pub image_id: i64,
     pub person_id: Option<i64>,
     pub model_pack_id: String,
+    pub detector_model_id: String,
+    pub recognizer_model_id: Option<String>,
     pub confidence: f64,
     pub x: f64,
     pub y: f64,
@@ -452,7 +462,9 @@ pub fn find_active_model_download_job(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
     for (id, payload_json) in rows {
-        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload_json) else { continue };
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload_json) else {
+            continue;
+        };
         if payload.get("registry").and_then(|v| v.as_str()) == Some(registry)
             && payload.get("packId").and_then(|v| v.as_str()) == Some(pack_id)
         {
@@ -578,6 +590,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS libraries (
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
+          face_model_policy TEXT NOT NULL DEFAULT 'accuracy',
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
           app_version TEXT
@@ -700,6 +713,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS face_embeddings (
           id INTEGER PRIMARY KEY,
           model_pack_id TEXT NOT NULL,
+          recognizer_model_id TEXT NOT NULL,
           dimensions INTEGER NOT NULL CHECK(dimensions > 0),
           vector BLOB NOT NULL,
           norm REAL,
@@ -712,6 +726,8 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
           embedding_id INTEGER REFERENCES face_embeddings(id) ON DELETE SET NULL,
           model_pack_id TEXT NOT NULL,
+          detector_model_id TEXT NOT NULL,
+          recognizer_model_id TEXT,
           detector_confidence REAL NOT NULL,
           bbox_x REAL NOT NULL CHECK(bbox_x >= 0 AND bbox_x <= 1),
           bbox_y REAL NOT NULL CHECK(bbox_y >= 0 AND bbox_y <= 1),
@@ -945,6 +961,20 @@ fn migrate(conn: &Connection) -> Result<(), String> {
 
     let _ = conn.execute("ALTER TABLE faces ADD COLUMN thumbnail_jpeg BLOB", []);
     let _ = conn.execute(
+        "ALTER TABLE faces ADD COLUMN detector_model_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE faces ADD COLUMN recognizer_model_id TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE face_embeddings ADD COLUMN recognizer_model_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE libraries ADD COLUMN face_model_policy TEXT NOT NULL DEFAULT 'accuracy'",
+        [],
+    );
+    backfill_face_model_provenance(conn)?;
+    let _ = conn.execute(
         "ALTER TABLE cull_decisions ADD COLUMN factors_json TEXT NOT NULL DEFAULT '[]'",
         [],
     );
@@ -958,6 +988,35 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         params![SCHEMA_VERSION, now_secs()],
     )
     .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Backfill the explicit detector/recognizer audit fields for catalogs made
+/// before face-model packs were recorded as a pair. Unknown legacy IDs are
+/// deliberately left untouched rather than guessed.
+fn backfill_face_model_provenance(conn: &Connection) -> Result<(), String> {
+    for pack in crate::face_model_registry::FaceModelPackId::ALL {
+        conn.execute(
+            "UPDATE faces
+             SET detector_model_id = CASE
+                   WHEN detector_model_id = '' THEN ?1 ELSE detector_model_id END,
+                 recognizer_model_id = COALESCE(recognizer_model_id, ?2)
+             WHERE model_pack_id = ?3",
+            [
+                pack.detector_model_id(),
+                pack.recognizer_model_id(),
+                pack.as_str(),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        conn.execute(
+            "UPDATE face_embeddings
+             SET recognizer_model_id = ?1
+             WHERE model_pack_id = ?2 AND recognizer_model_id = ''",
+            [pack.recognizer_model_id(), pack.as_str()],
+        )
+        .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -1148,11 +1207,13 @@ mod tests {
         );
         assert_eq!(
             parse_model_download_retry_payload(&serde_json::json!({
-                "packId": "opencv-yunet-sface"
+                "packId": crate::face_model_registry::FaceModelPackId::YuNetSFace.as_str()
             }))
             .unwrap(),
             ModelDownloadRetryTarget::Face {
-                pack_id: "opencv-yunet-sface".to_string()
+                pack_id: crate::face_model_registry::FaceModelPackId::YuNetSFace
+                    .as_str()
+                    .to_string()
             }
         );
         assert_eq!(
@@ -1257,11 +1318,59 @@ mod tests {
 
         let error = connection
             .execute(
-                "INSERT INTO faces(image_id, model_pack_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, created_at, updated_at) VALUES(1, 'test', 0.9, 1.1, 0.1, 0.2, 0.2, 0, 0)",
+                "INSERT INTO faces(image_id, model_pack_id, detector_model_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, created_at, updated_at) VALUES(1, 'test', 'test-detector', 0.9, 1.1, 0.1, 0.2, 0.2, 0, 0)",
                 [],
             )
             .unwrap_err();
         assert!(error.to_string().contains("CHECK constraint failed"));
+    }
+
+    #[test]
+    fn catalog_persists_its_face_processing_mode() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("catalog.db");
+        create_library_headless("Archive", &db_path).unwrap();
+        assert_eq!(
+            face_model_policy_for_database(&db_path).unwrap(),
+            crate::face_model_registry::FaceModelSelectionPolicy::Accuracy
+        );
+
+        let connection = open_connection(&db_path).unwrap();
+        connection
+            .execute("UPDATE libraries SET face_model_policy = 'speed'", [])
+            .unwrap();
+        assert_eq!(
+            face_model_policy_for_database(&db_path).unwrap(),
+            crate::face_model_registry::FaceModelSelectionPolicy::Speed
+        );
+    }
+
+    #[test]
+    fn face_schema_records_the_detector_and_paired_recognizer() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrate(&connection).unwrap();
+        insert_test_image(&connection);
+        let pack = crate::face_model_registry::FaceModelPackId::InsightFaceAntelopeV2;
+        connection
+            .execute(
+                "INSERT INTO faces(image_id, model_pack_id, detector_model_id, recognizer_model_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, created_at, updated_at) VALUES(1, ?1, ?2, ?3, 0.9, 0.1, 0.1, 0.2, 0.2, 0, 0)",
+                [
+                    pack.as_str(),
+                    pack.detector_model_id(),
+                    pack.recognizer_model_id(),
+                ],
+            )
+            .unwrap();
+        let provenance: (String, String, Option<String>) = connection
+            .query_row(
+                "SELECT model_pack_id, detector_model_id, recognizer_model_id FROM faces LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(provenance.0, pack.as_str());
+        assert_eq!(provenance.1, pack.detector_model_id());
+        assert_eq!(provenance.2.as_deref(), Some(pack.recognizer_model_id()));
     }
 
     #[test]
@@ -1277,8 +1386,12 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO faces(image_id, person_id, model_pack_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, review_state, created_at, updated_at) VALUES(1, 1, 'opencv-yunet-sface', 0.9, 0.1, 0.1, 0.2, 0.2, 'confirmed', 0, 0)",
-                [],
+                "INSERT INTO faces(image_id, person_id, model_pack_id, detector_model_id, recognizer_model_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, review_state, created_at, updated_at) VALUES(1, 1, ?1, ?2, ?3, 0.9, 0.1, 0.1, 0.2, 0.2, 'confirmed', 0, 0)",
+                [
+                    crate::face_model_registry::FaceModelPackId::YuNetSFace.as_str(),
+                    crate::face_model_registry::FaceModelPackId::YuNetSFace.detector_model_id(),
+                    crate::face_model_registry::FaceModelPackId::YuNetSFace.recognizer_model_id(),
+                ],
             )
             .unwrap();
 
@@ -1552,8 +1665,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
         drop(connection);
 
@@ -1568,7 +1691,8 @@ mod tests {
             |_cur, _tot, _path| {
                 progress_calls += 1;
             },
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(report.total, 1);
         assert_eq!(report.generated, 1);
@@ -1587,8 +1711,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
         drop(connection);
 
@@ -1623,8 +1757,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
         drop(connection);
 
@@ -1658,10 +1802,10 @@ mod tests {
         let mut data = Vec::new();
         // Header (8 bytes): "II" (little endian), magic 42, offset to IFD0 = 8
         data.extend_from_slice(b"II\x2a\x00\x08\x00\x00\x00");
-        
+
         let num_entries: u16 = 3;
         data.extend_from_slice(&num_entries.to_le_bytes());
-        
+
         let offset_to_jpeg = (8 + 2 + 12 * 3 + 4) as u32;
         let len_of_jpeg = jpeg_bytes.len() as u32;
 
@@ -1705,7 +1849,9 @@ mod tests {
         let sample = image::RgbImage::new(800, 600);
         let mut jpeg_bytes = Vec::new();
         let mut cursor = std::io::Cursor::new(&mut jpeg_bytes);
-        sample.write_to(&mut cursor, image::ImageFormat::Jpeg).unwrap();
+        sample
+            .write_to(&mut cursor, image::ImageFormat::Jpeg)
+            .unwrap();
 
         let tiff_dng_bytes = create_test_tiff_with_embedded_jpeg(&jpeg_bytes);
         fs::write(&raw_path, &tiff_dng_bytes).unwrap();
@@ -1713,8 +1859,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.dng', 'photo.dng', 0, 0, 0, 'present')", []).unwrap();
         drop(connection);
 
@@ -1726,7 +1882,8 @@ mod tests {
             false,
             control,
             |_cur, _tot, _path| {},
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(report.total, 1);
         assert_eq!(report.generated, 1);
@@ -1757,8 +1914,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'valid.jpg', 'valid.jpg', 0, 0, 0, 'present')", []).unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(2, 1, 1, 'corrupt.jpg', 'corrupt.jpg', 0, 0, 0, 'present')", []).unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(3, 1, 1, 'missing.jpg', 'missing.jpg', 0, 0, 0, 'present')", []).unwrap();
@@ -1772,7 +1939,8 @@ mod tests {
             false,
             control,
             |_cur, _tot, _path| {},
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(report.total, 3);
         assert_eq!(report.generated, 1);
@@ -1795,8 +1963,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
         connection.execute("INSERT INTO image_versions(id, image_id, copy_id, display_name, sidecar_path, rating, is_edited, created_at, updated_at) VALUES(1, 1, '', 'photo.jpg', '', 0, 0, 0, 0)", []).unwrap();
         drop(connection);
@@ -1811,7 +1989,8 @@ mod tests {
             |_cur, _tot, _path| {
                 progress_calls += 1;
             },
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(report.total, 1);
         assert_eq!(report.processed, 1);
@@ -1829,8 +2008,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
         drop(connection);
 
@@ -1863,8 +2052,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
         connection.execute("INSERT INTO image_versions(id, image_id, copy_id, display_name, sidecar_path, rating, is_edited, created_at, updated_at) VALUES(1, 1, '', 'photo.jpg', '', 0, 0, 0, 0)", []).unwrap();
         drop(connection);
@@ -1908,8 +2107,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         // Insert image but omit image_versions row to cause query_row failure during transaction
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo.jpg', 'photo.jpg', 0, 0, 0, 'present')", []).unwrap();
         drop(connection);
@@ -1923,7 +2132,10 @@ mod tests {
             |_cur, _tot, _path| {},
         );
 
-        assert!(result.is_err(), "Expected transaction to fail when version row is missing");
+        assert!(
+            result.is_err(),
+            "Expected transaction to fail when version row is missing"
+        );
         assert!(result.unwrap_err().contains("Failed to query version id"));
     }
 
@@ -1949,8 +2161,18 @@ mod tests {
         let connection = open_connection(&db_path).unwrap();
         migrate(&connection).unwrap();
         connection.execute("INSERT INTO libraries(id, name, created_at, updated_at) VALUES('lib', 'Test', 0, 0)", []).unwrap();
-        connection.execute("INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)", [photos_dir.to_str().unwrap()]).unwrap();
-        connection.execute("INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO collection_roots(id, library_id, absolute_path) VALUES(1, 'lib', ?1)",
+                [photos_dir.to_str().unwrap()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO folders(id, root_id, relative_path, name) VALUES(1, 1, '', 'photos')",
+                [],
+            )
+            .unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(1, 1, 1, 'photo1.jpg', 'photo1.jpg', 0, 0, 0, 'present')", []).unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(2, 1, 1, 'photo2.jpg', 'photo2.jpg', 0, 0, 0, 'present')", []).unwrap();
         connection.execute("INSERT INTO images(id, root_id, folder_id, file_name, relative_path, modified_at, imported_at, updated_at, status) VALUES(3, 1, 1, 'photo3.jpg', 'photo3.jpg', 0, 0, 0, 'present')", []).unwrap();
@@ -1958,7 +2180,12 @@ mod tests {
         connection.execute("INSERT INTO image_versions(id, image_id, copy_id, display_name, sidecar_path, rating, is_edited, created_at, updated_at) VALUES(1, 1, '', 'photo1.jpg', '', 0, 0, 0, 0)", []).unwrap();
         drop(connection);
 
-        let job_id = create_background_job(&db_path, "metadata_extraction", serde_json::json!({ "rootId": 1 })).unwrap();
+        let job_id = create_background_job(
+            &db_path,
+            "metadata_extraction",
+            serde_json::json!({ "rootId": 1 }),
+        )
+        .unwrap();
         let control = crate::app_state::BackgroundJobControl::new();
 
         let progress_db = db_path.clone();
@@ -2002,7 +2229,8 @@ mod tests {
             total,
             current_item.as_deref(),
             Some(&err_msg),
-        ).unwrap();
+        )
+        .unwrap();
 
         let (state, current, total, current_item, error): (String, i64, i64, Option<String>, Option<String>) = conn.query_row(
             "SELECT state, current, total, current_item, error FROM background_jobs WHERE id = ?1",
@@ -2024,8 +2252,20 @@ mod tests {
         connection.execute("INSERT INTO background_jobs(id, kind, state, payload_json, message, created_at, updated_at) VALUES('meta-job', 'metadata_extraction', 'paused', '{\"rootId\": 1}', 'Extracting metadata', 0, 0)", []).unwrap();
         recover_interrupted_jobs(&connection).unwrap();
 
-        let thumb_state: String = connection.query_row("SELECT state FROM background_jobs WHERE id = 'thumb-job'", [], |row| row.get(0)).unwrap();
-        let meta_state: String = connection.query_row("SELECT state FROM background_jobs WHERE id = 'meta-job'", [], |row| row.get(0)).unwrap();
+        let thumb_state: String = connection
+            .query_row(
+                "SELECT state FROM background_jobs WHERE id = 'thumb-job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let meta_state: String = connection
+            .query_row(
+                "SELECT state FROM background_jobs WHERE id = 'meta-job'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(thumb_state, "failed");
         assert_eq!(meta_state, "failed");
     }
@@ -2238,6 +2478,70 @@ pub fn close_library(state: tauri::State<'_, crate::AppState>) -> Result<(), Str
     Ok(())
 }
 
+pub fn face_model_policy_for_database(
+    db_path: &Path,
+) -> Result<crate::face_model_registry::FaceModelSelectionPolicy, String> {
+    let conn = open_connection(db_path)?;
+    let value: String = conn
+        .query_row(
+            "SELECT face_model_policy FROM libraries LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    crate::face_model_registry::FaceModelSelectionPolicy::try_from(value.as_str()).or(Ok(
+        crate::face_model_registry::FaceModelSelectionPolicy::Accuracy,
+    ))
+}
+
+#[tauri::command]
+pub fn get_catalog_face_processing_settings(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<CatalogFaceProcessingSettings, String> {
+    let db_path = active_library_path(&state)?;
+    Ok(CatalogFaceProcessingSettings {
+        face_model_policy: face_model_policy_for_database(&db_path)?,
+    })
+}
+
+#[tauri::command]
+pub fn set_catalog_face_processing_settings(
+    policy: crate::face_model_registry::FaceModelSelectionPolicy,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<CatalogFaceProcessingSettings, String> {
+    let db_path = active_library_path(&state)?;
+    let conn = open_connection(&db_path)?;
+    conn.execute(
+        "UPDATE libraries SET face_model_policy = ?1, updated_at = ?2",
+        params![policy.as_str(), now_secs()],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(CatalogFaceProcessingSettings {
+        face_model_policy: policy,
+    })
+}
+
+/// Remove derived face data while retaining the photographer's catalog,
+/// roots, images, and named people. This is deliberately only called from a
+/// user-initiated full reindex after changing the catalog processing mode.
+pub fn clear_face_index(db_path: &Path) -> Result<(), String> {
+    let mut conn = open_connection(db_path)?;
+    let transaction = conn.transaction().map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM face_clusters", [])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM faces", [])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM face_embeddings", [])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM face_scan_state", [])
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
+}
+
 /// Reconciles catalog paths after RapidRAW moves files within a collection root.
 /// The image row is retained, preserving ratings, tags, faces, AI results, and
 /// culling history instead of requiring a subsequent full catalog scan.
@@ -2391,7 +2695,10 @@ pub fn remove_library_root(
     let db_path = active_library_path(&state)?;
     let conn = open_connection(&db_path)?;
     let changed = conn
-        .execute("DELETE FROM collection_roots WHERE id = ?1", params![root_id])
+        .execute(
+            "DELETE FROM collection_roots WHERE id = ?1",
+            params![root_id],
+        )
         .map_err(|e| e.to_string())?;
     if changed == 0 {
         return Err("Collection root was not found".to_string());
@@ -3386,9 +3693,10 @@ pub fn start_catalog_scan(
                 if settings.enable_ai_tagging.unwrap_or(false) {
                     let tagging_app_handle = app_for_task.clone();
                     let tagging_state = tagging_app_handle.state::<crate::AppState>();
-                    if let Err(error) =
-                        crate::tagging::start_catalog_ram_plus_tagging(tagging_app_handle.clone(), tagging_state)
-                    {
+                    if let Err(error) = crate::tagging::start_catalog_ram_plus_tagging(
+                        tagging_app_handle.clone(),
+                        tagging_state,
+                    ) {
                         eprintln!("Failed to auto-start RAM++ tagging after catalog scan: {error}");
                     }
 
@@ -3402,7 +3710,9 @@ pub fn start_catalog_scan(
                         face_app_handle.clone(),
                         face_state,
                     ) {
-                        eprintln!("Failed to auto-start face detection after catalog scan: {error}");
+                        eprintln!(
+                            "Failed to auto-start face detection after catalog scan: {error}"
+                        );
                     }
                 }
             }
@@ -3644,14 +3954,13 @@ where
             continue;
         }
 
-        let cache_hash = crate::file_management::compute_thumbnail_cache_hash(
-            &path_str,
-            &[],
-            modified,
-        );
+        let cache_hash =
+            crate::file_management::compute_thumbnail_cache_hash(&path_str, &[], modified);
         let Some(cache_hash) = cache_hash else {
             failed += 1;
-            failure_reasons.push(format!("{path_str}: failed to compute thumbnail cache hash"));
+            failure_reasons.push(format!(
+                "{path_str}: failed to compute thumbnail cache hash"
+            ));
             continue;
         };
 
@@ -3662,21 +3971,20 @@ where
         }
 
         let image_result = if crate::formats::is_raw_file(&source_path) {
-            crate::face_detection::load_image_for_local_ai(&source_path)
-                .or_else(|_| {
-                    fs::read(&source_path)
+            crate::face_detection::load_image_for_local_ai(&source_path).or_else(|_| {
+                fs::read(&source_path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|bytes| {
+                        crate::raw_processing::develop_raw_image(
+                            &bytes,
+                            true,
+                            0.0,
+                            "sRGB".to_string(),
+                            None,
+                        )
                         .map_err(|e| e.to_string())
-                        .and_then(|bytes| {
-                            crate::raw_processing::develop_raw_image(
-                                &bytes,
-                                true,
-                                0.0,
-                                "sRGB".to_string(),
-                                None,
-                            )
-                            .map_err(|e| e.to_string())
-                        })
-                })
+                    })
+            })
         } else {
             image::open(&source_path).map_err(|e| e.to_string())
         };
@@ -3770,7 +4078,8 @@ fn run_catalog_thumbnail_generation_impl(
         }
 
         let current = (index + 1) as i64;
-        let should_update_db = last_progress_update.elapsed() > std::time::Duration::from_millis(500)
+        let should_update_db = last_progress_update.elapsed()
+            > std::time::Duration::from_millis(500)
             || index == 0
             || current == total as i64;
 
@@ -3795,11 +4104,8 @@ fn run_catalog_thumbnail_generation_impl(
             continue;
         }
 
-        let cache_hash = crate::file_management::compute_thumbnail_cache_hash(
-            &path_str,
-            &[],
-            modified,
-        );
+        let cache_hash =
+            crate::file_management::compute_thumbnail_cache_hash(&path_str, &[], modified);
         // This bulk pass only needs the small thumbnail (see need_medium: false
         // below), so only that file's presence determines whether it's cached.
         if !force_regenerate
@@ -4016,7 +4322,8 @@ where
         }
 
         let sidecar_path = parse_virtual_path(&path_str).1;
-        let (is_edited, rating, tags) = sidecar_metadata_with_settings(&path_buf, &sidecar_path, &settings);
+        let (is_edited, rating, tags) =
+            sidecar_metadata_with_settings(&path_buf, &sidecar_path, &settings);
         let tags_json = tags.as_ref().and_then(|t| serde_json::to_string(t).ok());
         let sidecar_modified = if sidecar_path.exists() {
             Some(unix_modified(&sidecar_path) as i64)
@@ -4025,7 +4332,9 @@ where
         };
         let now = now_secs();
 
-        let tx = conn.transaction().map_err(|e| format!("Failed to start transaction for {}: {}", path_str, e))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Failed to start transaction for {}: {}", path_str, e))?;
         tx.execute(
             "UPDATE image_versions
              SET rating = ?2, color_label = ?3, is_edited = ?4, tags_json = ?5, sidecar_modified_at = ?6, updated_at = ?7
@@ -4040,17 +4349,24 @@ where
                 now
             ],
         ).map_err(|e| format!("Failed to update image version for {}: {}", path_str, e))?;
-        let version_id: i64 = tx.query_row(
-            "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
-            params![image_id],
-            |row| row.get(0),
-        ).map_err(|e| format!("Failed to query version id for {}: {}", path_str, e))?;
+        let version_id: i64 = tx
+            .query_row(
+                "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
+                params![image_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to query version id for {}: {}", path_str, e))?;
         let exif = read_catalog_exif(&path_buf);
         upsert_image_metadata(&tx, image_id, &path_buf, &exif, now)
             .map_err(|e| format!("Failed to upsert image metadata for {}: {}", path_str, e))?;
         sync_image_tags(&tx, version_id, tags.as_ref())
             .map_err(|e| format!("Failed to sync tags for {}: {}", path_str, e))?;
-        tx.commit().map_err(|e| format!("Failed to commit metadata transaction for {}: {}", path_str, e))?;
+        tx.commit().map_err(|e| {
+            format!(
+                "Failed to commit metadata transaction for {}: {}",
+                path_str, e
+            )
+        })?;
 
         processed += 1;
     }
@@ -4116,7 +4432,8 @@ fn run_catalog_metadata_extraction_impl(
 
         let current = (index + 1) as i64;
         let path_str = path_buf.to_string_lossy().to_string();
-        let should_update_db = last_progress_update.elapsed() > std::time::Duration::from_millis(500)
+        let should_update_db = last_progress_update.elapsed()
+            > std::time::Duration::from_millis(500)
             || index == 0
             || current == total as i64;
 
@@ -4141,7 +4458,8 @@ fn run_catalog_metadata_extraction_impl(
         }
 
         let sidecar_path = parse_virtual_path(&path_str).1;
-        let (is_edited, rating, tags) = sidecar_metadata_with_settings(&path_buf, &sidecar_path, &settings);
+        let (is_edited, rating, tags) =
+            sidecar_metadata_with_settings(&path_buf, &sidecar_path, &settings);
         let tags_json = tags.as_ref().and_then(|t| serde_json::to_string(t).ok());
         let sidecar_modified = if sidecar_path.exists() {
             Some(unix_modified(&sidecar_path) as i64)
@@ -4150,7 +4468,9 @@ fn run_catalog_metadata_extraction_impl(
         };
         let now = now_secs();
 
-        let tx = conn.transaction().map_err(|e| format!("Failed to start transaction for {}: {}", path_str, e))?;
+        let tx = conn
+            .transaction()
+            .map_err(|e| format!("Failed to start transaction for {}: {}", path_str, e))?;
         tx.execute(
             "UPDATE image_versions
              SET rating = ?2, color_label = ?3, is_edited = ?4, tags_json = ?5, sidecar_modified_at = ?6, updated_at = ?7
@@ -4165,24 +4485,27 @@ fn run_catalog_metadata_extraction_impl(
                 now
             ],
         ).map_err(|e| format!("Failed to update image version for {}: {}", path_str, e))?;
-        let version_id: i64 = tx.query_row(
-            "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
-            params![image_id],
-            |row| row.get(0),
-        ).map_err(|e| format!("Failed to query version id for {}: {}", path_str, e))?;
+        let version_id: i64 = tx
+            .query_row(
+                "SELECT id FROM image_versions WHERE image_id = ?1 AND copy_id = ''",
+                params![image_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to query version id for {}: {}", path_str, e))?;
         let exif = read_catalog_exif(&path_buf);
         upsert_image_metadata(&tx, image_id, &path_buf, &exif, now)
             .map_err(|e| format!("Failed to upsert image metadata for {}: {}", path_str, e))?;
         sync_image_tags(&tx, version_id, tags.as_ref())
             .map_err(|e| format!("Failed to sync tags for {}: {}", path_str, e))?;
-        tx.commit().map_err(|e| format!("Failed to commit metadata transaction for {}: {}", path_str, e))?;
+        tx.commit().map_err(|e| {
+            format!(
+                "Failed to commit metadata transaction for {}: {}",
+                path_str, e
+            )
+        })?;
 
         crate::file_management::emit_image_metadata_loaded(
-            app,
-            &path_str,
-            rating,
-            is_edited,
-            &tags,
+            app, &path_str, rating, is_edited, &tags,
         );
         processed += 1;
     }
@@ -5465,7 +5788,11 @@ pub fn delete_cull_sessions(
         return Ok(());
     }
     let connection = open_connection(&active_library_path(&state)?)?;
-    let placeholders = session_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let placeholders = session_ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
     let sql = format!("DELETE FROM cull_sessions WHERE id IN ({placeholders})");
     connection
         .execute(&sql, rusqlite::params_from_iter(session_ids.iter()))
@@ -5743,8 +6070,8 @@ pub fn list_catalog_face_review_items_for_path(
     let face_crops_dir = crate::face_detection::get_face_crops_dir(&app_handle).ok();
     let mut statement = conn
         .prepare(
-            "SELECT id, image_id, person_id, model_pack_id, detector_confidence,
-                    bbox_x, bbox_y, bbox_width, bbox_height, review_state, thumbnail_jpeg
+            "SELECT id, image_id, person_id, model_pack_id, detector_model_id, recognizer_model_id,
+                    detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, review_state, thumbnail_jpeg
              FROM faces WHERE image_id = ?1
              ORDER BY detector_confidence DESC, id",
         )
@@ -5752,7 +6079,7 @@ pub fn list_catalog_face_review_items_for_path(
     statement
         .query_map([image_id], |row| {
             let face_id: i64 = row.get(0)?;
-            let thumbnail_data_url = row.get::<_, Option<Vec<u8>>>(10)?.map(|bytes| {
+            let thumbnail_data_url = row.get::<_, Option<Vec<u8>>>(12)?.map(|bytes| {
                 format!(
                     "data:image/jpeg;base64,{}",
                     base64::prelude::BASE64_STANDARD.encode(bytes)
@@ -5768,12 +6095,14 @@ pub fn list_catalog_face_review_items_for_path(
                     image_id: row.get(1)?,
                     person_id: row.get(2)?,
                     model_pack_id: row.get(3)?,
-                    confidence: row.get(4)?,
-                    x: row.get(5)?,
-                    y: row.get(6)?,
-                    width: row.get(7)?,
-                    height: row.get(8)?,
-                    review_state: row.get(9)?,
+                    detector_model_id: row.get(4)?,
+                    recognizer_model_id: row.get(5)?,
+                    confidence: row.get(6)?,
+                    x: row.get(7)?,
+                    y: row.get(8)?,
+                    width: row.get(9)?,
+                    height: row.get(10)?,
+                    review_state: row.get(11)?,
                 },
                 image_path: requested_path.clone(),
                 crop_path,
@@ -5791,8 +6120,8 @@ fn list_faces_for_image_internal(
 ) -> Result<Vec<CatalogFace>, String> {
     let mut statement = conn
         .prepare(
-            "SELECT id, image_id, person_id, model_pack_id, detector_confidence,
-                    bbox_x, bbox_y, bbox_width, bbox_height, review_state
+            "SELECT id, image_id, person_id, model_pack_id, detector_model_id, recognizer_model_id,
+                    detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, review_state
              FROM faces
              WHERE image_id = ?1
              ORDER BY detector_confidence DESC, id",
@@ -5805,12 +6134,14 @@ fn list_faces_for_image_internal(
                 image_id: row.get(1)?,
                 person_id: row.get(2)?,
                 model_pack_id: row.get(3)?,
-                confidence: row.get(4)?,
-                x: row.get(5)?,
-                y: row.get(6)?,
-                width: row.get(7)?,
-                height: row.get(8)?,
-                review_state: row.get(9)?,
+                detector_model_id: row.get(4)?,
+                recognizer_model_id: row.get(5)?,
+                confidence: row.get(6)?,
+                x: row.get(7)?,
+                y: row.get(8)?,
+                width: row.get(9)?,
+                height: row.get(10)?,
+                review_state: row.get(11)?,
             })
         })
         .map_err(|error| error.to_string())?
@@ -5826,11 +6157,11 @@ pub fn list_unreviewed_catalog_faces(
     use base64::Engine;
     let conn = open_connection(&active_library_path(&state)?)?;
     let face_crops_dir = crate::face_detection::get_face_crops_dir(&app_handle).ok();
-    let mut statement = conn.prepare("SELECT f.id, f.image_id, f.person_id, f.model_pack_id, f.detector_confidence, f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height, f.review_state, r.absolute_path || '/' || i.relative_path, f.thumbnail_jpeg FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE f.review_state = 'unreviewed' AND i.status = 'present' GROUP BY i.folder_id, substr(i.file_name, 1, instr(i.file_name || '.', '.') - 1), round(f.bbox_x, 2), round(f.bbox_y, 2) ORDER BY f.detector_confidence DESC LIMIT 500").map_err(|error| error.to_string())?;
+    let mut statement = conn.prepare("SELECT f.id, f.image_id, f.person_id, f.model_pack_id, f.detector_model_id, f.recognizer_model_id, f.detector_confidence, f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height, f.review_state, r.absolute_path || '/' || i.relative_path, f.thumbnail_jpeg FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE f.review_state = 'unreviewed' AND i.status = 'present' GROUP BY i.folder_id, substr(i.file_name, 1, instr(i.file_name || '.', '.') - 1), round(f.bbox_x, 2), round(f.bbox_y, 2) ORDER BY f.detector_confidence DESC LIMIT 500").map_err(|error| error.to_string())?;
     statement
         .query_map([], |row| {
             let face_id: i64 = row.get(0)?;
-            let thumb_blob: Option<Vec<u8>> = row.get(11)?;
+            let thumb_blob: Option<Vec<u8>> = row.get(13)?;
             let thumbnail_data_url = thumb_blob.map(|b| {
                 format!(
                     "data:image/jpeg;base64,{}",
@@ -5851,14 +6182,16 @@ pub fn list_unreviewed_catalog_faces(
                     image_id: row.get(1)?,
                     person_id: row.get(2)?,
                     model_pack_id: row.get(3)?,
-                    confidence: row.get(4)?,
-                    x: row.get(5)?,
-                    y: row.get(6)?,
-                    width: row.get(7)?,
-                    height: row.get(8)?,
-                    review_state: row.get(9)?,
+                    detector_model_id: row.get(4)?,
+                    recognizer_model_id: row.get(5)?,
+                    confidence: row.get(6)?,
+                    x: row.get(7)?,
+                    y: row.get(8)?,
+                    width: row.get(9)?,
+                    height: row.get(10)?,
+                    review_state: row.get(11)?,
                 },
-                image_path: row.get(10)?,
+                image_path: row.get(12)?,
                 crop_path,
                 thumbnail_data_url,
             })

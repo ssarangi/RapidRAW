@@ -32,8 +32,9 @@ rapidraw-cli library remove-root --database /data/archive/rapidraw.db --root 1
 ```sh
 rapidraw-cli tags run --database /data/archive/rapidraw.db --models-dir /data/models/visual
 rapidraw-cli tags run --database /data/archive/rapidraw.db --models-dir /data/models/visual --with-bioclip
-rapidraw-cli faces detect --database /data/archive/rapidraw.db --face-models-dir /data/models/face --root 1
-rapidraw-cli faces recognize --database /data/archive/rapidraw.db --face-models-dir /data/models/face --root 1
+rapidraw-cli faces detect --database /data/archive/rapidraw.db --face-models-dir /data/models/face --root 1 --policy accuracy
+rapidraw-cli faces recognize --database /data/archive/rapidraw.db --face-models-dir /data/models/face --root 1 --policy accuracy
+rapidraw-cli faces detect --database /data/archive/rapidraw.db --face-models-dir /data/models/face --root 1 --pack insightface-antelopev2
 rapidraw-cli people list --database /data/archive/rapidraw.db
 rapidraw-cli people images --database /data/archive/rapidraw.db --person 12
 rapidraw-cli tags export-suggestions --database /data/archive/rapidraw.db
@@ -58,4 +59,4 @@ rapidraw-cli restore list --database /data/archive/rapidraw.db --image 42
 rapidraw-cli restore run --database /data/archive/rapidraw.db --image 42 --models-dir /data/models/visual --operation raw_denoise
 ```
 
-Model commands only report an installed pack as runnable when the current application contains a compatible runtime adapter. Face recognition is limited to the YuNet/SFace stack; other visible packs are never claimed to be runnable.
+Face commands choose one complete installed detector/recognizer pack for each run. `--policy accuracy` selects the highest-ranked installed pair; `balanced`, `speed`, and `automatic` are also available. For a deterministic diagnostic or model comparison, `--pack <pack-id>` explicitly selects one installed pack and cannot be combined with `--policy`. The database records the selected pack plus the exact detector and recognizer artifacts with each face observation and embedding, so embeddings are never compared across model pairs.

@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fmt;
 use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
@@ -7,6 +8,83 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Emitter, Manager};
+
+/// Stable identifiers persisted with faces and embeddings. Keep all pack names
+/// here so database-facing code never depends on ad-hoc string literals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FaceModelPackId {
+    YuNetSFace,
+    InsightFaceBuffaloSc,
+    InsightFaceBuffaloS,
+    InsightFaceBuffaloM,
+    InsightFaceBuffaloL,
+    InsightFaceAntelopeV2,
+}
+
+impl FaceModelPackId {
+    pub const ALL: [Self; 6] = [
+        Self::YuNetSFace,
+        Self::InsightFaceBuffaloSc,
+        Self::InsightFaceBuffaloS,
+        Self::InsightFaceBuffaloM,
+        Self::InsightFaceBuffaloL,
+        Self::InsightFaceAntelopeV2,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::YuNetSFace => "opencv-yunet-sface",
+            Self::InsightFaceBuffaloSc => "insightface-buffalo-sc",
+            Self::InsightFaceBuffaloS => "insightface-buffalo-s",
+            Self::InsightFaceBuffaloM => "insightface-buffalo-m",
+            Self::InsightFaceBuffaloL => "insightface-buffalo-l",
+            Self::InsightFaceAntelopeV2 => "insightface-antelopev2",
+        }
+    }
+
+    pub const fn is_insightface(self) -> bool {
+        !matches!(self, Self::YuNetSFace)
+    }
+
+    /// Stable ONNX artifact identity stored with a face observation. This is
+    /// deliberately more specific than the pack: a pack is the selection
+    /// unit, while these two IDs explain exactly which detector/recognizer
+    /// produced the observation and embedding.
+    pub const fn detector_model_id(self) -> &'static str {
+        runtime_file_names(self).0
+    }
+
+    pub const fn recognizer_model_id(self) -> &'static str {
+        runtime_file_names(self).1
+    }
+}
+
+impl TryFrom<&str> for FaceModelPackId {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::ALL
+            .into_iter()
+            .find(|candidate| candidate.as_str() == value)
+            .ok_or_else(|| format!("Unknown face model pack ID: {value}"))
+    }
+}
+
+impl fmt::Display for FaceModelPackId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+pub const YUNET_DETECTOR_FILE: &str = "face_detection_yunet_2023mar.onnx";
+pub const SFACE_RECOGNIZER_FILE: &str = "face_recognition_sface_2021dec.onnx";
+pub const SCRFD_500M_FILE: &str = "det_500m.onnx";
+pub const SCRFD_2_5G_FILE: &str = "det_2.5g.onnx";
+pub const SCRFD_10G_FILE: &str = "det_10g.onnx";
+pub const SCRFD_10G_BNKPS_FILE: &str = "scrfd_10g_bnkps.onnx";
+pub const ARCFACE_R50_FILE: &str = "w600k_r50.onnx";
+pub const MOBILEFACENET_FILE: &str = "w600k_mbf.onnx";
+pub const ARCFACE_R100_FILE: &str = "glintr100.onnx";
 use zip::ZipArchive;
 
 /// The artifact can be fetched and prepared by RapidRAW without a conversion
@@ -25,6 +103,55 @@ pub enum ModelArtifactFormat {
     Onnx,
     Zip,
     Checkpoint,
+}
+
+/// How a pack can participate in inference in this build. Downloading an ONNX
+/// archive is deliberately not enough to make a pack selectable: the decoder,
+/// alignment contract, and embedding adapter must all be present.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FaceModelRuntimeSupport {
+    Supported,
+    AdapterPending,
+}
+
+/// Selection intent. Rankings are deliberately pack-level: a detector and
+/// recognizer are a calibrated pair and embeddings from different packs must
+/// never be mixed.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum FaceModelSelectionPolicy {
+    Accuracy,
+    Balanced,
+    Speed,
+    /// Until a device benchmark is available, Automatic is conservative and
+    /// chooses the highest-accuracy installed supported pack.
+    Automatic,
+}
+
+impl FaceModelSelectionPolicy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Accuracy => "accuracy",
+            Self::Balanced => "balanced",
+            Self::Speed => "speed",
+            Self::Automatic => "automatic",
+        }
+    }
+}
+
+impl TryFrom<&str> for FaceModelSelectionPolicy {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "accuracy" => Ok(Self::Accuracy),
+            "balanced" => Ok(Self::Balanced),
+            "speed" => Ok(Self::Speed),
+            "automatic" => Ok(Self::Automatic),
+            _ => Err(format!("Unknown face-model selection policy: {value}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +173,15 @@ pub struct FaceModelPack {
     pub recognizer: String,
     pub detector_landmarks: u8,
     pub embedding_dimensions: Option<u16>,
+    /// Lower is better. These are product rankings, not uncalibrated cosine
+    /// thresholds; matching remains model-specific.
+    pub accuracy_rank: u8,
+    /// Lower is faster on CPU for a full detect+embed pass.
+    pub speed_rank: u8,
+    /// Lower is the preferred compromise between detection recall, recognition
+    /// quality, download size, and CPU throughput.
+    pub balanced_rank: u8,
+    pub runtime_support: FaceModelRuntimeSupport,
     pub availability: ModelAvailability,
     pub artifacts: Vec<FaceModelArtifact>,
     pub license_name: String,
@@ -77,6 +213,20 @@ pub struct FaceModelPackStatus {
     pub installed: bool,
     pub install_path: String,
     pub installed_artifacts: Vec<InstalledFaceModelArtifact>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceModelSelection {
+    pub policy: FaceModelSelectionPolicy,
+    pub selected: FaceModelPack,
+}
+
+#[derive(Debug, Clone)]
+pub struct FaceRuntimePaths {
+    pub pack_id: FaceModelPackId,
+    pub detector: PathBuf,
+    pub recognizer: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -116,23 +266,27 @@ pub fn face_model_packs() -> Vec<FaceModelPack> {
         //   - face_detection_yunet_2023mar.onnx: 8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4
         //   - face_recognition_sface_2021dec.onnx: 0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79
         FaceModelPack {
-            id: "opencv-yunet-sface".to_string(),
+            id: FaceModelPackId::YuNetSFace.as_str().to_string(),
             display_name: "YuNet + SFace".to_string(),
             description: "Fast local baseline used by current digiKam releases.".to_string(),
             detector: "YuNet".to_string(),
             recognizer: "SFace".to_string(),
             detector_landmarks: 5,
             embedding_dimensions: Some(128),
+            accuracy_rank: 6,
+            speed_rank: 1,
+            balanced_rank: 6,
+            runtime_support: FaceModelRuntimeSupport::Supported,
             availability: ModelAvailability::DirectDownload,
             artifacts: vec![
                 artifact(
-                    "face_detection_yunet_2023mar.onnx",
+                    YUNET_DETECTOR_FILE,
                     ModelArtifactFormat::Onnx,
                     "https://github.com/opencv/opencv_zoo/raw/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
                     Some("8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"),
                 ),
                 artifact(
-                    "face_recognition_sface_2021dec.onnx",
+                    SFACE_RECOGNIZER_FILE,
                     ModelArtifactFormat::Onnx,
                     "https://github.com/opencv/opencv_zoo/raw/47534e27c9851bb1128ccc0102f1145e27f23f98/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
                     Some("0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79"),
@@ -144,64 +298,82 @@ pub fn face_model_packs() -> Vec<FaceModelPack> {
             model_source_url: "https://github.com/opencv/opencv_zoo".to_string(),
         },
         insightface_pack(
-            "insightface-buffalo-sc",
+            FaceModelPackId::InsightFaceBuffaloSc,
             "InsightFace Buffalo SC",
             "Compact SCRFD + MobileFaceNet pack for fast experiments.",
             "buffalo_sc.zip",
             "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_sc.zip",
+            "57d31b56b6ffa911c8a73cfc1707c73cab76efe7f13b675a05223bf42de47c72",
         ),
         insightface_pack(
-            "insightface-buffalo-s",
+            FaceModelPackId::InsightFaceBuffaloS,
             "InsightFace Buffalo S",
             "Compact SCRFD + ArcFace pack for local experiments.",
             "buffalo_s.zip",
             "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_s.zip",
+            "d85a87f503f691807cd8bb97128bdf7a0660326cd9cd02657127fa978bab8b5e",
         ),
         insightface_pack(
-            "insightface-buffalo-m",
+            FaceModelPackId::InsightFaceBuffaloM,
             "InsightFace Buffalo M",
             "Balanced SCRFD + ArcFace pack for local experiments.",
             "buffalo_m.zip",
             "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_m.zip",
+            "d98264bd8f2dc75cbc2ddce2a14e636e02bb857b3051c234b737bf3b614edca9",
         ),
         insightface_pack(
-            "insightface-buffalo-l",
+            FaceModelPackId::InsightFaceBuffaloL,
             "InsightFace Buffalo L",
             "Large SCRFD + ArcFace pack for accuracy-oriented experiments.",
             "buffalo_l.zip",
             "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
+            "80ffe37d8a5940d59a7384c201a2a38d4741f2f3c51eef46ebb28218a7b0ca2f",
         ),
         insightface_pack(
-            "insightface-antelopev2",
+            FaceModelPackId::InsightFaceAntelopeV2,
             "InsightFace AntelopeV2",
             "High-capacity SCRFD + ArcFace pack for accuracy comparisons.",
             "antelopev2.zip",
             "https://github.com/deepinsight/insightface/releases/download/v0.7/antelopev2.zip",
+            "8e182f14fc6e80b3bfa375b33eb6cff7ee05d8ef7633e738d1c89021dcf0c5c5",
         ),
     ]
 }
 
 fn insightface_pack(
-    id: &str,
+    id: FaceModelPackId,
     display_name: &str,
     description: &str,
     file_name: &str,
     source_url: &str,
+    sha256: &str,
 ) -> FaceModelPack {
+    let (accuracy_rank, speed_rank, balanced_rank) = match id {
+        FaceModelPackId::InsightFaceAntelopeV2 => (1, 6, 3),
+        FaceModelPackId::InsightFaceBuffaloL => (2, 5, 2),
+        FaceModelPackId::InsightFaceBuffaloM => (3, 4, 1),
+        FaceModelPackId::InsightFaceBuffaloS => (4, 3, 4),
+        FaceModelPackId::InsightFaceBuffaloSc => (5, 2, 5),
+        FaceModelPackId::YuNetSFace => unreachable!("YuNet/SFace is not an InsightFace pack"),
+    };
     FaceModelPack {
-        id: id.to_string(),
+        id: id.as_str().to_string(),
         display_name: display_name.to_string(),
         description: description.to_string(),
         detector: "SCRFD".to_string(),
         recognizer: "ArcFace/MobileFaceNet".to_string(),
         detector_landmarks: 5,
         embedding_dimensions: Some(512),
+        accuracy_rank,
+        speed_rank,
+        balanced_rank,
+        runtime_support: FaceModelRuntimeSupport::Supported,
         availability: ModelAvailability::DirectDownload,
         artifacts: vec![artifact(
             file_name,
             ModelArtifactFormat::Zip,
             source_url,
-            None,
+            Some(sha256),
         )],
         license_name: "InsightFace public pretrained model license".to_string(),
         license_url: "https://github.com/deepinsight/insightface/tree/master/model_zoo".to_string(),
@@ -213,6 +385,136 @@ fn insightface_pack(
 #[tauri::command]
 pub fn list_face_model_packs() -> Vec<FaceModelPack> {
     face_model_packs()
+}
+
+#[tauri::command]
+pub fn resolve_face_model_selection(
+    policy: FaceModelSelectionPolicy,
+    app_handle: AppHandle,
+) -> Result<FaceModelSelection, String> {
+    select_installed_face_model_pack(&app_handle, policy)
+}
+
+fn selection_rank(pack: &FaceModelPack, policy: FaceModelSelectionPolicy) -> (u8, u8) {
+    match policy {
+        FaceModelSelectionPolicy::Accuracy | FaceModelSelectionPolicy::Automatic => {
+            (pack.accuracy_rank, pack.speed_rank)
+        }
+        FaceModelSelectionPolicy::Balanced => (pack.balanced_rank, pack.accuracy_rank),
+        FaceModelSelectionPolicy::Speed => (pack.speed_rank, pack.accuracy_rank),
+    }
+}
+
+/// Resolves a pack only when its installed archive has passed integrity checks
+/// and the current binary provides a complete runtime adapter for it.
+pub fn select_installed_face_model_pack_in_dir(
+    face_models_dir: &Path,
+    policy: FaceModelSelectionPolicy,
+) -> Result<FaceModelSelection, String> {
+    face_model_packs()
+        .into_iter()
+        .filter(|pack| pack.runtime_support == FaceModelRuntimeSupport::Supported)
+        .filter(|pack| {
+            let directory = face_models_dir.join(&pack.id);
+            read_installed_manifest(&directory)
+                .map(|manifest| is_complete_install(pack, &directory, manifest.as_ref()))
+                .unwrap_or(false)
+        })
+        .min_by_key(|pack| selection_rank(pack, policy))
+        .map(|selected| FaceModelSelection { policy, selected })
+        .ok_or_else(|| "No installed face model has a complete runtime adapter".to_string())
+}
+
+pub(crate) fn select_installed_face_model_pack(
+    app_handle: &AppHandle,
+    policy: FaceModelSelectionPolicy,
+) -> Result<FaceModelSelection, String> {
+    select_installed_face_model_pack_in_dir(&face_models_dir(app_handle)?, policy)
+}
+
+pub const fn runtime_file_names(pack_id: FaceModelPackId) -> (&'static str, &'static str) {
+    match pack_id {
+        FaceModelPackId::YuNetSFace => (YUNET_DETECTOR_FILE, SFACE_RECOGNIZER_FILE),
+        FaceModelPackId::InsightFaceBuffaloSc | FaceModelPackId::InsightFaceBuffaloS => {
+            (SCRFD_500M_FILE, MOBILEFACENET_FILE)
+        }
+        FaceModelPackId::InsightFaceBuffaloM => (SCRFD_2_5G_FILE, ARCFACE_R50_FILE),
+        FaceModelPackId::InsightFaceBuffaloL => (SCRFD_10G_FILE, ARCFACE_R50_FILE),
+        FaceModelPackId::InsightFaceAntelopeV2 => (SCRFD_10G_BNKPS_FILE, ARCFACE_R100_FILE),
+    }
+}
+
+pub(crate) fn installed_face_runtime_paths(
+    app_handle: &AppHandle,
+    policy: FaceModelSelectionPolicy,
+) -> Result<FaceRuntimePaths, String> {
+    let selection = select_installed_face_model_pack(app_handle, policy)?;
+    let pack_id = FaceModelPackId::try_from(selection.selected.id.as_str())?;
+    let (detector_file, recognizer_file) = runtime_file_names(pack_id);
+    Ok(FaceRuntimePaths {
+        pack_id,
+        detector: installed_face_model_path(app_handle, &selection.selected.id, detector_file)?,
+        recognizer: installed_face_model_path(app_handle, &selection.selected.id, recognizer_file)?,
+    })
+}
+
+pub fn installed_face_runtime_paths_in_dir(
+    face_models_dir: &Path,
+    policy: FaceModelSelectionPolicy,
+) -> Result<FaceRuntimePaths, String> {
+    let selection = select_installed_face_model_pack_in_dir(face_models_dir, policy)?;
+    let pack_id = FaceModelPackId::try_from(selection.selected.id.as_str())?;
+    let (detector_file, recognizer_file) = runtime_file_names(pack_id);
+    Ok(FaceRuntimePaths {
+        pack_id,
+        detector: installed_face_model_path_in_dir(
+            face_models_dir,
+            &selection.selected.id,
+            detector_file,
+        )?,
+        recognizer: installed_face_model_path_in_dir(
+            face_models_dir,
+            &selection.selected.id,
+            recognizer_file,
+        )?,
+    })
+}
+
+/// Resolve one explicitly requested pack. This is primarily useful for
+/// deterministic diagnostics and model comparisons; normal application runs
+/// should use policy selection so hardware and accuracy preferences apply.
+pub fn installed_face_runtime_paths_for_pack_in_dir(
+    face_models_dir: &Path,
+    pack_id: FaceModelPackId,
+) -> Result<FaceRuntimePaths, String> {
+    let pack = face_model_packs()
+        .into_iter()
+        .find(|pack| pack.id == pack_id.as_str())
+        .ok_or_else(|| format!("No face model pack is registered for {pack_id}"))?;
+    if pack.runtime_support != FaceModelRuntimeSupport::Supported {
+        return Err(format!("Face model pack {pack_id} has no runtime adapter"));
+    }
+    let directory = face_models_dir.join(pack_id.as_str());
+    let manifest = read_installed_manifest(&directory)?;
+    if !is_complete_install(&pack, &directory, manifest.as_ref()) {
+        return Err(format!(
+            "Face model pack {pack_id} is not completely installed"
+        ));
+    }
+    let (detector_file, recognizer_file) = runtime_file_names(pack_id);
+    Ok(FaceRuntimePaths {
+        pack_id,
+        detector: installed_face_model_path_in_dir(
+            face_models_dir,
+            pack_id.as_str(),
+            detector_file,
+        )?,
+        recognizer: installed_face_model_path_in_dir(
+            face_models_dir,
+            pack_id.as_str(),
+            recognizer_file,
+        )?,
+    })
 }
 
 fn face_models_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
@@ -303,7 +605,7 @@ fn is_complete_install(
         .map(|artifact| (artifact.file_name.as_str(), artifact.sha256.as_deref()))
         .collect();
 
-    manifest.artifacts.iter().all(|installed| {
+    let manifest_valid = manifest.artifacts.iter().all(|installed| {
         let path = pack_dir.join(&installed.file_name);
         let Ok(actual) = sha256_file(&path) else {
             return false;
@@ -315,7 +617,14 @@ fn is_complete_install(
             Some(Some(expected)) => actual.eq_ignore_ascii_case(expected),
             _ => true,
         }
-    })
+    });
+    manifest_valid
+        && FaceModelPackId::try_from(pack.id.as_str())
+            .map(|pack_id| {
+                let (detector, recognizer) = runtime_file_names(pack_id);
+                pack_dir.join(detector).is_file() && pack_dir.join(recognizer).is_file()
+            })
+            .unwrap_or(false)
 }
 
 fn sha256_file(path: &Path) -> Result<String, String> {
@@ -761,7 +1070,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let pack = face_model_packs()
             .into_iter()
-            .find(|pack| pack.id == "opencv-yunet-sface")
+            .find(|pack| pack.id == FaceModelPackId::YuNetSFace.as_str())
             .unwrap();
 
         for artifact in &pack.artifacts {
@@ -800,10 +1109,63 @@ mod tests {
     }
 
     #[test]
+    fn pack_rankings_are_unique_and_cover_every_runtime_candidate() {
+        let packs = face_model_packs();
+        let accuracy: HashSet<_> = packs.iter().map(|pack| pack.accuracy_rank).collect();
+        let speed: HashSet<_> = packs.iter().map(|pack| pack.speed_rank).collect();
+        let balanced: HashSet<_> = packs.iter().map(|pack| pack.balanced_rank).collect();
+        assert_eq!(accuracy.len(), packs.len());
+        assert_eq!(speed.len(), packs.len());
+        assert_eq!(balanced.len(), packs.len());
+    }
+
+    #[test]
+    fn persisted_pack_ids_round_trip_through_the_enum() {
+        for id in FaceModelPackId::ALL {
+            assert_eq!(FaceModelPackId::try_from(id.as_str()).unwrap(), id);
+        }
+        assert!(FaceModelPackId::try_from("unknown-face-model").is_err());
+    }
+
+    #[test]
+    fn accuracy_policy_prefers_antelope_over_every_other_pack() {
+        let mut packs = face_model_packs();
+        packs.sort_by_key(|pack| selection_rank(pack, FaceModelSelectionPolicy::Accuracy));
+        assert_eq!(packs[0].id, FaceModelPackId::InsightFaceAntelopeV2.as_str());
+    }
+
+    #[test]
+    fn balanced_policy_prefers_buffalo_m_when_every_pack_is_available() {
+        let mut packs = face_model_packs();
+        packs.sort_by_key(|pack| selection_rank(pack, FaceModelSelectionPolicy::Balanced));
+        assert_eq!(packs[0].id, FaceModelPackId::InsightFaceBuffaloM.as_str());
+    }
+
+    #[test]
+    fn every_registered_pack_has_a_complete_runtime_file_contract() {
+        for pack in face_model_packs() {
+            let (detector, recognizer) =
+                runtime_file_names(FaceModelPackId::try_from(pack.id.as_str()).unwrap());
+            assert!(detector.ends_with(".onnx"));
+            assert!(recognizer.ends_with(".onnx"));
+            assert_ne!(detector, recognizer);
+        }
+    }
+
+    #[test]
+    fn all_direct_downloads_are_digest_pinned() {
+        for pack in face_model_packs() {
+            for artifact in pack.artifacts {
+                assert_eq!(artifact.sha256.as_deref().map(str::len), Some(64));
+            }
+        }
+    }
+
+    #[test]
     fn installed_manifest_round_trips() {
         let directory = tempdir().unwrap();
         let manifest = InstalledFaceModelPack {
-            pack_id: "opencv-yunet-sface".to_string(),
+            pack_id: FaceModelPackId::YuNetSFace.as_str().to_string(),
             installed_at: 1,
             artifacts: vec![InstalledFaceModelArtifact {
                 file_name: "model.onnx".to_string(),
@@ -826,7 +1188,7 @@ mod tests {
         let directory = tempdir().unwrap();
         let pack = face_model_packs()
             .into_iter()
-            .find(|pack| pack.id == "opencv-yunet-sface")
+            .find(|pack| pack.id == FaceModelPackId::YuNetSFace.as_str())
             .unwrap();
         let manifest = InstalledFaceModelPack {
             pack_id: pack.id.clone(),

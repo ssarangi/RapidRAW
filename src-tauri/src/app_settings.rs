@@ -541,6 +541,8 @@ pub struct AppSettings {
     pub workspace: WorkspaceState,
     #[serde(default)]
     pub active_library_db_path: Option<String>,
+    #[serde(default)]
+    pub face_model_policy: Option<crate::face_model_registry::FaceModelSelectionPolicy>,
 }
 
 impl Default for AppSettings {
@@ -636,6 +638,7 @@ impl Default for AppSettings {
             always_decode_raw_thumbnails: Some(false),
             workspace: WorkspaceState::default(),
             active_library_db_path: None,
+            face_model_policy: Some(crate::face_model_registry::FaceModelSelectionPolicy::Accuracy),
         }
     }
 }
