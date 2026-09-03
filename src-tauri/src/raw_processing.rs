@@ -49,38 +49,64 @@ pub fn develop_raw_image(
     Ok(apply_orientation(developed_image, orientation))
 }
 
-/// Real "open an image for editing" entry point (called only from
-/// `image_loader::load_base_image_from_bytes`, the one path that has the
-/// per-image "Raw Develop" adjustments-panel overrides available): tries
-/// our own demosaic/preprocess/denoise/sharpen pipeline first for
-/// full-quality decodes of standard Bayer sensors, falling back to the
-/// normal rawler-PPG `develop_raw_image` above on any error or ineligible
-/// sensor (X-Trans, 4-channel, monochrome, linear RAW) - so an image this
-/// pipeline can't handle degrades to the exact prior behavior, never fails.
+/// Real "open a RAW file for processing" entry point for every call site
+/// that has (or can cheaply load) that image's persisted "Raw Develop"
+/// adjustments - the editor's own load path, preview regeneration, export,
+/// and now every other `develop_raw_image` caller (thumbnails, culling,
+/// HDR, focus stacking, panorama, restoration, negative conversion) that
+/// reads a sidecar for the image anyway. Tries our own demosaic/preprocess/
+/// denoise/sharpen pipeline first for full-quality decodes of standard
+/// Bayer sensors, falling back to the normal rawler-PPG `develop_raw_image`
+/// above on any error or ineligible sensor (X-Trans, 4-channel, monochrome,
+/// linear RAW) - so an image this pipeline can't handle degrades to the
+/// exact prior behavior, never fails.
 ///
-/// Every OTHER caller of `develop_raw_image` (thumbnails, export, culling,
-/// HDR, focus stacking, panorama, restoration, etc.) is unaffected and
-/// keeps using rawler's PPG pipeline unchanged - this is deliberately not a
-/// blanket replacement.
-#[allow(clippy::too_many_arguments)]
+/// `raw_develop_adjustments` is that image's persisted adjustments blob
+/// (or `None` for a caller with no adjustments in scope, e.g. because the
+/// image isn't part of a catalog) - `rawDemosaicAlgorithm`/
+/// `rawDenoiseAmount`/`rawSharpenAmount`/`rawSharpenMethod`/
+/// `rawPreprocessEnabled` are read from it here, with `None`/missing/"auto"
+/// falling back to ISO-auto behavior, exactly as if no override were set.
 pub fn develop_raw_image_for_editor(
     file_bytes: &[u8],
     fast_demosaic: bool,
     highlight_compression: f32,
     linear_mode: String,
-    demosaic_override: Option<&str>,
-    denoise_override: Option<f32>,
-    sharpen_override: Option<f32>,
-    preprocess: bool,
+    raw_develop_adjustments: Option<&serde_json::Value>,
     cancel_token: Option<(Arc<AtomicUsize>, usize)>,
 ) -> Result<DynamicImage> {
     if !fast_demosaic {
+        let demosaic_override = raw_develop_adjustments
+            .and_then(|a| a.get("rawDemosaicAlgorithm"))
+            .and_then(|v| v.as_str());
+        // Sliders store 0..100 with a negative sentinel meaning "auto"
+        // (ISO-based suggestion) - matches how other percentage-style
+        // adjustments in this app are already stored.
+        let denoise_override = raw_develop_adjustments
+            .and_then(|a| a.get("rawDenoiseAmount"))
+            .and_then(|v| v.as_f64())
+            .filter(|v| *v >= 0.0)
+            .map(|v| (v as f32 / 100.0).clamp(0.0, 1.0));
+        let sharpen_override = raw_develop_adjustments
+            .and_then(|a| a.get("rawSharpenAmount"))
+            .and_then(|v| v.as_f64())
+            .filter(|v| *v >= 0.0)
+            .map(|v| (v as f32 / 100.0).clamp(0.0, 1.0));
+        let sharpen_method_override = raw_develop_adjustments
+            .and_then(|a| a.get("rawSharpenMethod"))
+            .and_then(|v| v.as_str());
+        let preprocess = raw_develop_adjustments
+            .and_then(|a| a.get("rawPreprocessEnabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
         match crate::custom_raw_pipeline::develop_raw_image_custom_resolved(
             file_bytes,
             highlight_compression,
             demosaic_override,
             denoise_override,
             sharpen_override,
+            sharpen_method_override,
             preprocess,
         ) {
             Ok(image) => return Ok(image),

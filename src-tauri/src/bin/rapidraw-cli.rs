@@ -117,7 +117,7 @@ fn main() {
         Some("restore") if arguments.get(1).map(String::as_str) == Some("run") => run_restore_cli(&arguments),
         Some("raw") if arguments.get(1).map(String::as_str) == Some("develop") => run_raw_develop_cli(&arguments),
         Some("raw") if arguments.get(1).map(String::as_str) == Some("inspect") => run_raw_inspect_cli(&arguments),
-        _ => Err("Usage: rapidraw-cli library create --name <name> --database <catalog.db> | rapidraw-cli library open --database <catalog.db> | rapidraw-cli library add-root --database <catalog.db> --path <folder> [--label <name>] | rapidraw-cli library remove-root --database <catalog.db> --root <id> | rapidraw-cli library inspect|roots|metrics|scan|thumbnails|metadata --database <catalog.db> | rapidraw-cli library scan --database <catalog.db> --root <id> [--non-recursive] | rapidraw-cli library thumbnails --database <catalog.db> [--root <id>] [--force] | rapidraw-cli library metadata --database <catalog.db> [--root <id>] | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli faces detect|recognize --database <catalog.db> --face-models-dir <models/face> [--root <id>] | rapidraw-cli people list|images --database <catalog.db> | rapidraw-cli people images --database <catalog.db> --person <id> | rapidraw-cli tags status|top|export-suggestions|review|run --database <catalog.db> | rapidraw-cli tags review --database <catalog.db> --id <rowid> --state accepted|rejected | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli species list|review --database <catalog.db> | rapidraw-cli species review --database <catalog.db> --id <id> --state accepted|rejected | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions|decisions|analyze --database <catalog.db> | rapidraw-cli cull analyze --database <catalog.db> --root <id> [--similarity-threshold <n>] [--blur-threshold <n>] | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>] | rapidraw-cli raw inspect --input <file.raw> | rapidraw-cli raw develop --input <file.raw> --output <file.png> [--demosaic auto|amaze|igv|lmmse|bilinear] [--denoise auto|<0-1>] [--sharpen auto|<0-1>] [--no-preprocess] [--highlight-compression <f32>] [--linear]".to_string()),
+        _ => Err("Usage: rapidraw-cli library create --name <name> --database <catalog.db> | rapidraw-cli library open --database <catalog.db> | rapidraw-cli library add-root --database <catalog.db> --path <folder> [--label <name>] | rapidraw-cli library remove-root --database <catalog.db> --root <id> | rapidraw-cli library inspect|roots|metrics|scan|thumbnails|metadata --database <catalog.db> | rapidraw-cli library scan --database <catalog.db> --root <id> [--non-recursive] | rapidraw-cli library thumbnails --database <catalog.db> [--root <id>] [--force] | rapidraw-cli library metadata --database <catalog.db> [--root <id>] | rapidraw-cli jobs list --database <catalog.db> | rapidraw-cli jobs show --database <catalog.db> --id <job-id> | rapidraw-cli faces status|clusters --database <catalog.db> | rapidraw-cli faces detect|recognize --database <catalog.db> --face-models-dir <models/face> [--root <id>] | rapidraw-cli people list|images --database <catalog.db> | rapidraw-cli people images --database <catalog.db> --person <id> | rapidraw-cli tags status|top|export-suggestions|review|run --database <catalog.db> | rapidraw-cli tags review --database <catalog.db> --id <rowid> --state accepted|rejected | rapidraw-cli tags run --database <catalog.db> --models-dir <models/visual> [--max-tags <1-100>] [--with-bioclip] | rapidraw-cli species list|review --database <catalog.db> | rapidraw-cli species review --database <catalog.db> --id <id> --state accepted|rejected | rapidraw-cli collections list --database <catalog.db> | rapidraw-cli collections show --database <catalog.db> --name <name> | rapidraw-cli cull sessions|decisions|analyze --database <catalog.db> | rapidraw-cli cull analyze --database <catalog.db> --root <id> [--similarity-threshold <n>] [--blur-threshold <n>] | rapidraw-cli models list | rapidraw-cli models info --id <model-id> | rapidraw-cli models verify --id <model-id> [--models-dir <models/visual>|--face-models-dir <models/face>] | rapidraw-cli restore list --database <catalog.db> --image <id> | rapidraw-cli restore run --database <catalog.db> --image <id> --models-dir <models/visual> [--operation raw_denoise|rgb_denoise] [--model <model-id>] | rapidraw-cli raw inspect --input <file.raw> | rapidraw-cli raw develop --input <file.raw> --output <file.png> [--demosaic auto|amaze|igv|lmmse|bilinear] [--denoise auto|<0-1>] [--sharpen auto|<0-1>] [--sharpen-method unsharp|rld] [--no-preprocess] [--highlight-compression <f32>] [--linear]".to_string()),
     };
     match result {
         Ok(value) => println!("{}", value),
@@ -1468,6 +1468,7 @@ fn run_raw_inspect_cli(arguments: &[String]) -> Result<serde_json::Value, String
     let sensor = rapidraw_lib::custom_raw_pipeline::decode_raw_sensor_data(&bytes)
         .map_err(|error| error.to_string())?;
     let selected = rapidraw_lib::demosaic_algorithms::select_by_iso(sensor.iso);
+    let pdaf_known = rapidraw_lib::raw_pdaf_data::lookup(&sensor.camera_name).is_some();
     Ok(json!({
         "width": sensor.width,
         "height": sensor.height,
@@ -1477,6 +1478,8 @@ fn run_raw_inspect_cli(arguments: &[String]) -> Result<serde_json::Value, String
         "activeArea": sensor.active_area,
         "cropArea": sensor.crop_area,
         "autoSelectedAlgorithm": rapidraw_lib::demosaic_algorithms::algorithm_name(selected),
+        "cameraName": sensor.camera_name,
+        "pdafPatternKnown": pdaf_known,
     }))
 }
 
@@ -1497,9 +1500,11 @@ fn run_raw_inspect_cli(arguments: &[String]) -> Result<serde_json::Value, String
 ///
 /// `--denoise` and `--sharpen` accept `auto` (ISO-based suggestion, same
 /// pattern as `--demosaic auto`) or an explicit 0..1 amount; `0` (the
-/// implicit default) disables the stage entirely. `--no-preprocess`
-/// disables the raw-domain hot/dead-pixel + CFA-line-banding correction
-/// that otherwise always runs before demosaic.
+/// implicit default) disables the stage entirely. `--sharpen-method`
+/// selects `unsharp` (default, classic unsharp mask) or `rld` (Richardson-
+/// Lucy deconvolution). `--no-preprocess` disables the raw-domain
+/// hot/dead-pixel + CFA-line-banding correction that otherwise always runs
+/// before demosaic.
 fn run_raw_develop_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
     let input_path = named_argument(arguments, "--input")?;
     let output_path = named_argument(arguments, "--output")?;
@@ -1559,10 +1564,20 @@ fn run_raw_develop_cli(arguments: &[String]) -> Result<serde_json::Value, String
         "--sharpen",
         rapidraw_lib::raw_sharpen::suggest_amount_for_iso(sensor.iso),
     )?;
+    let sharpen_method_arg = arguments
+        .windows(2)
+        .find(|pair| pair[0] == "--sharpen-method")
+        .map(|pair| pair[1].clone())
+        .unwrap_or_else(|| "unsharp".to_string());
+    let sharpen_method = rapidraw_lib::raw_sharpen::parse_method_name(&sharpen_method_arg)
+        .ok_or_else(|| {
+            format!("unknown --sharpen-method value '{sharpen_method_arg}': expected unsharp|rld")
+        })?;
     let options = rapidraw_lib::custom_raw_pipeline::DevelopOptions {
         preprocess,
         denoise_strength,
         sharpen_amount,
+        sharpen_method,
     };
 
     let image = if linear_intermediate {
@@ -1615,6 +1630,7 @@ fn run_raw_develop_cli(arguments: &[String]) -> Result<serde_json::Value, String
         "preprocess": preprocess,
         "denoiseStrength": denoise_strength,
         "sharpenAmount": sharpen_amount,
+        "sharpenMethod": rapidraw_lib::raw_sharpen::method_name(sharpen_method),
         "iso": sensor.iso,
         "demosaic": rapidraw_lib::demosaic_algorithms::algorithm_name(algo),
         "linear": linear_intermediate,

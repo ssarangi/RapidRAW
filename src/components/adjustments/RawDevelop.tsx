@@ -4,7 +4,7 @@ import Switch from '../ui/Switch';
 import Dropdown from '../ui/Dropdown';
 import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
-import { Adjustments, DemosaicAlgorithm, RawDevelopAdjustment } from '../../utils/adjustments';
+import { Adjustments, DemosaicAlgorithm, RawDevelopAdjustment, SharpenMethod } from '../../utils/adjustments';
 
 interface RawDevelopPanelProps {
   adjustments: Adjustments;
@@ -26,6 +26,11 @@ export default function RawDevelopPanel({
   const demosaicOptions = Object.values(DemosaicAlgorithm).map((value) => ({
     value,
     label: t(`editor.adjustments.rawDevelop.demosaicOptions.${value}`),
+  }));
+
+  const sharpenMethodOptions = Object.values(SharpenMethod).map((value) => ({
+    value,
+    label: t(`editor.adjustments.rawDevelop.sharpenMethodOptions.${value}`),
   }));
 
   const setField = (key: string, value: unknown) => {
@@ -96,6 +101,17 @@ export default function RawDevelopPanel({
         t('editor.adjustments.rawDevelop.sharpenLabel'),
         adjustments.rawSharpenAmount,
       )}
+
+      <div className="mb-4">
+        <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mb-1">
+          {t('editor.adjustments.rawDevelop.sharpenMethodLabel')}
+        </Text>
+        <Dropdown
+          value={adjustments.rawSharpenMethod}
+          options={sharpenMethodOptions}
+          onChange={(value) => setField(RawDevelopAdjustment.SharpenMethod, value)}
+        />
+      </div>
 
       <Switch
         label={t('editor.adjustments.rawDevelop.preprocessLabel')}

@@ -209,13 +209,15 @@ fn stitch_images(image_paths: Vec<String>, app_handle: AppHandle) -> Result<Dyna
 
             let file_bytes = fs::read(filename)
                 .map_err(|e| format!("Failed to read image {}: {}", filename, e))?;
+            let (_, sidecar_path) = parse_virtual_path(filename);
+            let metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
             let mut dynamic_image = crate::image_loader::load_base_image_from_bytes(
                 &file_bytes,
                 filename,
                 false,
                 &settings,
-                None,
+                Some(&metadata.adjustments),
                 None,
             )
             .map_err(|e| format!("Failed to load image {}: {}", filename, e))?;

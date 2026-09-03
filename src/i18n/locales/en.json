@@ -321,6 +321,11 @@
         },
         "denoiseLabel": "Raw Denoise",
         "sharpenLabel": "Raw Sharpening",
+        "sharpenMethodLabel": "Sharpen Method",
+        "sharpenMethodOptions": {
+          "unsharp": "Unsharp Mask",
+          "rld": "Richardson-Lucy Deconvolution"
+        },
         "autoToggleLabel": "Auto",
         "preprocessLabel": "Hot/Dead Pixel & Line-Banding Correction"
       },

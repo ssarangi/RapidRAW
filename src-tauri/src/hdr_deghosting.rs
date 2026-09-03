@@ -54,9 +54,17 @@ pub fn load_hdr_frames(
             );
             let file_bytes =
                 fs::read(path).map_err(|e| format!("Failed to read image {}: {}", path, e))?;
-            let mut dynamic_image =
-                load_base_image_from_bytes(&file_bytes, path, false, settings, None, None)
-                    .map_err(|e| format!("Failed to load image {}: {}", path, e))?;
+            let (_, sidecar_path) = crate::file_management::parse_virtual_path(path);
+            let metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+            let mut dynamic_image = load_base_image_from_bytes(
+                &file_bytes,
+                path,
+                false,
+                settings,
+                Some(&metadata.adjustments),
+                None,
+            )
+            .map_err(|e| format!("Failed to load image {}: {}", path, e))?;
             if !is_raw_file(path) {
                 dynamic_image = apply_srgb_to_linear(dynamic_image);
             }

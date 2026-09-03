@@ -117,38 +117,13 @@ pub fn load_base_image_from_bytes(
     );
 
     if is_raw_file(path_for_ext_check) {
-        let demosaic_override = raw_develop_adjustments
-            .and_then(|a| a.get("rawDemosaicAlgorithm"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        // Sliders store 0..100 with a negative sentinel meaning "auto"
-        // (ISO-based suggestion) - matches how other percentage-style
-        // adjustments in this app are already stored.
-        let denoise_override = raw_develop_adjustments
-            .and_then(|a| a.get("rawDenoiseAmount"))
-            .and_then(|v| v.as_f64())
-            .filter(|v| *v >= 0.0)
-            .map(|v| (v as f32 / 100.0).clamp(0.0, 1.0));
-        let sharpen_override = raw_develop_adjustments
-            .and_then(|a| a.get("rawSharpenAmount"))
-            .and_then(|v| v.as_f64())
-            .filter(|v| *v >= 0.0)
-            .map(|v| (v as f32 / 100.0).clamp(0.0, 1.0));
-        let preprocess = raw_develop_adjustments
-            .and_then(|a| a.get("rawPreprocessEnabled"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-
         match panic::catch_unwind(move || {
             crate::raw_processing::develop_raw_image_for_editor(
                 bytes,
                 use_fast_raw_dev,
                 highlight_compression,
                 linear_mode,
-                demosaic_override.as_deref(),
-                denoise_override,
-                sharpen_override,
-                preprocess,
+                raw_develop_adjustments,
                 cancel_token,
             )
         }) {

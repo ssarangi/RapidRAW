@@ -53,6 +53,7 @@ export enum RawDevelopAdjustment {
   DemosaicAlgorithm = 'rawDemosaicAlgorithm',
   DenoiseAmount = 'rawDenoiseAmount',
   SharpenAmount = 'rawSharpenAmount',
+  SharpenMethod = 'rawSharpenMethod',
   PreprocessEnabled = 'rawPreprocessEnabled',
 }
 
@@ -62,6 +63,11 @@ export enum DemosaicAlgorithm {
   Igv = 'igv',
   Lmmse = 'lmmse',
   Bilinear = 'bilinear',
+}
+
+export enum SharpenMethod {
+  Unsharp = 'unsharp',
+  RlDeconvolution = 'rld',
 }
 
 export enum ColorAdjustment {
@@ -254,6 +260,7 @@ export interface Adjustments {
   rawDemosaicAlgorithm: DemosaicAlgorithm;
   rawDenoiseAmount: number;
   rawSharpenAmount: number;
+  rawSharpenMethod: SharpenMethod;
   rawPreprocessEnabled: boolean;
   rotation: number;
   saturation: number;
@@ -595,6 +602,7 @@ export const INITIAL_ADJUSTMENTS: Adjustments = {
   rawDemosaicAlgorithm: DemosaicAlgorithm.Auto,
   rawDenoiseAmount: -1,
   rawSharpenAmount: -1,
+  rawSharpenMethod: SharpenMethod.Unsharp,
   rawPreprocessEnabled: true,
   rotation: 0,
   saturation: 0,

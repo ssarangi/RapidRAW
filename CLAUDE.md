@@ -123,11 +123,12 @@ and cannot be called or hooked into from outside the crate, so there was no
 way to reuse rawler's pipeline for anything past our own demosaic step even
 if we'd wanted to.
 
-**Pipeline stages, in order:** raw-domain preprocess (hot/dead pixel + CFA
-row-banding correction, on the Bayer mosaic) → demosaic (AMaZE/IGV/LMMSE/
-Bilinear) → white balance → camera→sRGB color matrix → highlight compression
-→ wavelet luminance/chrominance denoise → luminance unsharp-mask sharpening
-→ crop (active area, then default crop) → orientation.
+**Pipeline stages, in order:** raw-domain preprocess (PDAF pixel correction,
+hot/dead pixel + CFA row-banding correction, green-channel equalization, on
+the Bayer mosaic) → demosaic (AMaZE/IGV/LMMSE/Bilinear) → white balance →
+camera→sRGB color matrix → highlight compression → wavelet luminance/
+chrominance denoise → luminance sharpening (unsharp mask or Richardson-Lucy
+deconvolution) → crop (active area, then default crop) → orientation.
 
 - **Demosaic**: three algorithms validated against real RawTherapee source
   (`Beep6581/RawTherapee`'s `amaze_demosaic_RT.cc`, `demosaic_algos.cc`
@@ -137,13 +138,35 @@ Bilinear) → white balance → camera→sRGB color matrix → highlight compres
   neighbor averaging (documented in `demosaic_algorithms.rs`'s module doc).
   ISO auto-selection (`select_by_iso`): AMaZE below 800, IGV 800–1599, LMMSE
   ≥1600 — starting thresholds, not tuned against a real test set.
-- **Preprocess** (`raw_preprocess.rs`): hot/dead pixel correction (outlier
-  vs. same-CFA-color neighbor median, using the fact that a standard Bayer
-  CFA repeats with period 2 in each axis) and CFA row-banding denoise
-  (per-row-type local-average offset correction) — deliberately narrower
-  than ART's full `preprocess()` (dark-frame/flat-field subtraction and
-  PDAF-line filtering are out of scope: the former needs a user-managed
-  calibration frame library, the latter a per-camera-model pixel database).
+- **Preprocess** (`raw_preprocess.rs`):
+  - Hot/dead pixel correction (outlier vs. same-CFA-color neighbor median,
+    using the fact that a standard Bayer CFA repeats with period 2 in each
+    axis) and CFA row-banding denoise (per-row-type local-average offset
+    correction).
+  - **PDAF pixel correction** (`correct_pdaf_pixels`): cameras with
+    on-sensor phase-detect pixels replace some green photosites on specific
+    rows, which read back brighter than their neighbors. Which rows are
+    affected is camera-model-specific and can't be derived generically -
+    ported the `pdaf_pattern`/`pdaf_offset` table for ~13 camera model
+    groups from ART's `rtengine/camconst.json` into `raw_pdaf_data.rs`
+    (RapidRAW is AGPLv3, ART/RawTherapee is GPLv3 - compatible, GPLv3
+    content may be combined into an AGPLv3 work), matched against
+    `rawler`'s `clean_make`/`clean_model`. The actual per-pixel anomaly
+    detection mirrors ART's `PDAFLinesFilter::markLine`
+    (`rtengine/pdaflinesfilter.cc`) exactly (brighter than all 4 diagonal
+    green neighbors + a local-consistency check), then corrects via the
+    same same-color-median approach as hot/dead pixel correction. A no-op
+    for any camera not in the table.
+  - **Green channel equalization** (`equalize_green_channels`): unlike PDAF
+    correction, this needs no per-camera data - computes the average of
+    each of a Bayer CFA's two green sub-populations (green-on-red-row vs.
+    green-on-blue-row) directly from the image and rescales both toward
+    their shared mean. Mirrors ART's `green_equilibrate_global`
+    (`rtengine/green_equil_RT.cc`).
+  - Deliberately still narrower than ART's full `preprocess()`:
+    dark-frame/flat-field subtraction is out of scope (needs a
+    user-managed calibration-frame library - a separate feature, not part
+    of this pipeline).
 - **Denoise** (`raw_denoise.rs`): runs *after* demosaic, not before — checked
   ART's actual source (`rtengine/simpleprocess.cc`) and confirmed its
   `denoise()` call happens after `demosaic()`, contradicting an earlier
@@ -153,21 +176,43 @@ Bilinear) → white balance → camera→sRGB color matrix → highlight compres
   attenuation (finer levels attenuated more) — a real, standard multiscale
   technique, but NOT a port of ART's actual directional complex-wavelet
   transform (`cplx_wavelet_dec.cc`) or its NLMeans/guided-smoothing passes.
-  `suggest_strength_for_iso` gives the ISO-based default.
-- **Sharpening** (`raw_sharpen.rs`): luminance-only unsharp mask with an
-  edge-aware blend mask (suppresses sharpening in flat/noisy regions) —
-  matches ART's *default* method (`rtengine/ipsharpen.cc`'s `unsharp_mask` +
-  `buildBlendMask`). ART's other two methods (`rld` and `psf`, both
-  Richardson-Lucy deconvolution) are not implemented. `suggest_amount_for_iso`
-  gives the ISO-based default (lower at high ISO, so sharpening doesn't
-  re-amplify noise denoise didn't fully remove).
-- **Tone curve — still not done.** ART/RawTherapee use a mild S-curve
-  (contrast/brightness), not the straight linear→gamma passthrough this
-  pipeline still does. Out of scope until the tone-mapping phase.
+  `suggest_strength_for_iso` gives the ISO-based default. Still one combined
+  strength knob rather than ART's separate luma/chroma-red-green/
+  chroma-blue-yellow sliders — backlogged, not started.
+- **Sharpening** (`raw_sharpen.rs`, `SharpenMethod`): two selectable
+  methods, matching ART's own choices (`rtengine/ipsharpen.cc`), both
+  luminance-only with the same edge-aware blend mask (suppresses sharpening
+  in flat/noisy regions):
+  - `UnsharpMask` (default): classic blur-and-subtract, matches ART's
+    `unsharp_mask` + `buildBlendMask`.
+  - `RlDeconvolution`: real iterative Richardson-Lucy deconvolution against
+    a symmetric Gaussian PSF (`estimate *= blur(observed / blur(estimate))`,
+    20 iterations), simplified from ART's `deconvsharpening` ("rld" method)
+    - skips ART's per-pixel early-stopping divergence check and dedicated
+    impulse-noise exclusion mask (the latter is covered by
+    `raw_preprocess`'s hot/dead pixel correction already running first).
+  - ART's third method (`psf`, deconvolution against a real measured
+    per-lens PSF) is not implemented - backlogged, needs lens PSF data we
+    don't have.
+  `suggest_amount_for_iso` gives the ISO-based default (lower at high ISO,
+  so sharpening doesn't re-amplify noise denoise didn't fully remove).
+- **Tone curve: not needed, already solved.** Originally tracked here as
+  "not done," based on evaluating this pipeline in isolation - checked
+  `src/shaders/shader.wgsl` and confirmed the app's GPU tonemap stage
+  (downstream of every RAW *and* non-RAW image alike) already has real
+  filmic tonemapping: `legacy_tonemap` (ACES) and a full `agx_tonemap`
+  (sigmoid toe/shoulder curve + gamut compression), with AgX as the default
+  (`default_raw_tonemapper` in `app_settings.rs`). This pipeline staying
+  linear (no curve, no gamma) is *correct* - it's the same contract
+  `raw_processing::develop_raw_image` already has, and the downstream
+  shader is what applies the curve. Building a curve inside this pipeline
+  would double up with AgX/ACES and over-contrast every image.
 - Eligibility gate unchanged: only a standard 2×2 RGB Bayer CFA
   (`RawSensorData::is_standard_bayer`). X-Trans, 4-channel (CMY/RGBE),
   monochrome, and DNG `LinearRaw` sources are ineligible and always fall
-  back to rawler's own PPG pipeline, with no user-visible error.
+  back to rawler's own PPG pipeline, with no user-visible error. X-Trans
+  (Fuji) demosaic is backlogged - a 6×6-pattern algorithm, substantially
+  different from Bayer, only worth it if Fuji support is actually needed.
 
 **Live-app wiring — two paths, deliberately different scope:**
 - `raw_processing::develop_raw_image` (used by thumbnails, export, culling,
@@ -175,17 +220,27 @@ Bilinear) → white balance → camera→sRGB color matrix → highlight compres
   editor's own image-open path) is **unchanged by default**, still gated by
   the `RAPIDRAW_CUSTOM_DEMOSAIC=1` env var for ad-hoc testing.
 - `raw_processing::develop_raw_image_for_editor` (new) is what
-  `image_loader::load_base_image_from_bytes` actually calls when per-image
-  "Raw Develop" adjustments are available (i.e. the real editor-open path,
-  `image_loader::load_image`, plus `generate_preview_for_path` and
-  `load_and_composite`/export). **This one is live by default** — no env var
-  — for any standard-Bayer RAW, using per-image overrides from the
-  adjustments panel (`rawDemosaicAlgorithm`, `rawDenoiseAmount`,
-  `rawSharpenAmount`, `rawPreprocessEnabled` — see
-  `custom_raw_pipeline::DevelopOptions`/`develop_raw_image_custom_resolved`),
-  falling back to `develop_raw_image` (rawler PPG) on any error or
-  ineligible sensor. Every other `load_base_image_from_bytes` caller passes
-  `None` for the adjustments param and gets ISO-auto behavior, unaffected.
+  `image_loader::load_base_image_from_bytes` actually calls whenever a
+  `raw_develop_adjustments: Option<&serde_json::Value>` is passed in - it
+  reads `rawDemosaicAlgorithm`/`rawDenoiseAmount`/`rawSharpenAmount`/
+  `rawSharpenMethod`/`rawPreprocessEnabled` from that JSON blob itself now
+  (moved here from `image_loader.rs` so every caller shares one extraction
+  path instead of duplicating it), falling back to `develop_raw_image`
+  (rawler PPG) on any error or ineligible sensor. `None` (no
+  adjustments in scope) behaves exactly like all-default/auto overrides.
+  **Now wired into every real `load_base_image_from_bytes` caller that can
+  cheaply reach an adjustments/sidecar value**, not just the editor: the
+  editor's own load path, `generate_preview_for_path`, `load_and_composite`
+  callers (export), HDR merge, panorama stitching, negative-film conversion,
+  focus stacking, and AI restoration's RAW fallback path all now load that
+  image's `.rrdata` sidecar (via `exif_processing::load_sidecar`, since
+  these functions didn't already have adjustments in scope) and pass it
+  through. Callers that pass `fast_demosaic: true` (culling/duplicate
+  analysis, community-preset thumbnails, one `export_processing.rs`
+  preview call, `generate_all_community_previews`) are deliberately left
+  as `None` - `develop_raw_image_for_editor` only engages the custom
+  pipeline when `!fast_demosaic`, so wiring adjustments through would have
+  had zero effect there anyway.
   **Known limitation**: `load_image`'s `decoded_image_cache`/`original_image`
   cache is not specifically invalidated when only raw-develop adjustments
   change on an already-loaded image — same pre-existing limitation as
@@ -194,17 +249,19 @@ Bilinear) → white balance → camera→sRGB color matrix → highlight compres
 - CLI (`rapidraw-cli raw inspect --input <file>` /
   `rapidraw-cli raw develop --input <file> --output <file.png>
   [--demosaic auto|amaze|igv|lmmse|bilinear] [--denoise auto|<0-1>]
-  [--sharpen auto|<0-1>] [--no-preprocess] [--linear]`) exercises the same
-  `custom_raw_pipeline` functions directly (not through
-  `develop_raw_image_for_editor`) — this is the intended way to debug the
-  raw pipeline outside the full Tauri app, per explicit request. Required
-  making `custom_raw_pipeline`, `demosaic_algorithms`, `raw_denoise`,
-  `raw_preprocess`, `raw_sharpen`, `raw_processing` all `pub mod` in `lib.rs`.
+  [--sharpen auto|<0-1>] [--sharpen-method unsharp|rld] [--no-preprocess]
+  [--linear]`) exercises the same `custom_raw_pipeline` functions directly
+  (not through `develop_raw_image_for_editor`) — this is the intended way
+  to debug the raw pipeline outside the full Tauri app, per explicit
+  request. Required making `custom_raw_pipeline`, `demosaic_algorithms`,
+  `raw_denoise`, `raw_preprocess`, `raw_pdaf_data`, `raw_sharpen`,
+  `raw_processing` all `pub mod` in `lib.rs`.
 
 **UI**: right-rail Adjustments panel has a new "Raw Develop" section
 (`src/components/adjustments/RawDevelop.tsx`, `ControlsPanel.tsx`),
 positioned before Basic — demosaic dropdown, denoise/sharpen sliders each
-with an "Auto" toggle (auto = -1 sentinel, resolved ISO-side), and a
+with an "Auto" toggle (auto = -1 sentinel, resolved ISO-side), a sharpen
+method dropdown (Unsharp Mask / Richardson-Lucy Deconvolution), and a
 preprocess on/off switch. Hidden/no-op for non-RAW files. The former
 "RAW Denoise & Sharpening" section (`Restore.tsx`, the on-demand
 RawNIND/NAFNet ONNX AI restoration feature — a fundamentally different
@@ -213,19 +270,15 @@ stage) was renamed "AI Denoise" and moved into the AI tab
 (`AIPanel.tsx`, next to `GeminiCritiquePanel`) — it was never part of this
 pipeline and user feedback flagged the naming/placement as confusing.
 
-**Known gaps / not done:**
-- Tone curve (see above).
-- `develop_raw_custom_with_algorithm`/`develop_raw_custom_with_options` (the
-  non-`--linear` CLI preview path) only crop to `active_area`, not the
-  default `crop_area` — a Phase-1 gap that the production-parity
-  `develop_raw_image_custom*` functions don't have. Low priority, CLI-preview-only.
-- Per-image raw-develop overrides only reach call sites that already had
-  an `adjustments`/`js_adjustments` value in scope to pass through:
-  `image_loader::load_image`, `generate_preview_for_path`, and
-  `load_and_composite`'s callers (`file_management.rs`, most of
-  `export_processing.rs`). Thumbnails, culling, HDR merge, panorama,
-  negative conversion, restoration, focus stacking, and
-  `export_processing.rs`'s one direct `load_base_image_from_bytes` call
-  (~line 1581) all still pass `None` (ISO-auto behavior) - deliberate scope
-  limit for this pass, not universally consistent yet. Revisit if export
-  output should always exactly match the editor's raw-develop choices.
+**Backlogged (explicitly deferred, not started):**
+- ART's third sharpening method (`psf`, real per-lens measured PSF
+  deconvolution) - needs lens PSF data we don't have.
+- Separate luma / chroma-red-green / chroma-blue-yellow denoise strength
+  sliders (ART exposes three; we collapse to one "amount" that internally
+  weights luma/chroma differently - see `raw_denoise.rs`'s
+  `LUMA_LEVEL_WEIGHTS`/`CHROMA_LEVEL_WEIGHTS`).
+- X-Trans (Fuji) demosaic - a 6×6-pattern algorithm, substantially
+  different from Bayer.
+- Dark frame / flat field subtraction - a separate feature (calibration
+  frame library: capture, store, match by camera/ISO/exposure), not part
+  of this pipeline.

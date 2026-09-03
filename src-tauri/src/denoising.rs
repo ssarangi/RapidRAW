@@ -312,9 +312,17 @@ fn denoise_image(
     let _ = app_handle.emit("denoise-progress", "Loading image...");
 
     let file_bytes = fs::read(path).map_err(|e| e.to_string())?;
-    let dynamic_img =
-        load_base_image_from_bytes(&file_bytes, &path_str, false, &settings, None, None)
-            .map_err(|e| e.to_string())?;
+    let (_, sidecar_path) = parse_virtual_path(&path_str);
+    let metadata = crate::exif_processing::load_sidecar(&sidecar_path);
+    let dynamic_img = load_base_image_from_bytes(
+        &file_bytes,
+        &path_str,
+        false,
+        &settings,
+        Some(&metadata.adjustments),
+        None,
+    )
+    .map_err(|e| e.to_string())?;
 
     let rgb_img_for_denoiser = dynamic_img.to_rgb32f();
 

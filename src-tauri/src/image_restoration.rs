@@ -804,12 +804,17 @@ pub fn run_restoration_worker(
                         } else {
                             // Standard RGB fallback/neural run
                             let img = if is_raw {
+                                let (_, sidecar_path) = crate::file_management::parse_virtual_path(
+                                    &source_path.to_string_lossy(),
+                                );
+                                let raw_develop_metadata =
+                                    crate::exif_processing::load_sidecar(&sidecar_path);
                                 match crate::image_loader::load_base_image_from_bytes(
                                     file_bytes.as_ref().unwrap(),
                                     &source_path.to_string_lossy(),
                                     false,
                                     &crate::app_settings::AppSettings::default(),
-                                    None,
+                                    Some(&raw_develop_metadata.adjustments),
                                     None,
                                 ) {
                                     Ok(loaded) => loaded,
@@ -871,12 +876,15 @@ pub fn run_restoration_worker(
     } else {
         // Non-neural fallback operation
         let img = if is_raw {
+            let (_, sidecar_path) =
+                crate::file_management::parse_virtual_path(&source_path.to_string_lossy());
+            let raw_develop_metadata = crate::exif_processing::load_sidecar(&sidecar_path);
             match crate::image_loader::load_base_image_from_bytes(
                 file_bytes.as_ref().unwrap(),
                 &source_path.to_string_lossy(),
                 false,
                 &crate::app_settings::AppSettings::default(),
-                None,
+                Some(&raw_develop_metadata.adjustments),
                 None,
             ) {
                 Ok(loaded) => loaded,

@@ -32,9 +32,11 @@ pub struct DevelopOptions {
     /// Post-demosaic wavelet luminance/chrominance denoise strength, 0..1
     /// (0 = off). See `raw_denoise.rs`.
     pub denoise_strength: f32,
-    /// Post-demosaic luminance unsharp-mask amount, 0..1 (0 = off). See
-    /// `raw_sharpen.rs`.
+    /// Post-demosaic sharpening amount, 0..1 (0 = off). See `raw_sharpen.rs`.
     pub sharpen_amount: f32,
+    /// Which sharpening algorithm `sharpen_amount` drives. See
+    /// `raw_sharpen::SharpenMethod`.
+    pub sharpen_method: crate::raw_sharpen::SharpenMethod,
 }
 
 impl Default for DevelopOptions {
@@ -43,6 +45,7 @@ impl Default for DevelopOptions {
             preprocess: true,
             denoise_strength: 0.0,
             sharpen_amount: 0.0,
+            sharpen_method: crate::raw_sharpen::SharpenMethod::UnsharpMask,
         }
     }
 }
@@ -55,6 +58,7 @@ impl DevelopOptions {
             preprocess: true,
             denoise_strength: crate::raw_denoise::suggest_strength_for_iso(iso),
             sharpen_amount: crate::raw_sharpen::suggest_amount_for_iso(iso),
+            sharpen_method: crate::raw_sharpen::SharpenMethod::UnsharpMask,
         }
     }
 }
@@ -86,6 +90,9 @@ pub struct RawSensorData {
     /// monochrome and DNG `LinearRaw` sources are all ineligible and must
     /// fall back to rawler's own pipeline.
     pub is_standard_bayer: bool,
+    /// "<clean_make> <clean_model>" (e.g. "Sony ILCE-7RM2"), used to look up
+    /// per-camera PDAF sensor-row data in `raw_pdaf_data.rs`.
+    pub camera_name: String,
 }
 
 pub fn decode_raw_sensor_data(file_bytes: &[u8]) -> Result<RawSensorData> {
@@ -175,6 +182,13 @@ pub fn decode_raw_sensor_data(file_bytes: &[u8]) -> Result<RawSensorData> {
         iso,
         orientation,
         is_standard_bayer,
+        camera_name: format!(
+            "{} {}",
+            raw_image.clean_make.trim(),
+            raw_image.clean_model.trim()
+        )
+        .trim()
+        .to_string(),
     })
 }
 
@@ -379,12 +393,14 @@ pub fn develop_raw_image_custom(
 /// only by the one real "open an image for editing" load path, not by every
 /// `raw_processing::develop_raw_image` caller (thumbnails, export, culling,
 /// etc. all keep using plain ISO-auto behavior unchanged).
+#[allow(clippy::too_many_arguments)]
 pub fn develop_raw_image_custom_resolved(
     file_bytes: &[u8],
     highlight_compression: f32,
     demosaic_override: Option<&str>,
     denoise_override: Option<f32>,
     sharpen_override: Option<f32>,
+    sharpen_method_override: Option<&str>,
     preprocess: bool,
 ) -> Result<DynamicImage> {
     let sensor = decode_raw_sensor_data(file_bytes)?;
@@ -399,12 +415,18 @@ pub fn develop_raw_image_custom_resolved(
         Some(name) => crate::demosaic_algorithms::parse_algorithm_name(name)
             .ok_or_else(|| anyhow!("unknown demosaic override '{name}'"))?,
     };
+    let sharpen_method = match sharpen_method_override {
+        None | Some("") => crate::raw_sharpen::SharpenMethod::UnsharpMask,
+        Some(name) => crate::raw_sharpen::parse_method_name(name)
+            .ok_or_else(|| anyhow!("unknown sharpen method override '{name}'"))?,
+    };
     let options = DevelopOptions {
         preprocess,
         denoise_strength: denoise_override
             .unwrap_or_else(|| crate::raw_denoise::suggest_strength_for_iso(sensor.iso)),
         sharpen_amount: sharpen_override
             .unwrap_or_else(|| crate::raw_sharpen::suggest_amount_for_iso(sensor.iso)),
+        sharpen_method,
     };
     develop_raw_image_custom_with_algorithm(file_bytes, algo, highlight_compression, &options)
 }
@@ -428,8 +450,10 @@ pub fn develop_raw_image_custom_with_algorithm(
     }
 
     if options.preprocess {
+        crate::raw_preprocess::correct_pdaf_pixels(&mut sensor);
         crate::raw_preprocess::correct_hot_dead_pixels(&mut sensor, 0.15);
         crate::raw_preprocess::correct_cfa_line_banding(&mut sensor, 0.5);
+        crate::raw_preprocess::equalize_green_channels(&mut sensor);
     }
 
     let mut rgb = crate::demosaic_algorithms::demosaic(&sensor, algo);
@@ -480,10 +504,11 @@ pub fn develop_raw_image_custom_with_algorithm(
         );
     }
     if options.sharpen_amount > 0.0 {
-        crate::raw_sharpen::unsharp_mask(
+        crate::raw_sharpen::sharpen(
             &mut rgb,
             sensor.width,
             sensor.height,
+            options.sharpen_method,
             options.sharpen_amount,
             1.0,
         );
@@ -554,8 +579,10 @@ pub fn develop_raw_custom_with_options(
     let mut sensor = decode_raw_sensor_data(file_bytes)?;
 
     if options.preprocess {
+        crate::raw_preprocess::correct_pdaf_pixels(&mut sensor);
         crate::raw_preprocess::correct_hot_dead_pixels(&mut sensor, 0.15);
         crate::raw_preprocess::correct_cfa_line_banding(&mut sensor, 0.5);
+        crate::raw_preprocess::equalize_green_channels(&mut sensor);
     }
 
     let mut rgb = crate::demosaic_algorithms::demosaic(&sensor, algo);
@@ -571,18 +598,33 @@ pub fn develop_raw_custom_with_options(
         );
     }
     if options.sharpen_amount > 0.0 {
-        crate::raw_sharpen::unsharp_mask(
+        crate::raw_sharpen::sharpen(
             &mut rgb,
             sensor.width,
             sensor.height,
+            options.sharpen_method,
             options.sharpen_amount,
             1.0,
         );
     }
 
-    let (crop_x, crop_y, crop_w, crop_h) = match sensor.active_area {
+    // Crop to active area, then to the default crop (crop_area), matching
+    // the production-parity `develop_raw_image_custom_with_algorithm` path
+    // (this used to only crop to active_area - a Phase-1 gap that only
+    // affected this CLI/test preview path, not the live app).
+    let (aa_x, aa_y, aa_w, aa_h) = match sensor.active_area {
         Some([x, y, w, h]) => (x, y, w, h),
         None => (0, 0, sensor.width, sensor.height),
+    };
+    let (crop_x, crop_y, crop_w, crop_h) = match sensor.crop_area {
+        Some([x, y, w, h]) => {
+            let x = (aa_x + x).min(sensor.width.saturating_sub(1));
+            let y = (aa_y + y).min(sensor.height.saturating_sub(1));
+            let w = w.min(sensor.width.saturating_sub(x));
+            let h = h.min(sensor.height.saturating_sub(y));
+            (x, y, w, h)
+        }
+        None => (aa_x, aa_y, aa_w, aa_h),
     };
 
     let buffer = ImageBuffer::<Rgba<u8>, _>::from_fn(crop_w as u32, crop_h as u32, |x, y| {

@@ -186,8 +186,9 @@ pub async fn preview_negative_conversion(
     state: tauri::State<'_, AppState>,
     app_handle: AppHandle,
 ) -> Result<String, String> {
-    let (source_path, _) = parse_virtual_path(&path);
+    let (source_path, sidecar_path) = parse_virtual_path(&path);
     let source_path_str = source_path.to_string_lossy().to_string();
+    let raw_develop_metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
     let mut hasher = DefaultHasher::new();
     source_path_str.hash(&mut hasher);
@@ -215,7 +216,7 @@ pub async fn preview_negative_conversion(
                                 &source_path_str,
                                 false,
                                 &settings,
-                                None,
+                                Some(&raw_develop_metadata.adjustments),
                                 None,
                             )
                             .map_err(|e| e.to_string())?,
@@ -244,7 +245,7 @@ pub async fn preview_negative_conversion(
                             &source_path_str,
                             false,
                             &settings,
-                            None,
+                            Some(&raw_develop_metadata.adjustments),
                             None,
                         )
                         .map_err(|e| e.to_string())?,
@@ -256,7 +257,7 @@ pub async fn preview_negative_conversion(
                                 &source_path_str,
                                 false,
                                 &settings,
-                                None,
+                                Some(&raw_develop_metadata.adjustments),
                                 None,
                             )
                             .map_err(|e| e.to_string())?
@@ -303,18 +304,31 @@ pub async fn convert_negatives(
                 }),
             );
 
-            let (source_path, _) = parse_virtual_path(path_str);
+            let (source_path, sidecar_path) = parse_virtual_path(path_str);
             let real_path = source_path.to_string_lossy().to_string();
+            let raw_develop_metadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
             let settings = load_settings(app_handle.clone()).unwrap_or_default();
 
             let img = match read_file_mapped(Path::new(&real_path)) {
-                Ok(mmap) => {
-                    load_base_image_from_bytes(&mmap, &real_path, false, &settings, None, None)
-                }
+                Ok(mmap) => load_base_image_from_bytes(
+                    &mmap,
+                    &real_path,
+                    false,
+                    &settings,
+                    Some(&raw_develop_metadata.adjustments),
+                    None,
+                ),
                 Err(_) => {
                     let bytes = fs::read(&real_path).unwrap_or_default();
-                    load_base_image_from_bytes(&bytes, &real_path, false, &settings, None, None)
+                    load_base_image_from_bytes(
+                        &bytes,
+                        &real_path,
+                        false,
+                        &settings,
+                        Some(&raw_develop_metadata.adjustments),
+                        None,
+                    )
                 }
             }
             .map_err(|e| e.to_string())?;
