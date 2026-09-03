@@ -85,6 +85,7 @@ export enum Invokes {
   MoveFiles = 'move_files',
   ReadExifForPaths = 'read_exif_for_paths',
   RemoveTagForPaths = 'remove_tag_for_paths',
+  ReprocessRawDevelop = 'reprocess_raw_develop',
   RenameFiles = 'rename_files',
   RenameFolder = 'rename_folder',
   ResetAdjustmentsForPaths = 'reset_adjustments_for_paths',

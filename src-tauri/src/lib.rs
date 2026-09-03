@@ -2416,6 +2416,7 @@ pub fn run() {
             focus_stacking::save_focus_stack,
             image_loader::load_image,
             image_loader::is_image_cached,
+            image_loader::reprocess_raw_develop,
             panorama_stitching::stitch_panorama,
             panorama_stitching::save_panorama,
             export_processing::export_images,

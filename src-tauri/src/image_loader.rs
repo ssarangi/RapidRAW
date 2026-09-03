@@ -844,6 +844,173 @@ pub fn composite_patches_on_image(
     Ok(composited_image)
 }
 
+/// Re-decodes `upgrade_source_path_str` on a background thread with the full
+/// custom RAW pipeline (`allow_custom_pipeline: true`) using
+/// `upgrade_adjustments` for the raw-develop overrides, and swaps the result
+/// into `state.original_image` + emits `"raw-develop-upgraded"` on success.
+/// Guarded by `generation_tracker`/`generation` (the same atomic-counter
+/// pattern `load_image` uses elsewhere) so a stale result - the user
+/// navigated to a different image, or changed the raw-develop settings again
+/// before this finished - is silently dropped rather than clobbering newer
+/// state. Shared by `load_image`'s initial "phase 2" upgrade and
+/// `reprocess_raw_develop`'s on-demand re-run when the user edits the RAW
+/// Develop panel.
+pub fn spawn_raw_develop_upgrade(
+    app_handle: tauri::AppHandle,
+    upgrade_path: String,
+    upgrade_source_path_str: String,
+    upgrade_adjustments: Value,
+    upgrade_settings: AppSettings,
+    generation_tracker: Arc<AtomicUsize>,
+    generation: usize,
+) {
+    std::thread::spawn(move || {
+        let bytes = match read_file_mapped(Path::new(&upgrade_source_path_str)) {
+            Ok(mmap) => mmap.to_vec(),
+            Err(_) => match fs::read(&upgrade_source_path_str) {
+                Ok(b) => b,
+                Err(e) => {
+                    log::warn!(
+                        "raw-develop background upgrade: failed to read '{}': {}",
+                        upgrade_source_path_str,
+                        e
+                    );
+                    let _ = app_handle.emit(
+                        "raw-develop-reprocess-error",
+                        serde_json::json!({ "path": upgrade_path, "error": e.to_string() }),
+                    );
+                    return;
+                }
+            },
+        };
+
+        if generation_tracker.load(Ordering::SeqCst) != generation {
+            return; // user navigated away / changed settings again before this even started
+        }
+
+        let upgraded = match load_base_image_from_bytes(
+            &bytes,
+            &upgrade_source_path_str,
+            false,
+            &upgrade_settings,
+            Some(&upgrade_adjustments),
+            true,
+            None,
+        ) {
+            Ok(img) => img,
+            Err(e) => {
+                log::info!(
+                    "raw-develop background upgrade failed for '{}', keeping prior decode: {}",
+                    upgrade_source_path_str,
+                    e
+                );
+                let _ = app_handle.emit(
+                    "raw-develop-reprocess-error",
+                    serde_json::json!({ "path": upgrade_path, "error": e.to_string() }),
+                );
+                return;
+            }
+        };
+
+        if generation_tracker.load(Ordering::SeqCst) != generation {
+            return; // stale by the time the (slower) upgrade finished
+        }
+
+        let state = app_handle.state::<AppState>();
+        let arc_img = Arc::new(upgraded);
+
+        {
+            let mut guard = state.original_image.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(loaded) = guard.as_ref()
+                && loaded.path == upgrade_path
+            {
+                *guard = Some(LoadedImage {
+                    path: upgrade_path.clone(),
+                    image: arc_img.clone(),
+                    is_raw: true,
+                });
+            } else {
+                return; // a different image is open now; drop this result
+            }
+        }
+
+        // Clear the same downstream caches load_image itself clears on a
+        // fresh load, since original_image just changed under them.
+        *state.cached_preview.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *state.gpu_image_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *state.full_warped_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *state.full_transformed_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        state.mask_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        state.patch_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        state.geometry_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+
+        let exif = {
+            let mut cache = state.decoded_image_cache.lock().unwrap();
+            cache
+                .get(&upgrade_source_path_str)
+                .map(|(_, exif)| exif)
+                .unwrap_or_default()
+        };
+        state
+            .decoded_image_cache
+            .lock()
+            .unwrap()
+            .insert(upgrade_source_path_str.clone(), arc_img, exif);
+
+        let _ = app_handle.emit(
+            "raw-develop-upgraded",
+            serde_json::json!({ "path": upgrade_path }),
+        );
+    });
+}
+
+/// On-demand counterpart to `load_image`'s phase-2 upgrade: called whenever
+/// the user edits the "Raw Develop" panel (demosaic algorithm, denoise/
+/// sharpen amount or method, preprocess toggle) on an already-loaded RAW
+/// image, so the change actually takes effect without requiring the user to
+/// re-select/reopen the image. Re-decodes in the background with the
+/// current in-editor `js_adjustments` (not the last-saved sidecar, which
+/// may be stale) and reuses the exact same generation-guarded swap-in +
+/// `"raw-develop-upgraded"` event the initial load's phase 2 uses, so the
+/// frontend's existing listener picks up either one identically. Bumping
+/// `load_image_generation` here also means a still-in-flight upgrade from a
+/// previous call (or from the initial load) is superseded rather than
+/// racing this one to clobber `original_image`.
+#[tauri::command]
+pub fn reprocess_raw_develop(
+    js_adjustments: serde_json::Value,
+    state: tauri::State<'_, AppState>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let (path, is_raw) = {
+        let guard = state.original_image.lock().unwrap_or_else(|e| e.into_inner());
+        let loaded = guard.as_ref().ok_or("No original image loaded")?;
+        (loaded.path.clone(), loaded.is_raw)
+    };
+
+    if !is_raw {
+        return Ok(()); // no-op: raw-develop settings only affect RAW files
+    }
+
+    let (source_path, _) = parse_virtual_path(&path);
+    let source_path_str = source_path.to_string_lossy().to_string();
+
+    let my_generation = state.load_image_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    let settings = load_settings(app_handle.clone()).unwrap_or_default();
+
+    spawn_raw_develop_upgrade(
+        app_handle,
+        path,
+        source_path_str,
+        js_adjustments,
+        settings,
+        state.load_image_generation.clone(),
+        my_generation,
+    );
+
+    Ok(())
+}
+
 #[tauri::command]
 pub fn is_image_cached(path: String, state: tauri::State<'_, AppState>) -> bool {
     let (source_path, _) = parse_virtual_path(&path);
@@ -1048,104 +1215,15 @@ pub async fn load_image(
     // background and swap it in via the "raw-develop-upgraded" event once
     // ready, so the editor updates in place rather than waiting on it.
     if is_raw {
-        let upgrade_path = path.clone();
-        let upgrade_source_path_str = source_path_str.clone();
-        let upgrade_adjustments = metadata.adjustments.clone();
-        let upgrade_settings = settings.clone();
-        let upgrade_app_handle = app_handle.clone();
-        let upgrade_generation_tracker = state.load_image_generation.clone();
-        let upgrade_generation = my_generation;
-
-        std::thread::spawn(move || {
-            let bytes = match read_file_mapped(Path::new(&upgrade_source_path_str)) {
-                Ok(mmap) => mmap.to_vec(),
-                Err(_) => match fs::read(&upgrade_source_path_str) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        log::warn!(
-                            "raw-develop background upgrade: failed to read '{}': {}",
-                            upgrade_source_path_str,
-                            e
-                        );
-                        return;
-                    }
-                },
-            };
-
-            if upgrade_generation_tracker.load(Ordering::SeqCst) != upgrade_generation {
-                return; // user navigated away before the upgrade even started
-            }
-
-            let upgraded = match load_base_image_from_bytes(
-                &bytes,
-                &upgrade_source_path_str,
-                false,
-                &upgrade_settings,
-                Some(&upgrade_adjustments),
-                true,
-                None,
-            ) {
-                Ok(img) => img,
-                Err(e) => {
-                    log::info!(
-                        "raw-develop background upgrade failed for '{}', keeping fast decode: {}",
-                        upgrade_source_path_str,
-                        e
-                    );
-                    return;
-                }
-            };
-
-            if upgrade_generation_tracker.load(Ordering::SeqCst) != upgrade_generation {
-                return; // stale by the time the (slower) upgrade finished
-            }
-
-            let state = upgrade_app_handle.state::<AppState>();
-            let arc_img = Arc::new(upgraded);
-
-            {
-                let mut guard = state.original_image.lock().unwrap_or_else(|e| e.into_inner());
-                if let Some(loaded) = guard.as_ref()
-                    && loaded.path == upgrade_path
-                {
-                    *guard = Some(LoadedImage {
-                        path: upgrade_path.clone(),
-                        image: arc_img.clone(),
-                        is_raw: true,
-                    });
-                } else {
-                    return; // a different image is open now; drop this result
-                }
-            }
-
-            // Clear the same downstream caches load_image itself clears on a
-            // fresh load, since original_image just changed under them.
-            *state.cached_preview.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            *state.gpu_image_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            *state.full_warped_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            *state.full_transformed_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
-            state.mask_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
-            state.patch_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
-            state.geometry_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
-
-            let exif = {
-                let mut cache = state.decoded_image_cache.lock().unwrap();
-                cache
-                    .get(&upgrade_source_path_str)
-                    .map(|(_, exif)| exif)
-                    .unwrap_or_default()
-            };
-            state
-                .decoded_image_cache
-                .lock()
-                .unwrap()
-                .insert(upgrade_source_path_str.clone(), arc_img, exif);
-
-            let _ = upgrade_app_handle.emit(
-                "raw-develop-upgraded",
-                serde_json::json!({ "path": upgrade_path }),
-            );
-        });
+        spawn_raw_develop_upgrade(
+            app_handle.clone(),
+            path.clone(),
+            source_path_str.clone(),
+            metadata.adjustments.clone(),
+            settings.clone(),
+            state.load_image_generation.clone(),
+            my_generation,
+        );
     }
 
     Ok(LoadImageResult {

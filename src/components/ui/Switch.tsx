@@ -29,12 +29,20 @@ const Switch = ({
   checked,
   className = '',
   disabled = false,
+  id,
   label,
   onChange,
   tooltip,
   trackClassName,
 }: SwitchProps) => {
-  const uniqueId = `switch-${label.replace(/\s+/g, '-').toLowerCase()}`;
+  // `id` was declared on SwitchProps but never read here, so every switch
+  // sharing a label (e.g. two "Auto" toggles in the same panel) rendered
+  // the same DOM id - harmless for the label/input pairing itself (the
+  // input is a descendant of its own label, so implicit association still
+  // works), but a real duplicate-id bug for anything else that resolves by
+  // id (devtools, tests, `#id` CSS, assistive tech). Prefer an explicit id
+  // when the caller supplies one, and fall back to the label-derived one.
+  const uniqueId = id ?? `switch-${label.replace(/\s+/g, '-').toLowerCase()}`;
 
   const spring = {
     type: 'spring',

@@ -21,7 +21,7 @@ use rayon::prelude::*;
 const NUM_LEVELS: usize = 4;
 // Fine-to-coarse per-level attenuation weight at strength = 1.0. Level 0 is
 // the finest (highest-frequency, most noise-like) detail band.
-const LUMA_LEVEL_WEIGHTS: [f32; NUM_LEVELS] = [0.9, 0.7, 0.4, 0.15];
+const LUMA_LEVEL_WEIGHTS: [f32; NUM_LEVELS] = [0.25, 0.45, 0.35, 0.15];
 const CHROMA_LEVEL_WEIGHTS: [f32; NUM_LEVELS] = [1.0, 0.9, 0.6, 0.3];
 
 /// Suggests a default denoise strength (0..1) from ISO - higher ISO gets

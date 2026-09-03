@@ -1,10 +1,12 @@
 import { useTranslation } from 'react-i18next';
+import { Loader2 } from 'lucide-react';
 import Slider from '../ui/Slider';
 import Switch from '../ui/Switch';
 import Dropdown from '../ui/Dropdown';
 import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
 import { Adjustments, DemosaicAlgorithm, RawDevelopAdjustment, SharpenMethod } from '../../utils/adjustments';
+import { useEditorStore } from '../../store/useEditorStore';
 
 interface RawDevelopPanelProps {
   adjustments: Adjustments;
@@ -22,6 +24,7 @@ export default function RawDevelopPanel({
   onDragStateChange,
 }: RawDevelopPanelProps) {
   const { t } = useTranslation();
+  const isRawReprocessing = useEditorStore((s) => s.isRawReprocessing);
 
   const demosaicOptions = Object.values(DemosaicAlgorithm).map((value) => ({
     value,
@@ -41,15 +44,16 @@ export default function RawDevelopPanel({
     const isAuto = value < 0;
     return (
       <div className="mb-3">
-        <div className="flex items-center justify-between mb-1">
+        <div className="flex items-center justify-between gap-3 mb-1">
           <Text variant={TextVariants.small} color={TextColors.secondary}>
             {label}
           </Text>
           <Switch
+            id={`raw-develop-auto-${key}`}
             label={t('editor.adjustments.rawDevelop.autoToggleLabel')}
             checked={isAuto}
             onChange={(checked) => setField(key, checked ? -1 : DEFAULT_MANUAL_AMOUNT)}
-            className="scale-90"
+            className="scale-90 shrink-0"
           />
         </div>
         <Slider
@@ -76,9 +80,19 @@ export default function RawDevelopPanel({
 
   return (
     <div>
-      <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mb-3">
-        {t('editor.adjustments.rawDevelop.description')}
-      </Text>
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
+          {t('editor.adjustments.rawDevelop.description')}
+        </Text>
+        {isRawReprocessing && (
+          <div className="flex items-center gap-1.5 shrink-0" title={t('editor.adjustments.rawDevelop.reprocessing')}>
+            <Loader2 size={13} className="animate-spin text-text-secondary" />
+            <Text variant={TextVariants.small} color={TextColors.secondary}>
+              {t('editor.adjustments.rawDevelop.reprocessing')}
+            </Text>
+          </div>
+        )}
+      </div>
 
       <div className="mb-4">
         <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mb-1">
@@ -114,6 +128,7 @@ export default function RawDevelopPanel({
       </div>
 
       <Switch
+        id="raw-develop-preprocess-enabled"
         label={t('editor.adjustments.rawDevelop.preprocessLabel')}
         checked={adjustments.rawPreprocessEnabled}
         onChange={(checked) => setField(RawDevelopAdjustment.PreprocessEnabled, checked)}

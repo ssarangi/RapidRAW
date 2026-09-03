@@ -327,7 +327,8 @@
           "rld": "Richardson-Lucy Deconvolution"
         },
         "autoToggleLabel": "Auto",
-        "preprocessLabel": "Hot/Dead Pixel & Line-Banding Correction"
+        "preprocessLabel": "Hot/Dead Pixel & Line-Banding Correction",
+        "reprocessing": "Reprocessing..."
       },
       "title": "Adjustments",
       "tooltips": {

@@ -433,3 +433,93 @@ the slow pipeline:
   runtime behavior (does the event fire, does the swap look smooth, is
   there a visible "pop" when phase 2 lands) needs a real test in the
   running app.
+
+## Fixed: over-aggressive luma denoise, RAW Develop panel not actually live, Switch duplicate-id bug
+
+Three separate issues reported after real usage of `_DSC1713.ARW` (Sony
+ILCE-7RM3, ISO 3200) compared directly against its in-camera JPEG:
+
+- **Soft image, halo instead of texture (leather jacket detail lost).**
+  `raw_denoise.rs`'s `LUMA_LEVEL_WEIGHTS` was `[0.9, 0.7, 0.4, 0.15]` - at
+  this file's auto strength (~0.49), the finest luminance band (exactly
+  the frequency range fine texture like leather grain, skin pores, and
+  fabric weave lives in) was attenuated by ~44%. Denoise ran before
+  sharpening, so by the time unsharp mask ran there was no fine texture
+  left to sharpen - it could only amplify the remaining large-scale edges
+  (stitching, garment silhouette), which is what a "soft interior, halo at
+  edges" look actually is. Chrominance denoise was untouched - chroma
+  noise isn't texture-bearing, so `CHROMA_LEVEL_WEIGHTS` staying aggressive
+  is correct. Fixed `LUMA_LEVEL_WEIGHTS` to `[0.25, 0.45, 0.35, 0.15]`
+  (much gentler at the finest level). Verified by cropping the exact same
+  region from the pipeline output and the camera JPEG side-by-side -
+  leather grain/wrinkle texture is now visibly present and close to the
+  JPEG, not smoothed away.
+- **The "Raw Develop" panel's demosaic/denoise/sharpen/preprocess controls
+  had no live effect at all** (a bigger problem than the reported "no
+  progress indication" - investigating that surfaced this). These fields
+  are read only by `develop_raw_image_for_editor`/
+  `develop_raw_image_custom_resolved`, which only run when the RAW file is
+  *decoded* - never by `process_preview_job`/`apply_adjustments` (the
+  generic preview-recompute pipeline every other adjustment panel uses,
+  which works on the already-decoded `state.original_image` and never
+  reads these fields). Changing the dropdown *did* trigger the generic
+  debounced preview recompute (explaining "the process starts") but that
+  recompute is a no-op for these fields - the only way the change ever
+  took effect was fully re-selecting/reopening the image (a limitation
+  already flagged, but not yet fixed, in the two-phase-load section
+  above). Fixed by actually wiring it up:
+  - Extracted `load_image`'s phase-2 background-upgrade thread (decode
+    with `allow_custom_pipeline: true`, swap into `state.original_image`,
+    clear caches, emit `"raw-develop-upgraded"`) into a shared
+    `image_loader::spawn_raw_develop_upgrade` function.
+  - New command `reprocess_raw_develop(js_adjustments)`: reads the
+    currently-loaded image's path (no-op if not RAW), bumps
+    `load_image_generation` (so a still-in-flight previous upgrade is
+    superseded), and calls `spawn_raw_develop_upgrade` with the *live*
+    in-editor `js_adjustments` (not the last-saved sidecar - the user is
+    actively editing, unsaved).
+  - Frontend (`useImageProcessing.ts`): a `useEffect` watches
+    `rawDemosaicAlgorithm`/`rawDenoiseAmount`/`rawSharpenAmount`/
+    `rawSharpenMethod`/`rawPreprocessEnabled` (joined into one string key),
+    explicitly distinguishing "these fields changed" from "the selected
+    image changed" (a path change must never itself count as a field
+    edit, even though a different image's own raw-develop values will
+    differ) via a ref tracking `{path, fieldsKey}` from the previous run.
+    A genuine field edit sets `isRawReprocessing: true` and calls a
+    lodash-debounced (500ms) `invoke(ReprocessRawDevelop)` - the debounce
+    means rapid dropdown/slider changes settle on one request instead of
+    each one starting (and wasting several CPU-seconds on) a full
+    multi-second re-decode that the next change immediately supersedes.
+    The existing `raw-develop-upgraded` listener (shared with the initial
+    phase-2 load) clears `isRawReprocessing` and re-renders; a new
+    `raw-develop-reprocess-error` event (emitted by
+    `spawn_raw_develop_upgrade` on a read/decode failure) also clears it,
+    so the busy indicator can't get stuck on if the reprocess fails.
+  - UI: `RawDevelop.tsx` shows a small spinner + "Reprocessing..." label
+    (via a new `isRawReprocessing` field on `useEditorStore`) next to the
+    panel description whenever a reprocess is in flight - the actual ask
+    behind the "no indication" report.
+  - **Known remaining limitation**: this does not *cancel* an
+    already-*running* re-decode mid-flight (the debounce only prevents
+    *starting* redundant ones) - true cancellation would need a
+    cancellation check threaded through `custom_raw_pipeline`'s stages,
+    which wasn't done here. In practice the debounce should make this rare
+    (a decode only starts after 500ms of no further changes), but a decode
+    already in progress when a *new* change lands will still run to
+    completion before the newer one starts.
+- **`Switch.tsx`'s `id` prop was declared on `SwitchProps` but never read**
+  - every switch derived its DOM id purely from its `label` text
+    (`switch-${label...}`), so two switches sharing a label (the "Auto"
+    toggles next to RAW Denoise and RAW Sharpening) rendered the exact
+    same `id`. The click/label association itself still worked (the
+    `<input>` is a DOM descendant of its own `<label>`, so implicit
+    association doesn't depend on `id` matching), but this was a real bug
+    for anything else that resolves by id and a likely contributor to the
+    reported "can't turn off Sharpen's Auto, seems connected to Denoise's"
+    confusion. Fixed to prefer an explicit `id` when the caller passes
+    one; `RawDevelop.tsx`'s two "Auto" switches (and the preprocess
+    switch) now pass distinct explicit ids. Also added `gap-3`/`shrink-0`
+    to the label+switch row layout in `RawDevelop.tsx` as a defensive fix
+    for the reported "text and toggle with no gap" look, but this was
+    **not visually confirmed** (no GUI access in this environment) - if it
+    persists, the actual screenshot is needed to diagnose further.

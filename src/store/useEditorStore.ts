@@ -36,6 +36,7 @@ interface EditorState {
   uncroppedAdjustedPreviewUrl: string | null;
   interactivePatch: InteractivePatch | null;
   showOriginal: boolean;
+  isRawReprocessing: boolean;
 
   // Analytics
   histogram: ChannelConfig | null;
@@ -97,6 +98,7 @@ export const useEditorStore = create<EditorState>((set) => ({
   finalPreviewUrl: null,
   uncroppedAdjustedPreviewUrl: null,
   showOriginal: false,
+  isRawReprocessing: false,
   histogram: null,
   waveform: null,
   isWaveformVisible: false,

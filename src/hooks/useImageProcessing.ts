@@ -518,11 +518,14 @@ export function useImageProcessing(
   // IGV/LMMSE + denoise/sharpen pipeline finishes moments later in the
   // background and swaps into the backend's original_image. Re-render once
   // that happens so the on-screen image quietly upgrades in place, without
-  // the user having to touch an adjustment or reselect the image.
+  // the user having to touch an adjustment or reselect the image. The same
+  // event also fires for an on-demand `ReprocessRawDevelop` call (see
+  // below), so this one listener covers both.
   useEffect(() => {
     const unlistenPromise = listen('raw-develop-upgraded', (event: any) => {
       const path = event.payload?.path;
       const current = useEditorStore.getState();
+      if (current.isRawReprocessing) current.setEditor({ isRawReprocessing: false });
       if (!path || current.selectedImage?.path !== path || !current.selectedImage?.isReady) return;
       const { adjustments, previewOverride } = current;
       applyAdjustments(previewOverride ?? adjustments, false, calculateTargetRes(true));
@@ -531,6 +534,64 @@ export function useImageProcessing(
       unlistenPromise.then((unlisten) => unlisten());
     };
   }, [applyAdjustments, calculateTargetRes]);
+
+  // A reprocess attempt that failed (unreadable file, ineligible sensor,
+  // etc.) still needs to clear the busy indicator - `raw-develop-upgraded`
+  // never fires in that case.
+  useEffect(() => {
+    const unlistenPromise = listen('raw-develop-reprocess-error', () => {
+      useEditorStore.getState().setEditor({ isRawReprocessing: false });
+    });
+    return () => {
+      unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  // Re-runs the custom RAW pipeline (demosaic/denoise/sharpen/preprocess)
+  // whenever the "Raw Develop" panel's own fields change - `apply_adjustments`
+  // (the normal preview pipeline above) never reads these, since they only
+  // take effect through a re-decode of the original file, not a re-render of
+  // the already-decoded image. Debounced so a slider drag or rapid dropdown
+  // switching settles on one request instead of queuing a full multi-second
+  // re-decode per intermediate value - each one is otherwise wasted work the
+  // moment a newer one supersedes it.
+  const reprocessRawDevelop = useMemo(
+    () =>
+      debounce((rawAdjustments: Adjustments) => {
+        invoke(Invokes.ReprocessRawDevelop, { jsAdjustments: rawAdjustments }).catch((err) => {
+          console.error('Failed to reprocess RAW develop settings:', err);
+          useEditorStore.getState().setEditor({ isRawReprocessing: false });
+        });
+      }, 500),
+    [],
+  );
+
+  const rawDevelopFieldsKey = [
+    adjustments.rawDemosaicAlgorithm,
+    adjustments.rawDenoiseAmount,
+    adjustments.rawSharpenAmount,
+    adjustments.rawSharpenMethod,
+    adjustments.rawPreprocessEnabled,
+  ].join('|');
+  const lastSeenRawDevelopRef = useRef<{ path?: string; fieldsKey?: string }>({});
+
+  useEffect(() => {
+    const prev = lastSeenRawDevelopRef.current;
+    const pathChanged = prev.path !== selectedImage?.path;
+    const fieldsChanged = prev.fieldsKey !== rawDevelopFieldsKey;
+    lastSeenRawDevelopRef.current = { path: selectedImage?.path, fieldsKey: rawDevelopFieldsKey };
+
+    // A fresh image (including switching between images) always starts a
+    // brand new comparison baseline - its own load already applied these
+    // exact settings via phase 2, so a path change must never itself count
+    // as a "field changed" edit, even though the new image's own raw-develop
+    // values necessarily differ from the previous image's.
+    if (pathChanged || !fieldsChanged) return;
+    if (!selectedImage?.isRaw || !selectedImage?.isReady) return;
+
+    useEditorStore.getState().setEditor({ isRawReprocessing: true });
+    reprocessRawDevelop(useEditorStore.getState().adjustments);
+  }, [rawDevelopFieldsKey, selectedImage?.path, selectedImage?.isRaw, selectedImage?.isReady, reprocessRawDevelop]);
 
   return {
     applyAdjustments,
