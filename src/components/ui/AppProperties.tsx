@@ -113,6 +113,10 @@ export enum Invokes {
   ListFaceModelPacks = 'list_face_model_packs',
   ListFaceModelPackStatuses = 'list_face_model_pack_statuses',
   DownloadFaceModelPack = 'download_face_model_pack',
+  ResolveFaceModelSelection = 'resolve_face_model_selection',
+  GetCatalogFaceProcessingSettings = 'get_catalog_face_processing_settings',
+  SetCatalogFaceProcessingSettings = 'set_catalog_face_processing_settings',
+  ReprocessFaceIndex = 'reprocess_face_index',
   ListVisualModelPackStatuses = 'list_visual_model_pack_statuses',
   DownloadVisualModelPack = 'download_visual_model_pack',
   InstallVisualModelBundle = 'install_visual_model_bundle',
@@ -253,8 +257,10 @@ export interface WorkspaceState {
 
 export type GroupPreference = 'jpeg' | 'raw';
 export type GroupingMode = 'off' | GroupPreference;
+export type FaceModelSelectionPolicy = 'accuracy' | 'balanced' | 'speed' | 'automatic';
 
 export interface AppSettings {
+  faceModelPolicy?: FaceModelSelectionPolicy;
   aiConnectorAddress?: string;
   aiProvider?: string;
   geminiApiKey?: string;
@@ -431,6 +437,7 @@ export interface CatalogMetrics {
 
 export type FaceModelAvailability = 'directDownload' | 'conversionRequired';
 export type FaceModelArtifactFormat = 'onnx' | 'zip' | 'checkpoint';
+export type FaceModelRuntimeSupport = 'supported' | 'adapterPending';
 
 export interface FaceModelArtifact {
   fileName: string;
@@ -444,14 +451,29 @@ export interface InstalledFaceModelArtifact {
   sha256: string;
 }
 
+// Stable backend/database-facing identifiers. Keep model-pack names here so
+// UI code cannot silently introduce a second spelling of a runtime model.
+export enum FaceModelPackId {
+  YuNetSFace = 'opencv-yunet-sface',
+  InsightFaceBuffaloSc = 'insightface-buffalo-sc',
+  InsightFaceBuffaloS = 'insightface-buffalo-s',
+  InsightFaceBuffaloM = 'insightface-buffalo-m',
+  InsightFaceBuffaloL = 'insightface-buffalo-l',
+  InsightFaceAntelopeV2 = 'insightface-antelopev2',
+}
+
 export interface FaceModelPack {
-  id: string;
+  id: FaceModelPackId;
   displayName: string;
   description: string;
   detector: string;
   recognizer: string;
   detectorLandmarks: number;
   embeddingDimensions?: number | null;
+  accuracyRank: number;
+  speedRank: number;
+  balancedRank: number;
+  runtimeSupport: FaceModelRuntimeSupport;
   availability: FaceModelAvailability;
   artifacts: FaceModelArtifact[];
   licenseName: string;
@@ -465,6 +487,15 @@ export interface FaceModelPackStatus {
   installed: boolean;
   installPath: string;
   installedArtifacts: InstalledFaceModelArtifact[];
+}
+
+export interface FaceModelSelection {
+  policy: FaceModelSelectionPolicy;
+  selected: FaceModelPack;
+}
+
+export interface CatalogFaceProcessingSettings {
+  faceModelPolicy: FaceModelSelectionPolicy;
 }
 
 export interface VisualModelPack {

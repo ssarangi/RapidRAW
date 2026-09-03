@@ -16,7 +16,7 @@ use crate::file_management::{ImageFile, parse_virtual_path};
 use crate::file_management::{assign_group_ids, read_file_mapped};
 use crate::formats::{is_raw_file, is_supported_image_file};
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 13;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +25,14 @@ pub struct LibraryInfo {
     pub name: String,
     pub db_path: String,
     pub schema_version: i64,
+}
+
+/// The user-facing face-processing preference belongs to the catalog, not an
+/// individual import. This keeps one consistent embedding space per catalog.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogFaceProcessingSettings {
+    pub face_model_policy: crate::face_model_registry::FaceModelSelectionPolicy,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -260,6 +268,8 @@ pub struct CatalogFace {
     pub image_id: i64,
     pub person_id: Option<i64>,
     pub model_pack_id: String,
+    pub detector_model_id: String,
+    pub recognizer_model_id: Option<String>,
     pub confidence: f64,
     pub x: f64,
     pub y: f64,
@@ -580,6 +590,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS libraries (
           id TEXT PRIMARY KEY,
           name TEXT NOT NULL,
+          face_model_policy TEXT NOT NULL DEFAULT 'accuracy',
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
           app_version TEXT
@@ -702,6 +713,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         CREATE TABLE IF NOT EXISTS face_embeddings (
           id INTEGER PRIMARY KEY,
           model_pack_id TEXT NOT NULL,
+          recognizer_model_id TEXT NOT NULL,
           dimensions INTEGER NOT NULL CHECK(dimensions > 0),
           vector BLOB NOT NULL,
           norm REAL,
@@ -714,6 +726,8 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
           embedding_id INTEGER REFERENCES face_embeddings(id) ON DELETE SET NULL,
           model_pack_id TEXT NOT NULL,
+          detector_model_id TEXT NOT NULL,
+          recognizer_model_id TEXT,
           detector_confidence REAL NOT NULL,
           bbox_x REAL NOT NULL CHECK(bbox_x >= 0 AND bbox_x <= 1),
           bbox_y REAL NOT NULL CHECK(bbox_y >= 0 AND bbox_y <= 1),
@@ -947,6 +961,20 @@ fn migrate(conn: &Connection) -> Result<(), String> {
 
     let _ = conn.execute("ALTER TABLE faces ADD COLUMN thumbnail_jpeg BLOB", []);
     let _ = conn.execute(
+        "ALTER TABLE faces ADD COLUMN detector_model_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE faces ADD COLUMN recognizer_model_id TEXT", []);
+    let _ = conn.execute(
+        "ALTER TABLE face_embeddings ADD COLUMN recognizer_model_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE libraries ADD COLUMN face_model_policy TEXT NOT NULL DEFAULT 'accuracy'",
+        [],
+    );
+    backfill_face_model_provenance(conn)?;
+    let _ = conn.execute(
         "ALTER TABLE cull_decisions ADD COLUMN factors_json TEXT NOT NULL DEFAULT '[]'",
         [],
     );
@@ -960,6 +988,35 @@ fn migrate(conn: &Connection) -> Result<(), String> {
         params![SCHEMA_VERSION, now_secs()],
     )
     .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Backfill the explicit detector/recognizer audit fields for catalogs made
+/// before face-model packs were recorded as a pair. Unknown legacy IDs are
+/// deliberately left untouched rather than guessed.
+fn backfill_face_model_provenance(conn: &Connection) -> Result<(), String> {
+    for pack in crate::face_model_registry::FaceModelPackId::ALL {
+        conn.execute(
+            "UPDATE faces
+             SET detector_model_id = CASE
+                   WHEN detector_model_id = '' THEN ?1 ELSE detector_model_id END,
+                 recognizer_model_id = COALESCE(recognizer_model_id, ?2)
+             WHERE model_pack_id = ?3",
+            [
+                pack.detector_model_id(),
+                pack.recognizer_model_id(),
+                pack.as_str(),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        conn.execute(
+            "UPDATE face_embeddings
+             SET recognizer_model_id = ?1
+             WHERE model_pack_id = ?2 AND recognizer_model_id = ''",
+            [pack.recognizer_model_id(), pack.as_str()],
+        )
+        .map_err(|error| error.to_string())?;
+    }
     Ok(())
 }
 
@@ -1150,11 +1207,13 @@ mod tests {
         );
         assert_eq!(
             parse_model_download_retry_payload(&serde_json::json!({
-                "packId": "opencv-yunet-sface"
+                "packId": crate::face_model_registry::FaceModelPackId::YuNetSFace.as_str()
             }))
             .unwrap(),
             ModelDownloadRetryTarget::Face {
-                pack_id: "opencv-yunet-sface".to_string()
+                pack_id: crate::face_model_registry::FaceModelPackId::YuNetSFace
+                    .as_str()
+                    .to_string()
             }
         );
         assert_eq!(
@@ -1259,11 +1318,59 @@ mod tests {
 
         let error = connection
             .execute(
-                "INSERT INTO faces(image_id, model_pack_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, created_at, updated_at) VALUES(1, 'test', 0.9, 1.1, 0.1, 0.2, 0.2, 0, 0)",
+                "INSERT INTO faces(image_id, model_pack_id, detector_model_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, created_at, updated_at) VALUES(1, 'test', 'test-detector', 0.9, 1.1, 0.1, 0.2, 0.2, 0, 0)",
                 [],
             )
             .unwrap_err();
         assert!(error.to_string().contains("CHECK constraint failed"));
+    }
+
+    #[test]
+    fn catalog_persists_its_face_processing_mode() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("catalog.db");
+        create_library_headless("Archive", &db_path).unwrap();
+        assert_eq!(
+            face_model_policy_for_database(&db_path).unwrap(),
+            crate::face_model_registry::FaceModelSelectionPolicy::Accuracy
+        );
+
+        let connection = open_connection(&db_path).unwrap();
+        connection
+            .execute("UPDATE libraries SET face_model_policy = 'speed'", [])
+            .unwrap();
+        assert_eq!(
+            face_model_policy_for_database(&db_path).unwrap(),
+            crate::face_model_registry::FaceModelSelectionPolicy::Speed
+        );
+    }
+
+    #[test]
+    fn face_schema_records_the_detector_and_paired_recognizer() {
+        let connection = Connection::open_in_memory().unwrap();
+        migrate(&connection).unwrap();
+        insert_test_image(&connection);
+        let pack = crate::face_model_registry::FaceModelPackId::InsightFaceAntelopeV2;
+        connection
+            .execute(
+                "INSERT INTO faces(image_id, model_pack_id, detector_model_id, recognizer_model_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, created_at, updated_at) VALUES(1, ?1, ?2, ?3, 0.9, 0.1, 0.1, 0.2, 0.2, 0, 0)",
+                [
+                    pack.as_str(),
+                    pack.detector_model_id(),
+                    pack.recognizer_model_id(),
+                ],
+            )
+            .unwrap();
+        let provenance: (String, String, Option<String>) = connection
+            .query_row(
+                "SELECT model_pack_id, detector_model_id, recognizer_model_id FROM faces LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(provenance.0, pack.as_str());
+        assert_eq!(provenance.1, pack.detector_model_id());
+        assert_eq!(provenance.2.as_deref(), Some(pack.recognizer_model_id()));
     }
 
     #[test]
@@ -1279,8 +1386,12 @@ mod tests {
             .unwrap();
         connection
             .execute(
-                "INSERT INTO faces(image_id, person_id, model_pack_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, review_state, created_at, updated_at) VALUES(1, 1, 'opencv-yunet-sface', 0.9, 0.1, 0.1, 0.2, 0.2, 'confirmed', 0, 0)",
-                [],
+                "INSERT INTO faces(image_id, person_id, model_pack_id, detector_model_id, recognizer_model_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, review_state, created_at, updated_at) VALUES(1, 1, ?1, ?2, ?3, 0.9, 0.1, 0.1, 0.2, 0.2, 'confirmed', 0, 0)",
+                [
+                    crate::face_model_registry::FaceModelPackId::YuNetSFace.as_str(),
+                    crate::face_model_registry::FaceModelPackId::YuNetSFace.detector_model_id(),
+                    crate::face_model_registry::FaceModelPackId::YuNetSFace.recognizer_model_id(),
+                ],
             )
             .unwrap();
 
@@ -2365,6 +2476,70 @@ pub fn open_library(
 pub fn close_library(state: tauri::State<'_, crate::AppState>) -> Result<(), String> {
     *state.active_library_path.lock().unwrap() = None;
     Ok(())
+}
+
+pub fn face_model_policy_for_database(
+    db_path: &Path,
+) -> Result<crate::face_model_registry::FaceModelSelectionPolicy, String> {
+    let conn = open_connection(db_path)?;
+    let value: String = conn
+        .query_row(
+            "SELECT face_model_policy FROM libraries LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    crate::face_model_registry::FaceModelSelectionPolicy::try_from(value.as_str()).or(Ok(
+        crate::face_model_registry::FaceModelSelectionPolicy::Accuracy,
+    ))
+}
+
+#[tauri::command]
+pub fn get_catalog_face_processing_settings(
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<CatalogFaceProcessingSettings, String> {
+    let db_path = active_library_path(&state)?;
+    Ok(CatalogFaceProcessingSettings {
+        face_model_policy: face_model_policy_for_database(&db_path)?,
+    })
+}
+
+#[tauri::command]
+pub fn set_catalog_face_processing_settings(
+    policy: crate::face_model_registry::FaceModelSelectionPolicy,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<CatalogFaceProcessingSettings, String> {
+    let db_path = active_library_path(&state)?;
+    let conn = open_connection(&db_path)?;
+    conn.execute(
+        "UPDATE libraries SET face_model_policy = ?1, updated_at = ?2",
+        params![policy.as_str(), now_secs()],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(CatalogFaceProcessingSettings {
+        face_model_policy: policy,
+    })
+}
+
+/// Remove derived face data while retaining the photographer's catalog,
+/// roots, images, and named people. This is deliberately only called from a
+/// user-initiated full reindex after changing the catalog processing mode.
+pub fn clear_face_index(db_path: &Path) -> Result<(), String> {
+    let mut conn = open_connection(db_path)?;
+    let transaction = conn.transaction().map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM face_clusters", [])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM faces", [])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM face_embeddings", [])
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM face_scan_state", [])
+        .map_err(|error| error.to_string())?;
+    transaction.commit().map_err(|error| error.to_string())
 }
 
 /// Reconciles catalog paths after RapidRAW moves files within a collection root.
@@ -5895,8 +6070,8 @@ pub fn list_catalog_face_review_items_for_path(
     let face_crops_dir = crate::face_detection::get_face_crops_dir(&app_handle).ok();
     let mut statement = conn
         .prepare(
-            "SELECT id, image_id, person_id, model_pack_id, detector_confidence,
-                    bbox_x, bbox_y, bbox_width, bbox_height, review_state, thumbnail_jpeg
+            "SELECT id, image_id, person_id, model_pack_id, detector_model_id, recognizer_model_id,
+                    detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, review_state, thumbnail_jpeg
              FROM faces WHERE image_id = ?1
              ORDER BY detector_confidence DESC, id",
         )
@@ -5904,7 +6079,7 @@ pub fn list_catalog_face_review_items_for_path(
     statement
         .query_map([image_id], |row| {
             let face_id: i64 = row.get(0)?;
-            let thumbnail_data_url = row.get::<_, Option<Vec<u8>>>(10)?.map(|bytes| {
+            let thumbnail_data_url = row.get::<_, Option<Vec<u8>>>(12)?.map(|bytes| {
                 format!(
                     "data:image/jpeg;base64,{}",
                     base64::prelude::BASE64_STANDARD.encode(bytes)
@@ -5920,12 +6095,14 @@ pub fn list_catalog_face_review_items_for_path(
                     image_id: row.get(1)?,
                     person_id: row.get(2)?,
                     model_pack_id: row.get(3)?,
-                    confidence: row.get(4)?,
-                    x: row.get(5)?,
-                    y: row.get(6)?,
-                    width: row.get(7)?,
-                    height: row.get(8)?,
-                    review_state: row.get(9)?,
+                    detector_model_id: row.get(4)?,
+                    recognizer_model_id: row.get(5)?,
+                    confidence: row.get(6)?,
+                    x: row.get(7)?,
+                    y: row.get(8)?,
+                    width: row.get(9)?,
+                    height: row.get(10)?,
+                    review_state: row.get(11)?,
                 },
                 image_path: requested_path.clone(),
                 crop_path,
@@ -5943,8 +6120,8 @@ fn list_faces_for_image_internal(
 ) -> Result<Vec<CatalogFace>, String> {
     let mut statement = conn
         .prepare(
-            "SELECT id, image_id, person_id, model_pack_id, detector_confidence,
-                    bbox_x, bbox_y, bbox_width, bbox_height, review_state
+            "SELECT id, image_id, person_id, model_pack_id, detector_model_id, recognizer_model_id,
+                    detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, review_state
              FROM faces
              WHERE image_id = ?1
              ORDER BY detector_confidence DESC, id",
@@ -5957,12 +6134,14 @@ fn list_faces_for_image_internal(
                 image_id: row.get(1)?,
                 person_id: row.get(2)?,
                 model_pack_id: row.get(3)?,
-                confidence: row.get(4)?,
-                x: row.get(5)?,
-                y: row.get(6)?,
-                width: row.get(7)?,
-                height: row.get(8)?,
-                review_state: row.get(9)?,
+                detector_model_id: row.get(4)?,
+                recognizer_model_id: row.get(5)?,
+                confidence: row.get(6)?,
+                x: row.get(7)?,
+                y: row.get(8)?,
+                width: row.get(9)?,
+                height: row.get(10)?,
+                review_state: row.get(11)?,
             })
         })
         .map_err(|error| error.to_string())?
@@ -5978,11 +6157,11 @@ pub fn list_unreviewed_catalog_faces(
     use base64::Engine;
     let conn = open_connection(&active_library_path(&state)?)?;
     let face_crops_dir = crate::face_detection::get_face_crops_dir(&app_handle).ok();
-    let mut statement = conn.prepare("SELECT f.id, f.image_id, f.person_id, f.model_pack_id, f.detector_confidence, f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height, f.review_state, r.absolute_path || '/' || i.relative_path, f.thumbnail_jpeg FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE f.review_state = 'unreviewed' AND i.status = 'present' GROUP BY i.folder_id, substr(i.file_name, 1, instr(i.file_name || '.', '.') - 1), round(f.bbox_x, 2), round(f.bbox_y, 2) ORDER BY f.detector_confidence DESC LIMIT 500").map_err(|error| error.to_string())?;
+    let mut statement = conn.prepare("SELECT f.id, f.image_id, f.person_id, f.model_pack_id, f.detector_model_id, f.recognizer_model_id, f.detector_confidence, f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height, f.review_state, r.absolute_path || '/' || i.relative_path, f.thumbnail_jpeg FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE f.review_state = 'unreviewed' AND i.status = 'present' GROUP BY i.folder_id, substr(i.file_name, 1, instr(i.file_name || '.', '.') - 1), round(f.bbox_x, 2), round(f.bbox_y, 2) ORDER BY f.detector_confidence DESC LIMIT 500").map_err(|error| error.to_string())?;
     statement
         .query_map([], |row| {
             let face_id: i64 = row.get(0)?;
-            let thumb_blob: Option<Vec<u8>> = row.get(11)?;
+            let thumb_blob: Option<Vec<u8>> = row.get(13)?;
             let thumbnail_data_url = thumb_blob.map(|b| {
                 format!(
                     "data:image/jpeg;base64,{}",
@@ -6003,14 +6182,16 @@ pub fn list_unreviewed_catalog_faces(
                     image_id: row.get(1)?,
                     person_id: row.get(2)?,
                     model_pack_id: row.get(3)?,
-                    confidence: row.get(4)?,
-                    x: row.get(5)?,
-                    y: row.get(6)?,
-                    width: row.get(7)?,
-                    height: row.get(8)?,
-                    review_state: row.get(9)?,
+                    detector_model_id: row.get(4)?,
+                    recognizer_model_id: row.get(5)?,
+                    confidence: row.get(6)?,
+                    x: row.get(7)?,
+                    y: row.get(8)?,
+                    width: row.get(9)?,
+                    height: row.get(10)?,
+                    review_state: row.get(11)?,
                 },
-                image_path: row.get(10)?,
+                image_path: row.get(12)?,
                 crop_path,
                 thumbnail_data_url,
             })

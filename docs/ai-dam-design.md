@@ -889,10 +889,8 @@ rapidraw-cli library create --name "Archive" --database /data/archive.db
 rapidraw-cli library add-root --database /data/archive.db /photos/2026
 rapidraw-cli catalog scan --database /data/archive.db --root /photos/2026 --recursive --json-progress
 rapidraw-cli models list --json
-rapidraw-cli models install opencv-yunet-sface
-rapidraw-cli faces detect --database /data/archive.db --model opencv-yunet-sface --root /photos/2026
-rapidraw-cli faces cluster --database /data/archive.db --model opencv-yunet-sface
-rapidraw-cli faces recognize --database /data/archive.db --model opencv-yunet-sface --json-report report.json
+rapidraw-cli faces detect --database /data/archive.db --face-models-dir /data/models/face --root 1 --policy accuracy
+rapidraw-cli faces recognize --database /data/archive.db --face-models-dir /data/models/face --root 1 --policy accuracy
 rapidraw-cli people list --database /data/archive.db --json
 rapidraw-cli cull analyze /photos/session --preset portraits --json-report cull-report.json
 ```

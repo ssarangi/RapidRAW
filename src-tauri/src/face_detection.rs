@@ -2,19 +2,48 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use image::{DynamicImage, imageops::FilterType};
-use ndarray::Array4;
+use image::{DynamicImage, Rgb, RgbImage, imageops::FilterType};
+use ndarray::{Array4, ArrayViewD};
 use ort::session::Session;
 use ort::value::Tensor;
 use rusqlite::params;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::library_db::{active_library_path, create_background_job, update_job};
+use crate::face_model_registry::FaceModelPackId;
+use crate::library_db::{active_library_path, clear_face_index, create_background_job, update_job};
 
-const YUNET_MODEL: &str = "face_detection_yunet_2023mar.onnx";
-const SFACE_MODEL: &str = "face_recognition_sface_2021dec.onnx";
 const INPUT_SIZE: u32 = 640;
 const SFACE_INPUT_SIZE: u32 = 112;
+const INSIGHTFACE_INPUT_SIZE: u32 = 640;
+const YUNET_REVIEW_THRESHOLD: f32 = 0.65;
+const YUNET_MIN_PROFILE_ASPECT_RATIO: f32 = 0.30;
+const YUNET_MAX_FACE_ASPECT_RATIO: f32 = 1.90;
+const YUNET_MIN_PROFILE_EYE_DISTANCE_RATIO: f32 = 0.07;
+const ARCFACE_FIVE_POINT_TEMPLATE: [[f32; 2]; 5] = [
+    [38.2946, 51.6963],
+    [73.5318, 51.5014],
+    [56.0252, 71.7366],
+    [41.5493, 92.3655],
+    [70.7299, 92.2041],
+];
+
+fn configured_face_model_policy(
+    db_path: &Path,
+) -> crate::face_model_registry::FaceModelSelectionPolicy {
+    crate::library_db::face_model_policy_for_database(db_path)
+        .unwrap_or(crate::face_model_registry::FaceModelSelectionPolicy::Accuracy)
+}
+
+/// Ad-hoc folder culling has no catalog in which to persist a face-index
+/// choice, so it continues to use the application default.
+fn configured_local_face_model_policy(
+    app_handle: &AppHandle,
+) -> crate::face_model_registry::FaceModelSelectionPolicy {
+    crate::load_settings(app_handle.clone())
+        .ok()
+        .and_then(|settings| settings.face_model_policy)
+        .unwrap_or(crate::face_model_registry::FaceModelSelectionPolicy::Accuracy)
+}
 
 #[derive(Debug, Clone)]
 struct Detection {
@@ -24,6 +53,97 @@ struct Detection {
     width: f32,
     height: f32,
     landmarks: [[f32; 2]; 5],
+}
+
+fn landmarks_support_alignment(landmarks: &[[f32; 2]; 5], bbox_width: f64) -> bool {
+    let eye_distance = ((landmarks[0][0] - landmarks[1][0]).powi(2)
+        + (landmarks[0][1] - landmarks[1][1]).powi(2))
+    .sqrt();
+    landmarks
+        .iter()
+        .flatten()
+        .all(|value| value.is_finite() && (0.0..=1.0).contains(value))
+        && eye_distance >= (bbox_width as f32 * 0.12)
+}
+
+fn bilinear_pixel(image: &RgbImage, x: f32, y: f32) -> Rgb<u8> {
+    let x = x.clamp(0.0, image.width().saturating_sub(1) as f32);
+    let y = y.clamp(0.0, image.height().saturating_sub(1) as f32);
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(image.width() - 1);
+    let y1 = (y0 + 1).min(image.height() - 1);
+    let fx = x - x0 as f32;
+    let fy = y - y0 as f32;
+    let p00 = image.get_pixel(x0, y0);
+    let p10 = image.get_pixel(x1, y0);
+    let p01 = image.get_pixel(x0, y1);
+    let p11 = image.get_pixel(x1, y1);
+    Rgb(std::array::from_fn(|channel| {
+        let top = p00[channel] as f32 * (1.0 - fx) + p10[channel] as f32 * fx;
+        let bottom = p01[channel] as f32 * (1.0 - fx) + p11[channel] as f32 * fx;
+        (top * (1.0 - fy) + bottom * fy).round().clamp(0.0, 255.0) as u8
+    }))
+}
+
+/// Five-point similarity alignment shared by SFace and ArcFace. Returning
+/// `None` for compressed/occluded profile landmarks is intentional: forcing
+/// an affine transform in that case creates a worse embedding than a padded,
+/// aspect-preserving fallback crop.
+fn align_five_point_face(image: &DynamicImage, landmarks: [[f32; 2]; 5]) -> Option<RgbImage> {
+    let source = image.to_rgb8();
+    let src_points: [[f32; 2]; 5] =
+        landmarks.map(|[x, y]| [x * source.width() as f32, y * source.height() as f32]);
+    let src_mean = src_points.iter().fold([0.0; 2], |mut total, point| {
+        total[0] += point[0] / 5.0;
+        total[1] += point[1] / 5.0;
+        total
+    });
+    let dst_mean = ARCFACE_FIVE_POINT_TEMPLATE
+        .iter()
+        .fold([0.0; 2], |mut total, point| {
+            total[0] += point[0] / 5.0;
+            total[1] += point[1] / 5.0;
+            total
+        });
+    let (mut scale_cos, mut scale_sin, mut denominator) = (0.0, 0.0, 0.0);
+    for (source_point, destination_point) in src_points.iter().zip(ARCFACE_FIVE_POINT_TEMPLATE) {
+        let sx = source_point[0] - src_mean[0];
+        let sy = source_point[1] - src_mean[1];
+        let dx = destination_point[0] - dst_mean[0];
+        let dy = destination_point[1] - dst_mean[1];
+        scale_cos += sx * dx + sy * dy;
+        scale_sin += sx * dy - sy * dx;
+        denominator += sx * sx + sy * sy;
+    }
+    if denominator <= f32::EPSILON {
+        return None;
+    }
+    let a = scale_cos / denominator;
+    let b = scale_sin / denominator;
+    let magnitude = a * a + b * b;
+    if !magnitude.is_finite() || magnitude <= f32::EPSILON {
+        return None;
+    }
+    let tx = dst_mean[0] - a * src_mean[0] + b * src_mean[1];
+    let ty = dst_mean[1] - b * src_mean[0] - a * src_mean[1];
+    let mut aligned = RgbImage::new(SFACE_INPUT_SIZE, SFACE_INPUT_SIZE);
+    for y in 0..SFACE_INPUT_SIZE {
+        for x in 0..SFACE_INPUT_SIZE {
+            let dx = x as f32 - tx;
+            let dy = y as f32 - ty;
+            aligned.put_pixel(
+                x,
+                y,
+                bilinear_pixel(
+                    &source,
+                    (a * dx + b * dy) / magnitude,
+                    (-b * dx + a * dy) / magnitude,
+                ),
+            );
+        }
+    }
+    Some(aligned)
 }
 
 /// Geometry available from YuNet's five landmarks. This is deliberately a
@@ -94,6 +214,22 @@ fn intersection_over_union(a: &Detection, b: &Detection) -> f32 {
     intersection / (a.width * a.height + b.width * b.height - intersection).max(f32::EPSILON)
 }
 
+fn scrfd_tensor_value(tensor: &ArrayViewD<'_, f32>, row: usize, column: usize) -> Option<f32> {
+    match tensor.ndim() {
+        2 => Some(tensor[[row, column]]),
+        3 => Some(tensor[[0, row, column]]),
+        _ => None,
+    }
+}
+
+fn scrfd_tensor_rows(tensor: &ArrayViewD<'_, f32>) -> Option<usize> {
+    match tensor.ndim() {
+        2 => Some(tensor.shape()[0]),
+        3 if tensor.shape()[0] == 1 => Some(tensor.shape()[1]),
+        _ => None,
+    }
+}
+
 fn detect_yunet(image: &DynamicImage, session: &mut Session) -> Result<Vec<Detection>, String> {
     let (original_width, original_height) = (image.width(), image.height());
     if original_width == 0 || original_height == 0 {
@@ -153,8 +289,10 @@ fn detect_yunet(image: &DynamicImage, session: &mut Session) -> Result<Vec<Detec
             let obj = obj_arr[[0, i, 0]].clamp(0.0, 1.0);
             let score = (cls * obj).sqrt();
 
-            // DigiKam / OpenCV Zoo recommended score threshold (0.80) to avoid false detections on hands/patterns
-            if score < 0.80 {
+            // This is a review-first catalog detector. Profiles consistently
+            // score below the conservative OpenCV Zoo recommendation, so keep
+            // candidates at 0.65 and rely on landmarks/face review downstream.
+            if score < YUNET_REVIEW_THRESHOLD {
                 continue;
             }
 
@@ -179,8 +317,13 @@ fn detect_yunet(image: &DynamicImage, session: &mut Session) -> Result<Vec<Detec
             let norm_w = orig_w / original_width as f32;
             let norm_h = orig_h / original_height as f32;
 
-            // Filter out tiny noise and unnatural aspect ratios (faces are between 0.45 and 1.8 aspect ratio)
-            if orig_w < 16.0 || orig_h < 16.0 || norm_w / norm_h < 0.40 || norm_w / norm_h > 1.90 {
+            // A turned face is narrower in image space. Keep thin profile
+            // boxes while retaining a cap that rejects elongated patterns.
+            if orig_w < 16.0
+                || orig_h < 16.0
+                || norm_w / norm_h < YUNET_MIN_PROFILE_ASPECT_RATIO
+                || norm_w / norm_h > YUNET_MAX_FACE_ASPECT_RATIO
+            {
                 continue;
             }
 
@@ -198,7 +341,7 @@ fn detect_yunet(image: &DynamicImage, session: &mut Session) -> Result<Vec<Detec
             let eye_dist = ((landmarks[0][0] - landmarks[1][0]).powi(2)
                 + (landmarks[0][1] - landmarks[1][1]).powi(2))
             .sqrt();
-            if eye_dist < norm_w * 0.10 {
+            if eye_dist < norm_w * YUNET_MIN_PROFILE_EYE_DISTANCE_RATIO {
                 continue;
             }
 
@@ -226,26 +369,198 @@ fn detect_yunet(image: &DynamicImage, session: &mut Session) -> Result<Vec<Detec
     Ok(accepted)
 }
 
+/// Decode the SCRFD ONNX contract used by the InsightFace packs.  SCRFD emits
+/// score, LTRB distance and five-landmark tensors for strides 8/16/32, with
+/// two anchors per spatial location.  It is intentionally a separate decoder
+/// from YuNet: output tensors and box parameterisation are not compatible.
+fn detect_scrfd(image: &DynamicImage, session: &mut Session) -> Result<Vec<Detection>, String> {
+    let (original_width, original_height) = (image.width(), image.height());
+    if original_width == 0 || original_height == 0 {
+        return Ok(Vec::new());
+    }
+    let scale = (INSIGHTFACE_INPUT_SIZE as f32 / original_width as f32)
+        .min(INSIGHTFACE_INPUT_SIZE as f32 / original_height as f32);
+    let scaled_w =
+        ((original_width as f32 * scale).round() as u32).clamp(1, INSIGHTFACE_INPUT_SIZE);
+    let scaled_h =
+        ((original_height as f32 * scale).round() as u32).clamp(1, INSIGHTFACE_INPUT_SIZE);
+    let pad_x = (INSIGHTFACE_INPUT_SIZE - scaled_w) / 2;
+    let pad_y = (INSIGHTFACE_INPUT_SIZE - scaled_h) / 2;
+    let resized = image
+        .resize_exact(scaled_w, scaled_h, FilterType::Triangle)
+        .to_rgb8();
+    // The source letterbox is black (0 in BGR); initialize after applying
+    // SCRFD's normalization so padded pixels remain black rather than gray.
+    let mut input = Array4::<f32>::from_elem(
+        (
+            1,
+            3,
+            INSIGHTFACE_INPUT_SIZE as usize,
+            INSIGHTFACE_INPUT_SIZE as usize,
+        ),
+        -127.5 / 128.0,
+    );
+    for (x, y, pixel) in resized.enumerate_pixels() {
+        input[[0, 0, (y + pad_y) as usize, (x + pad_x) as usize]] =
+            (pixel[2] as f32 - 127.5) / 128.0;
+        input[[0, 1, (y + pad_y) as usize, (x + pad_x) as usize]] =
+            (pixel[1] as f32 - 127.5) / 128.0;
+        input[[0, 2, (y + pad_y) as usize, (x + pad_x) as usize]] =
+            (pixel[0] as f32 - 127.5) / 128.0;
+    }
+    let outputs = session
+        .run(ort::inputs![
+            Tensor::from_array(input).map_err(|e| e.to_string())?
+        ])
+        .map_err(|e| e.to_string())?;
+    if outputs.len() != 9 {
+        return Err(format!(
+            "SCRFD expected 9 output tensors, received {}",
+            outputs.len()
+        ));
+    }
+    let mut candidates = Vec::new();
+    // SCRFD orders all score tensors first, then all box tensors, then all
+    // landmark tensors. The exported Buffalo SC model uses rank-2 tensors;
+    // other ORT builds may add a batch dimension, which the helpers accept.
+    for stride_index in 0..3 {
+        let scores = outputs[stride_index]
+            .try_extract_array::<f32>()
+            .map_err(|e| e.to_string())?;
+        let boxes = outputs[stride_index + 3]
+            .try_extract_array::<f32>()
+            .map_err(|e| e.to_string())?;
+        let keypoints = outputs[stride_index + 6]
+            .try_extract_array::<f32>()
+            .map_err(|e| e.to_string())?;
+        let Some(count) = scrfd_tensor_rows(&scores) else {
+            return Err("SCRFD score tensor contract is invalid".to_string());
+        };
+        if scrfd_tensor_rows(&boxes) != Some(count)
+            || scrfd_tensor_rows(&keypoints) != Some(count)
+            || boxes.shape().last() != Some(&4)
+            || keypoints.shape().last() != Some(&10)
+        {
+            return Err("SCRFD output tensor contract is invalid".to_string());
+        }
+        let grid = ((count / 2) as f32).sqrt().round() as u32;
+        if grid == 0 || grid * grid * 2 != count as u32 || INSIGHTFACE_INPUT_SIZE % grid != 0 {
+            return Err(format!(
+                "SCRFD cannot infer anchor grid from {count} candidates"
+            ));
+        }
+        let stride = INSIGHTFACE_INPUT_SIZE / grid;
+        for index in 0..count {
+            let score = scrfd_tensor_value(&scores, index, 0)
+                .expect("validated SCRFD score tensor")
+                .clamp(0.0, 1.0);
+            // Recovery-friendly threshold; matching stays review-first.
+            if score < 0.55 {
+                continue;
+            }
+            let location = index as u32 / 2;
+            let cx = (location % grid) as f32 * stride as f32;
+            let cy = (location / grid) as f32 * stride as f32;
+            let left = cx
+                - scrfd_tensor_value(&boxes, index, 0).expect("validated SCRFD box tensor")
+                    * stride as f32;
+            let top = cy
+                - scrfd_tensor_value(&boxes, index, 1).expect("validated SCRFD box tensor")
+                    * stride as f32;
+            let right = cx
+                + scrfd_tensor_value(&boxes, index, 2).expect("validated SCRFD box tensor")
+                    * stride as f32;
+            let bottom = cy
+                + scrfd_tensor_value(&boxes, index, 3).expect("validated SCRFD box tensor")
+                    * stride as f32;
+            let x = ((left - pad_x as f32) / scale).max(0.0);
+            let y = ((top - pad_y as f32) / scale).max(0.0);
+            let width = ((right - left) / scale)
+                .min(original_width as f32 - x)
+                .max(0.0);
+            let height = ((bottom - top) / scale)
+                .min(original_height as f32 - y)
+                .max(0.0);
+            if width < 12.0 || height < 12.0 {
+                continue;
+            }
+            let mut landmarks = [[0.0; 2]; 5];
+            for point in 0..5 {
+                landmarks[point] = [
+                    (((cx
+                        + scrfd_tensor_value(&keypoints, index, point * 2)
+                            .expect("validated SCRFD keypoint tensor")
+                            * stride as f32
+                        - pad_x as f32)
+                        / scale)
+                        / original_width as f32)
+                        .clamp(0.0, 1.0),
+                    (((cy
+                        + scrfd_tensor_value(&keypoints, index, point * 2 + 1)
+                            .expect("validated SCRFD keypoint tensor")
+                            * stride as f32
+                        - pad_y as f32)
+                        / scale)
+                        / original_height as f32)
+                        .clamp(0.0, 1.0),
+                ];
+            }
+            candidates.push(Detection {
+                confidence: score,
+                x: x / original_width as f32,
+                y: y / original_height as f32,
+                width: width / original_width as f32,
+                height: height / original_height as f32,
+                landmarks,
+            });
+        }
+    }
+    candidates.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
+    let mut accepted = Vec::new();
+    for candidate in candidates {
+        if accepted
+            .iter()
+            .all(|existing| intersection_over_union(existing, &candidate) < 0.40)
+        {
+            accepted.push(candidate);
+        }
+    }
+    Ok(accepted)
+}
+
+fn detect_for_pack(
+    image: &DynamicImage,
+    pack_id: FaceModelPackId,
+    session: &mut Session,
+) -> Result<Vec<Detection>, String> {
+    if pack_id == FaceModelPackId::YuNetSFace {
+        detect_yunet(image, session)
+    } else {
+        detect_scrfd(image, session)
+    }
+}
+
 /// Lightweight detector used by filesystem culling. It deliberately returns
 /// only a count: no catalog rows, embeddings, or person identities are
 /// created for an ad-hoc folder scan.
 pub(crate) struct LocalFaceDetector {
+    pack_id: FaceModelPackId,
     session: std::sync::Mutex<Session>,
 }
 
 pub(crate) fn load_local_face_detector(
     app_handle: &AppHandle,
 ) -> Result<LocalFaceDetector, String> {
-    let model_path = crate::face_model_registry::installed_face_model_path(
+    let runtime = crate::face_model_registry::installed_face_runtime_paths(
         app_handle,
-        "opencv-yunet-sface",
-        YUNET_MODEL,
+        configured_local_face_model_policy(app_handle),
     )?;
     let session = Session::builder()
         .map_err(|error| error.to_string())?
-        .commit_from_file(model_path)
+        .commit_from_file(runtime.detector)
         .map_err(|error| error.to_string())?;
     Ok(LocalFaceDetector {
+        pack_id: runtime.pack_id,
         session: std::sync::Mutex::new(session),
     })
 }
@@ -261,7 +576,7 @@ pub(crate) fn analyze_faces_for_culling(
         .session
         .lock()
         .map_err(|_| "Face detector session lock was poisoned".to_string())?;
-    let detections = detect_yunet(&image, &mut session)?;
+    let detections = detect_for_pack(&image, detector.pack_id, &mut session)?;
     let best = detections
         .iter()
         .filter_map(|detection| {
@@ -316,11 +631,48 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
     left.iter().zip(right).map(|(a, b)| a * b).sum()
 }
 
-fn suggest_people(conn: &rusqlite::Connection) -> Result<(), String> {
-    let mut centroids: HashMap<i64, (Vec<f32>, usize)> = HashMap::new();
-    let mut references = conn.prepare("SELECT f.person_id, e.vector FROM faces f JOIN face_embeddings e ON e.id = f.embedding_id WHERE f.review_state = 'confirmed' AND f.person_id IS NOT NULL AND e.model_pack_id = 'opencv-yunet-sface'").map_err(|error| error.to_string())?;
+const SFACE_SUGGESTION_THRESHOLD: f32 = 0.45;
+const ARCFACE_SUGGESTION_THRESHOLD: f32 = 0.42;
+const SFACE_CLUSTER_THRESHOLD: f32 = 0.48;
+const ARCFACE_CLUSTER_THRESHOLD: f32 = 0.48;
+
+fn suggestion_threshold(pack_id: FaceModelPackId) -> f32 {
+    if pack_id == FaceModelPackId::YuNetSFace {
+        SFACE_SUGGESTION_THRESHOLD
+    } else {
+        ARCFACE_SUGGESTION_THRESHOLD
+    }
+}
+
+fn cluster_threshold(pack_id: FaceModelPackId) -> f32 {
+    if pack_id == FaceModelPackId::YuNetSFace {
+        SFACE_CLUSTER_THRESHOLD
+    } else {
+        ARCFACE_CLUSTER_THRESHOLD
+    }
+}
+
+fn component_root(parents: &mut [usize], node: usize) -> usize {
+    if parents[node] != node {
+        parents[node] = component_root(parents, parents[node]);
+    }
+    parents[node]
+}
+
+fn merge_components(parents: &mut [usize], left: usize, right: usize) {
+    let left_root = component_root(parents, left);
+    let right_root = component_root(parents, right);
+    if left_root != right_root {
+        parents[right_root] = left_root;
+    }
+}
+
+fn suggest_people(conn: &rusqlite::Connection, model_pack_id: &str) -> Result<(), String> {
+    let pack_id = FaceModelPackId::try_from(model_pack_id)?;
+    let mut exemplars: HashMap<i64, Vec<Vec<f32>>> = HashMap::new();
+    let mut references = conn.prepare("SELECT f.person_id, e.vector FROM faces f JOIN face_embeddings e ON e.id = f.embedding_id WHERE f.review_state = 'confirmed' AND f.person_id IS NOT NULL AND e.model_pack_id = ?1").map_err(|error| error.to_string())?;
     for row in references
-        .query_map([], |row| {
+        .query_map([model_pack_id], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
         })
         .map_err(|error| error.to_string())?
@@ -329,27 +681,11 @@ fn suggest_people(conn: &rusqlite::Connection) -> Result<(), String> {
         let Some(vector) = decode_embedding(&bytes) else {
             continue;
         };
-        let entry = centroids
-            .entry(person_id)
-            .or_insert_with(|| (vec![0.0; vector.len()], 0));
-        if entry.0.len() != vector.len() {
-            continue;
-        }
-        for (target, value) in entry.0.iter_mut().zip(vector) {
-            *target += value;
-        }
-        entry.1 += 1;
+        exemplars.entry(person_id).or_default().push(vector);
     }
-    for (vector, count) in centroids.values_mut() {
-        if *count > 0 {
-            for value in vector {
-                *value /= *count as f32;
-            }
-        }
-    }
-    let mut candidates = conn.prepare("SELECT f.id, e.vector FROM faces f JOIN face_embeddings e ON e.id = f.embedding_id WHERE f.review_state = 'unreviewed' AND e.model_pack_id = 'opencv-yunet-sface'").map_err(|error| error.to_string())?;
+    let mut candidates = conn.prepare("SELECT f.id, e.vector FROM faces f JOIN face_embeddings e ON e.id = f.embedding_id WHERE f.review_state = 'unreviewed' AND e.model_pack_id = ?1").map_err(|error| error.to_string())?;
     for row in candidates
-        .query_map([], |row| {
+        .query_map([model_pack_id], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
         })
         .map_err(|error| error.to_string())?
@@ -358,12 +694,20 @@ fn suggest_people(conn: &rusqlite::Connection) -> Result<(), String> {
         let Some(vector) = decode_embedding(&bytes) else {
             continue;
         };
-        let best = centroids
+        let best = exemplars
             .iter()
-            .map(|(person_id, (centroid, _))| (*person_id, cosine_similarity(&vector, centroid)))
+            // A profile should be compared with every confirmed appearance of
+            // a person; a centroid often erases the profile appearance mode.
+            .filter_map(|(person_id, person_exemplars)| {
+                person_exemplars
+                    .iter()
+                    .map(|reference| cosine_similarity(&vector, reference))
+                    .max_by(f32::total_cmp)
+                    .map(|score| (*person_id, score))
+            })
             .max_by(|a, b| a.1.total_cmp(&b.1));
         if let Some((person_id, similarity)) = best {
-            if similarity >= 0.45 {
+            if similarity >= suggestion_threshold(pack_id) {
                 conn.execute("UPDATE faces SET person_id = ?1, updated_at = strftime('%s','now') WHERE id = ?2", params![person_id, face_id]).map_err(|error| error.to_string())?;
             }
         }
@@ -371,43 +715,67 @@ fn suggest_people(conn: &rusqlite::Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn cluster_unknown_faces(conn: &rusqlite::Connection) -> Result<usize, String> {
-    let mut statement = conn.prepare("SELECT f.id, e.vector FROM faces f JOIN face_embeddings e ON e.id = f.embedding_id WHERE f.review_state = 'unreviewed' AND e.model_pack_id = 'opencv-yunet-sface' ORDER BY f.id").map_err(|error| error.to_string())?;
+fn cluster_unknown_faces(
+    conn: &rusqlite::Connection,
+    model_pack_id: &str,
+) -> Result<usize, String> {
+    let pack_id = FaceModelPackId::try_from(model_pack_id)?;
+    let mut statement = conn.prepare("SELECT f.id, e.vector FROM faces f JOIN face_embeddings e ON e.id = f.embedding_id WHERE f.review_state = 'unreviewed' AND e.model_pack_id = ?1 ORDER BY f.id").map_err(|error| error.to_string())?;
     let faces: Vec<(i64, Vec<f32>)> = statement
-        .query_map([], |row| {
+        .query_map([model_pack_id], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
         })
         .map_err(|error| error.to_string())?
         .filter_map(Result::ok)
         .filter_map(|(id, bytes)| decode_embedding(&bytes).map(|vector| (id, vector)))
         .collect();
-    conn.execute("DELETE FROM face_clusters WHERE model_pack_id = 'opencv-yunet-sface' AND state = 'unreviewed'", []).map_err(|error| error.to_string())?;
-    let mut assigned = vec![false; faces.len()];
-    let mut clusters = 0;
+    conn.execute(
+        "DELETE FROM face_clusters WHERE model_pack_id = ?1 AND state = 'unreviewed'",
+        [model_pack_id],
+    )
+    .map_err(|error| error.to_string())?;
+    let mut parents: Vec<usize> = (0..faces.len()).collect();
+    let threshold = cluster_threshold(pack_id);
+    for left in 0..faces.len() {
+        for right in (left + 1)..faces.len() {
+            if cosine_similarity(&faces[left].1, &faces[right].1) >= threshold {
+                merge_components(&mut parents, left, right);
+            }
+        }
+    }
+    let mut components: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
     for index in 0..faces.len() {
-        if assigned[index] {
+        let root = component_root(&mut parents, index);
+        components.entry(root).or_default().push(index);
+    }
+    let mut clusters = 0;
+    for member_indexes in components.into_values() {
+        if member_indexes.len() < 2 {
             continue;
         }
-        let (representative_id, representative) = &faces[index];
-        let members: Vec<(i64, f32)> = faces
+        // Choose the medoid: it is less sensitive than file order when a
+        // cluster contains frontal and profile appearances.
+        let representative_index = *member_indexes
             .iter()
-            .enumerate()
-            .filter_map(|(candidate_index, (id, vector))| {
-                if !assigned[candidate_index] && cosine_similarity(representative, vector) >= 0.48 {
-                    assigned[candidate_index] = true;
-                    Some((*id, cosine_similarity(representative, vector)))
-                } else {
-                    None
-                }
+            .max_by(|left, right| {
+                let average_similarity = |index: &usize| {
+                    member_indexes
+                        .iter()
+                        .map(|other| cosine_similarity(&faces[*index].1, &faces[*other].1))
+                        .sum::<f32>()
+                        / member_indexes.len() as f32
+                };
+                average_similarity(left).total_cmp(&average_similarity(right))
             })
-            .collect();
-        if members.len() < 2 {
-            continue;
-        }
-        conn.execute("INSERT INTO face_clusters(model_pack_id, representative_face_id, created_at, updated_at) VALUES('opencv-yunet-sface', ?1, strftime('%s','now'), strftime('%s','now'))", [representative_id]).map_err(|error| error.to_string())?;
+            .expect("cluster has at least two members");
+        let (representative_id, representative) = &faces[representative_index];
+        conn.execute("INSERT INTO face_clusters(model_pack_id, representative_face_id, created_at, updated_at) VALUES(?1, ?2, strftime('%s','now'), strftime('%s','now'))", params![model_pack_id, representative_id]).map_err(|error| error.to_string())?;
         let cluster_id = conn.last_insert_rowid();
-        for (face_id, similarity) in members {
-            conn.execute("INSERT INTO face_cluster_members(cluster_id, face_id, similarity) VALUES(?1, ?2, ?3)", params![cluster_id, face_id, similarity]).map_err(|error| error.to_string())?;
+        for member_index in member_indexes {
+            let (face_id, member) = &faces[member_index];
+            let similarity = cosine_similarity(representative, member);
+            conn.execute("INSERT INTO face_cluster_members(cluster_id, face_id, similarity) VALUES(?1, ?2, ?3)", params![cluster_id, *face_id, similarity]).map_err(|error| error.to_string())?;
         }
         clusters += 1;
     }
@@ -420,6 +788,7 @@ fn extract_sface_embedding(
     y: f64,
     width: f64,
     height: f64,
+    landmarks: Option<[[f32; 2]; 5]>,
     session: &mut Session,
 ) -> Result<Vec<f32>, String> {
     let image_width = image.width() as f64;
@@ -441,10 +810,15 @@ fn extract_sface_embedding(
     let crop_height = (norm_height * image_height)
         .max(1.0)
         .min(image_height - top as f64) as u32;
-    let face = image
-        .crop_imm(left, top, crop_width, crop_height)
-        .resize_exact(SFACE_INPUT_SIZE, SFACE_INPUT_SIZE, FilterType::Triangle)
-        .to_rgb8();
+    let face = landmarks
+        .filter(|points| landmarks_support_alignment(points, width))
+        .and_then(|points| align_five_point_face(image, points))
+        .unwrap_or_else(|| {
+            image
+                .crop_imm(left, top, crop_width, crop_height)
+                .resize_exact(SFACE_INPUT_SIZE, SFACE_INPUT_SIZE, FilterType::Triangle)
+                .to_rgb8()
+        });
     let mut input =
         Array4::<f32>::zeros((1, 3, SFACE_INPUT_SIZE as usize, SFACE_INPUT_SIZE as usize));
     for (pixel_x, pixel_y, pixel) in face.enumerate_pixels() {
@@ -464,6 +838,75 @@ fn extract_sface_embedding(
         .copied()
         .collect::<Vec<_>>();
     normalize_embedding(embedding)
+}
+
+fn extract_arcface_embedding(
+    image: &DynamicImage,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    landmarks: Option<[[f32; 2]; 5]>,
+    session: &mut Session,
+) -> Result<Vec<f32>, String> {
+    let image_width = image.width() as f64;
+    let image_height = image.height() as f64;
+    let margin_x = width * 0.18;
+    let margin_y = height * 0.18;
+    let left = ((x - margin_x).max(0.0) * image_width).clamp(0.0, image_width - 1.0) as u32;
+    let top = ((y - margin_y).max(0.0) * image_height).clamp(0.0, image_height - 1.0) as u32;
+    let crop_width = ((width + margin_x * 2.0) * image_width)
+        .max(1.0)
+        .min(image_width - left as f64) as u32;
+    let crop_height = ((height + margin_y * 2.0) * image_height)
+        .max(1.0)
+        .min(image_height - top as f64) as u32;
+    let face = landmarks
+        .filter(|points| landmarks_support_alignment(points, width))
+        .and_then(|points| align_five_point_face(image, points))
+        .unwrap_or_else(|| {
+            image
+                .crop_imm(left, top, crop_width, crop_height)
+                .resize_exact(SFACE_INPUT_SIZE, SFACE_INPUT_SIZE, FilterType::Triangle)
+                .to_rgb8()
+        });
+    let mut input =
+        Array4::<f32>::zeros((1, 3, SFACE_INPUT_SIZE as usize, SFACE_INPUT_SIZE as usize));
+    for (pixel_x, pixel_y, pixel) in face.enumerate_pixels() {
+        input[[0, 0, pixel_y as usize, pixel_x as usize]] = (pixel[2] as f32 - 127.5) / 127.5;
+        input[[0, 1, pixel_y as usize, pixel_x as usize]] = (pixel[1] as f32 - 127.5) / 127.5;
+        input[[0, 2, pixel_y as usize, pixel_x as usize]] = (pixel[0] as f32 - 127.5) / 127.5;
+    }
+    let outputs = session
+        .run(ort::inputs![
+            Tensor::from_array(input).map_err(|e| e.to_string())?
+        ])
+        .map_err(|e| e.to_string())?;
+    normalize_embedding(
+        outputs[0]
+            .try_extract_array::<f32>()
+            .map_err(|e| e.to_string())?
+            .iter()
+            .copied()
+            .collect(),
+    )
+}
+
+fn extract_embedding_for_pack(
+    image: &DynamicImage,
+    pack_id: FaceModelPackId,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    landmarks: Option<[[f32; 2]; 5]>,
+    session: &mut Session,
+) -> Result<Vec<f32>, String> {
+    if pack_id == FaceModelPackId::YuNetSFace {
+        extract_sface_embedding(image, x, y, width, height, landmarks, session)
+    } else {
+        extract_arcface_embedding(image, x, y, width, height, landmarks, session)
+    }
 }
 
 pub fn get_face_crops_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
@@ -622,15 +1065,14 @@ pub fn start_face_detection(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<String, String> {
     let db_path = active_library_path(&state)?;
-    let model_path = crate::face_model_registry::installed_face_model_path(
+    let runtime = crate::face_model_registry::installed_face_runtime_paths(
         &app_handle,
-        "opencv-yunet-sface",
-        YUNET_MODEL,
+        configured_face_model_policy(&db_path),
     )?;
     let job_id = create_background_job(
         &db_path,
         "face_detection",
-        serde_json::json!({ "rootId": root_id, "modelPackId": "opencv-yunet-sface" }),
+        serde_json::json!({ "rootId": root_id, "modelPackId": runtime.pack_id.as_str() }),
     )?;
     let job_control = crate::app_state::BackgroundJobControl::new();
     state
@@ -647,7 +1089,8 @@ pub fn start_face_detection(
             &app,
             &db_path,
             root_id,
-            &model_path,
+            runtime.pack_id.as_str(),
+            &runtime.detector,
             &worker_job_id,
             &job_control,
             ai_semaphore,
@@ -689,15 +1132,14 @@ pub fn start_face_recognition(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<String, String> {
     let db_path = active_library_path(&state)?;
-    let model_path = crate::face_model_registry::installed_face_model_path(
+    let runtime = crate::face_model_registry::installed_face_runtime_paths(
         &app_handle,
-        "opencv-yunet-sface",
-        SFACE_MODEL,
+        configured_face_model_policy(&db_path),
     )?;
     let job_id = create_background_job(
         &db_path,
         "face_recognition",
-        serde_json::json!({ "rootId": root_id, "modelPackId": "opencv-yunet-sface" }),
+        serde_json::json!({ "rootId": root_id, "modelPackId": runtime.pack_id.as_str() }),
     )?;
     let job_control = crate::app_state::BackgroundJobControl::new();
     state
@@ -713,7 +1155,8 @@ pub fn start_face_recognition(
             &app,
             &db_path,
             root_id,
-            &model_path,
+            runtime.pack_id.as_str(),
+            &runtime.recognizer,
             &worker_job_id,
             &job_control,
             ai_semaphore,
@@ -748,10 +1191,105 @@ pub fn start_face_recognition(
     Ok(job_id)
 }
 
+/// Rebuild the catalog's complete face index after the user deliberately
+/// changes the catalog-scoped processing mode. Existing face rows and
+/// embeddings are cleared as a single transaction before detector and
+/// recognizer passes run with the newly selected compatible pair.
+#[tauri::command]
+pub fn reprocess_face_index(
+    app_handle: AppHandle,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<String, String> {
+    let db_path = active_library_path(&state)?;
+    let runtime = crate::face_model_registry::installed_face_runtime_paths(
+        &app_handle,
+        configured_face_model_policy(&db_path),
+    )?;
+    clear_face_index(&db_path)?;
+    let job_id = create_background_job(
+        &db_path,
+        "face_reindex",
+        serde_json::json!({ "modelPackId": runtime.pack_id.as_str(), "fullReprocess": true }),
+    )?;
+    let job_control = crate::app_state::BackgroundJobControl::new();
+    state
+        .background_job_controls
+        .lock()
+        .unwrap()
+        .insert(job_id.clone(), job_control.clone());
+    let app = app_handle.clone();
+    let worker_job_id = job_id.clone();
+    let event_job_id = job_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let ai_semaphore = app.state::<crate::AppState>().ai_job_semaphore.clone();
+        let result = run_face_detection(
+            &app,
+            &db_path,
+            None,
+            runtime.pack_id.as_str(),
+            &runtime.detector,
+            &worker_job_id,
+            &job_control,
+            ai_semaphore.clone(),
+        )
+        .and_then(|_| {
+            update_job(
+                &db_path,
+                &worker_job_id,
+                "running",
+                "Face detection complete; identifying faces",
+                0,
+                0,
+                None,
+                None,
+            )?;
+            run_face_recognition(
+                &app,
+                &db_path,
+                None,
+                runtime.pack_id.as_str(),
+                &runtime.recognizer,
+                &worker_job_id,
+                &job_control,
+                ai_semaphore,
+            )
+        });
+        if let Err(error) = result {
+            let job_state =
+                if error == "Face detection cancelled" || error == "Face recognition cancelled" {
+                    "cancelled"
+                } else {
+                    "failed"
+                };
+            let _ = update_job(
+                &db_path,
+                &worker_job_id,
+                job_state,
+                &error,
+                0,
+                0,
+                None,
+                Some(&error),
+            );
+        }
+        app.state::<crate::AppState>()
+            .background_job_controls
+            .lock()
+            .unwrap()
+            .remove(&worker_job_id);
+        let _ = app.emit(
+            "face-reindex-complete",
+            serde_json::json!({ "jobId": event_job_id }),
+        );
+    });
+    Ok(job_id)
+}
+
 fn run_face_recognition(
     app_handle: &AppHandle,
     db_path: &Path,
     root_id: Option<i64>,
+    model_pack_id: &str,
     model_path: &Path,
     job_id: &str,
     job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
@@ -760,6 +1298,7 @@ fn run_face_recognition(
     run_face_recognition_with_loader(
         db_path,
         root_id,
+        model_pack_id,
         model_path,
         job_id,
         job_control,
@@ -779,9 +1318,30 @@ pub fn run_face_recognition_headless(
     job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
     ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 ) -> Result<(), String> {
+    run_face_recognition_headless_for_pack(
+        db_path,
+        root_id,
+        FaceModelPackId::YuNetSFace.as_str(),
+        model_path,
+        job_id,
+        job_control,
+        ai_semaphore,
+    )
+}
+
+pub fn run_face_recognition_headless_for_pack(
+    db_path: &Path,
+    root_id: Option<i64>,
+    model_pack_id: &str,
+    model_path: &Path,
+    job_id: &str,
+    job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
+    ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+) -> Result<(), String> {
     run_face_recognition_with_loader(
         db_path,
         root_id,
+        model_pack_id,
         model_path,
         job_id,
         job_control,
@@ -793,6 +1353,7 @@ pub fn run_face_recognition_headless(
 fn run_face_recognition_with_loader<F>(
     db_path: &Path,
     root_id: Option<i64>,
+    model_pack_id: &str,
     model_path: &Path,
     job_id: &str,
     job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
@@ -803,58 +1364,79 @@ where
     F: Fn(&Path) -> Result<DynamicImage, String>,
 {
     let conn = rusqlite::Connection::open(db_path).map_err(|error| error.to_string())?;
-    let mut sql = "SELECT f.id, r.absolute_path, i.relative_path, f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present' AND f.model_pack_id = 'opencv-yunet-sface' AND f.review_state <> 'rejected' AND f.embedding_id IS NULL".to_string();
+    let pack_id = FaceModelPackId::try_from(model_pack_id)?;
+    let recognizer_model_id = pack_id.recognizer_model_id();
+    // Embeddings are only comparable inside a single detector/recognizer
+    // pack. This also repairs catalogs produced before pack-aware runtime
+    // selection, where a paired RAW/JPEG face could inherit an embedding from
+    // another model pack.
+    conn.execute(
+        "UPDATE faces
+         SET embedding_id = NULL, recognizer_model_id = ?2, updated_at = strftime('%s','now')
+         WHERE model_pack_id = ?1
+           AND embedding_id IS NOT NULL
+           AND EXISTS (
+               SELECT 1 FROM face_embeddings e
+               WHERE e.id = faces.embedding_id AND e.model_pack_id <> ?1
+           )",
+        [model_pack_id, recognizer_model_id],
+    )
+    .map_err(|error| error.to_string())?;
+    let mut sql = "SELECT f.id, r.absolute_path, i.relative_path, f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height, f.landmarks_json FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present' AND f.model_pack_id = ?1 AND f.review_state <> 'rejected' AND f.embedding_id IS NULL".to_string();
     if root_id.is_some() {
-        sql.push_str(" AND i.root_id = ?1");
+        sql.push_str(" AND i.root_id = ?2");
     }
     let mut statement = conn.prepare(&sql).map_err(|error| error.to_string())?;
-    let faces: Vec<(i64, String, String, f64, f64, f64, f64)> = if let Some(root_id) = root_id {
-        statement
-            .query_map([root_id], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            })
-            .map_err(|error| error.to_string())?
-            .collect::<Result<_, _>>()
-            .map_err(|error| error.to_string())?
-    } else {
-        statement
-            .query_map([], |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                    row.get(6)?,
-                ))
-            })
-            .map_err(|error| error.to_string())?
-            .collect::<Result<_, _>>()
-            .map_err(|error| error.to_string())?
-    };
+    let faces: Vec<(i64, String, String, f64, f64, f64, f64, Option<String>)> =
+        if let Some(root_id) = root_id {
+            statement
+                .query_map(params![model_pack_id, root_id], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                })
+                .map_err(|error| error.to_string())?
+                .collect::<Result<_, _>>()
+                .map_err(|error| error.to_string())?
+        } else {
+            statement
+                .query_map([model_pack_id], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                })
+                .map_err(|error| error.to_string())?
+                .collect::<Result<_, _>>()
+                .map_err(|error| error.to_string())?
+        };
     let total = faces.len() as i64;
     update_job(
         db_path,
         job_id,
         "running",
-        "Loading SFace recognizer",
+        "Loading face recognizer",
         0,
         total,
         None,
         None,
     )?;
     if faces.is_empty() {
-        suggest_people(&conn)?;
-        cluster_unknown_faces(&conn)?;
+        suggest_people(&conn, model_pack_id)?;
+        cluster_unknown_faces(&conn, model_pack_id)?;
         return update_job(
             db_path,
             job_id,
@@ -871,7 +1453,9 @@ where
         .map_err(|error| error.to_string())?
         .commit_from_file(model_path)
         .map_err(|error| error.to_string())?;
-    for (index, (face_id, root, relative, x, y, width, height)) in faces.into_iter().enumerate() {
+    for (index, (face_id, root, relative, x, y, width, height, landmarks_json)) in
+        faces.into_iter().enumerate()
+    {
         if !tauri::async_runtime::block_on(job_control.wait_until_runnable()) {
             return Err("Face recognition cancelled".to_string());
         }
@@ -898,7 +1482,18 @@ where
             }
         };
         let _permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
-        let embedding_result = extract_sface_embedding(&image, x, y, width, height, &mut session);
+        let landmarks =
+            landmarks_json.and_then(|json| serde_json::from_str::<[[f32; 2]; 5]>(&json).ok());
+        let embedding_result = extract_embedding_for_pack(
+            &image,
+            pack_id,
+            x,
+            y,
+            width,
+            height,
+            landmarks,
+            &mut session,
+        );
         drop(_permit);
         let embedding = match embedding_result {
             Ok(embedding) => {
@@ -932,33 +1527,37 @@ where
             .iter()
             .flat_map(|value| value.to_le_bytes())
             .collect();
-        conn.execute("INSERT INTO face_embeddings(model_pack_id, dimensions, vector, norm, created_at) VALUES('opencv-yunet-sface', ?1, ?2, 1.0, strftime('%s','now'))", params![embedding.len() as i64, bytes]).map_err(|error| error.to_string())?;
+        conn.execute("INSERT INTO face_embeddings(model_pack_id, recognizer_model_id, dimensions, vector, norm, created_at) VALUES(?1, ?2, ?3, ?4, 1.0, strftime('%s','now'))", params![model_pack_id, recognizer_model_id, embedding.len() as i64, bytes]).map_err(|error| error.to_string())?;
         let embedding_id = conn.last_insert_rowid();
         conn.execute(
-            "UPDATE faces SET embedding_id = ?1, updated_at = strftime('%s','now') WHERE id = ?2",
-            params![embedding_id, face_id],
+            "UPDATE faces
+             SET embedding_id = ?1, recognizer_model_id = ?2, updated_at = strftime('%s','now')
+             WHERE id = ?3",
+            params![embedding_id, recognizer_model_id, face_id],
         )
         .map_err(|error| error.to_string())?;
 
         // Mirror embedding to companion face in RAW+JPG pair
         let _ = conn.execute(
-            "UPDATE faces SET embedding_id = ?1, updated_at = strftime('%s','now')
+            "UPDATE faces
+             SET embedding_id = ?1, recognizer_model_id = ?2, updated_at = strftime('%s','now')
              WHERE id IN (
                  SELECT f2.id FROM faces f2
                  JOIN images i2 ON i2.id = f2.image_id
-                 JOIN faces f1 ON f1.id = ?2
+                 JOIN faces f1 ON f1.id = ?3
                  JOIN images i1 ON i1.id = f1.image_id
                  WHERE i2.folder_id = i1.folder_id
                    AND i2.id != i1.id
+                   AND f2.model_pack_id = f1.model_pack_id
                    AND substr(i2.file_name, 1, instr(i2.file_name || '.', '.') - 1) = substr(i1.file_name, 1, instr(i1.file_name || '.', '.') - 1)
                    AND abs(f2.bbox_x - f1.bbox_x) < 0.05
                    AND abs(f2.bbox_y - f1.bbox_y) < 0.05
              )",
-            params![embedding_id, face_id],
+            params![embedding_id, recognizer_model_id, face_id],
         );
     }
-    suggest_people(&conn)?;
-    cluster_unknown_faces(&conn)?;
+    suggest_people(&conn, model_pack_id)?;
+    cluster_unknown_faces(&conn, model_pack_id)?;
     update_job(
         db_path,
         job_id,
@@ -984,6 +1583,7 @@ fn run_face_detection(
     app_handle: &AppHandle,
     db_path: &Path,
     root_id: Option<i64>,
+    model_pack_id: &str,
     model_path: &Path,
     job_id: &str,
     job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
@@ -992,6 +1592,7 @@ fn run_face_detection(
     run_face_detection_with_loader(
         db_path,
         root_id,
+        model_pack_id,
         model_path,
         job_id,
         job_control,
@@ -1014,9 +1615,30 @@ pub fn run_face_detection_headless(
     job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
     ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
 ) -> Result<(), String> {
+    run_face_detection_headless_for_pack(
+        db_path,
+        root_id,
+        FaceModelPackId::YuNetSFace.as_str(),
+        model_path,
+        job_id,
+        job_control,
+        ai_semaphore,
+    )
+}
+
+pub fn run_face_detection_headless_for_pack(
+    db_path: &Path,
+    root_id: Option<i64>,
+    model_pack_id: &str,
+    model_path: &Path,
+    job_id: &str,
+    job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
+    ai_semaphore: std::sync::Arc<tokio::sync::Semaphore>,
+) -> Result<(), String> {
     run_face_detection_with_loader(
         db_path,
         root_id,
+        model_pack_id,
         model_path,
         job_id,
         job_control,
@@ -1029,6 +1651,7 @@ pub fn run_face_detection_headless(
 fn run_face_detection_with_loader<F, S>(
     db_path: &Path,
     root_id: Option<i64>,
+    model_pack_id: &str,
     model_path: &Path,
     job_id: &str,
     job_control: &std::sync::Arc<crate::app_state::BackgroundJobControl>,
@@ -1040,6 +1663,9 @@ where
     F: Fn(&Path) -> Result<DynamicImage, String>,
     S: Fn(&DynamicImage, f64, f64, f64, f64, i64),
 {
+    let pack_id = FaceModelPackId::try_from(model_pack_id)?;
+    let detector_model_id = pack_id.detector_model_id();
+    let recognizer_model_id = pack_id.recognizer_model_id();
     let conn = rusqlite::Connection::open(db_path).map_err(|error| error.to_string())?;
     let mut sql = "SELECT i.id, r.absolute_path, i.relative_path, i.folder_id, i.file_name, i.is_raw FROM images i JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present'".to_string();
     if root_id.is_some() {
@@ -1111,7 +1737,7 @@ where
         db_path,
         job_id,
         "running",
-        "Loading YuNet face detector",
+        "Loading face detector",
         0,
         total,
         None,
@@ -1136,7 +1762,7 @@ where
             Ok(image) => {
                 let _permit =
                     tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
-                let res = detect_yunet(&image, &mut session);
+                let res = detect_for_pack(&image, pack_id, &mut session);
                 drop(_permit);
                 match res {
                     Ok(detections) => (detections, Some(image)),
@@ -1178,9 +1804,9 @@ where
         );
 
         // Delete unreviewed faces for primary and all companions in the pair
-        conn.execute("DELETE FROM faces WHERE image_id = ?1 AND model_pack_id = 'opencv-yunet-sface' AND source = 'local' AND review_state = 'unreviewed'", [primary.id]).map_err(|error| error.to_string())?;
+        conn.execute("DELETE FROM faces WHERE image_id = ?1 AND model_pack_id = ?2 AND source = 'local' AND review_state = 'unreviewed'", params![primary.id, model_pack_id]).map_err(|error| error.to_string())?;
         for &comp_id in &companion_ids {
-            let _ = conn.execute("DELETE FROM faces WHERE image_id = ?1 AND model_pack_id = 'opencv-yunet-sface' AND source = 'local' AND review_state = 'unreviewed'", [comp_id]);
+            let _ = conn.execute("DELETE FROM faces WHERE image_id = ?1 AND model_pack_id = ?2 AND source = 'local' AND review_state = 'unreviewed'", params![comp_id, model_pack_id]);
         }
 
         for detection in detections {
@@ -1198,9 +1824,12 @@ where
                 None
             };
             conn.execute(
-                "INSERT INTO faces(image_id, model_pack_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, landmarks_json, thumbnail_jpeg, review_state, source, created_at, updated_at) VALUES(?1, 'opencv-yunet-sface', ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'unreviewed', 'local', strftime('%s','now'), strftime('%s','now'))",
+                "INSERT INTO faces(image_id, model_pack_id, detector_model_id, recognizer_model_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, landmarks_json, thumbnail_jpeg, review_state, source, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'unreviewed', 'local', strftime('%s','now'), strftime('%s','now'))",
                 params![
                     primary.id,
+                    model_pack_id,
+                    detector_model_id,
+                    recognizer_model_id,
                     detection.confidence,
                     detection.x,
                     detection.y,
@@ -1225,9 +1854,12 @@ where
             // Mirror face detection to companion RAW images in the same pair
             for &comp_id in &companion_ids {
                 let _ = conn.execute(
-                    "INSERT INTO faces(image_id, model_pack_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, landmarks_json, thumbnail_jpeg, review_state, source, created_at, updated_at) VALUES(?1, 'opencv-yunet-sface', ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'unreviewed', 'local', strftime('%s','now'), strftime('%s','now'))",
+                    "INSERT INTO faces(image_id, model_pack_id, detector_model_id, recognizer_model_id, detector_confidence, bbox_x, bbox_y, bbox_width, bbox_height, landmarks_json, thumbnail_jpeg, review_state, source, created_at, updated_at) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'unreviewed', 'local', strftime('%s','now'), strftime('%s','now'))",
                     params![
                         comp_id,
+                        model_pack_id,
+                        detector_model_id,
+                        recognizer_model_id,
                         detection.confidence,
                         detection.x,
                         detection.y,
@@ -1362,18 +1994,61 @@ mod tests {
     }
 
     #[test]
+    fn five_point_alignment_maps_a_valid_face_to_recognizer_size() {
+        let image = DynamicImage::ImageRgb8(RgbImage::from_pixel(160, 160, Rgb([50, 100, 150])));
+        let landmarks = ARCFACE_FIVE_POINT_TEMPLATE.map(|[x, y]| [x / 112.0, y / 112.0]);
+        let aligned = align_five_point_face(&image, landmarks).unwrap();
+        assert_eq!(
+            (aligned.width(), aligned.height()),
+            (SFACE_INPUT_SIZE, SFACE_INPUT_SIZE)
+        );
+    }
+
+    #[test]
+    fn compressed_profile_landmarks_use_safe_crop_fallback() {
+        let landmarks = [
+            [0.50, 0.40],
+            [0.51, 0.40],
+            [0.52, 0.50],
+            [0.50, 0.60],
+            [0.53, 0.60],
+        ];
+        assert!(!landmarks_support_alignment(&landmarks, 0.25));
+    }
+
+    #[test]
+    fn arcface_and_sface_keep_model_specific_suggestion_thresholds() {
+        assert!(
+            suggestion_threshold(FaceModelPackId::YuNetSFace)
+                > suggestion_threshold(FaceModelPackId::InsightFaceAntelopeV2)
+        );
+    }
+
+    #[test]
+    fn connected_components_preserve_transitive_profile_links() {
+        let mut parents: Vec<usize> = (0..3).collect();
+        merge_components(&mut parents, 0, 1);
+        merge_components(&mut parents, 1, 2);
+        assert_eq!(
+            component_root(&mut parents, 0),
+            component_root(&mut parents, 2)
+        );
+    }
+
+    #[test]
     #[ignore = "requires a locally installed ONNX Runtime and private developer fixture image"]
     fn test_yunet_detection() {
-        let model_path = Path::new(
-            "/home/ssarangi/.local/share/io.github.CyberTimon.RapidRAW/models/face/opencv-yunet-sface/face_detection_yunet_2023mar.onnx",
-        );
+        let model_path =
+            Path::new("/home/ssarangi/.local/share/io.github.CyberTimon.RapidRAW/models/face")
+                .join(FaceModelPackId::YuNetSFace.as_str())
+                .join(crate::face_model_registry::YUNET_DETECTOR_FILE);
         if !model_path.exists() {
             return;
         }
         let _ = ort::init().commit();
         let mut session = Session::builder()
             .unwrap()
-            .commit_from_file(model_path)
+            .commit_from_file(&model_path)
             .unwrap();
 
         let test_img_path = "/home/ssarangi/Pictures/Shadow & Simba & Sachit & Soumya/DSCF8273.JPG";
