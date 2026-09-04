@@ -18,6 +18,8 @@ import {
   Square,
   Search,
   Sparkles,
+  Bell,
+  ScanFace,
 } from 'lucide-react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import clsx from 'clsx';
@@ -247,8 +249,10 @@ export default function BottomBar({
 
   const [isFilterExpanded, setIsFilterExpanded] = useState(false);
   const [isCatalogScanModalOpen, setIsCatalogScanModalOpen] = useState(false);
+  const [isNotificationsOpen, setIsNotificationsOpen] = useState(false);
   const [backgroundJobs, setBackgroundJobs] = useState<BackgroundJob[]>([]);
   const [backgroundJobsError, setBackgroundJobsError] = useState<string | null>(null);
+  const [faceReviewCounts, setFaceReviewCounts] = useState({ faces: 0, clusters: 0 });
   const [thumbError, setThumbError] = useState(false);
   const { catalogScan, catalogScanThumbnail, thumbnails } = useProcessStore(
     useShallow((state) => ({
@@ -302,6 +306,7 @@ export default function BottomBar({
         .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
         .join(' ')
     : '';
+  const pendingFaceReviewCount = faceReviewCounts.faces + faceReviewCounts.clusters;
   const currentDisplayedPath = catalogScan.isActive
     ? catalogScan.currentPath
     : activeBackgroundJob?.currentItem || catalogScan.currentPath || null;
@@ -448,6 +453,34 @@ export default function BottomBar({
       window.clearInterval(timer);
     };
   }, [isCatalogScanModalOpen]);
+
+  useEffect(() => {
+    if (!isLibraryView) {
+      setFaceReviewCounts({ faces: 0, clusters: 0 });
+      return;
+    }
+
+    let active = true;
+    const loadFaceReviewCounts = async () => {
+      try {
+        const [faces, clusters] = await Promise.all([
+          invoke<Array<unknown>>(Invokes.ListUnreviewedCatalogFaces),
+          invoke<Array<unknown>>(Invokes.ListUnreviewedFaceClusters),
+        ]);
+        if (active) setFaceReviewCounts({ faces: faces.length, clusters: clusters.length });
+      } catch {
+        // A plain folder has no catalog database to query for face review.
+        if (active) setFaceReviewCounts({ faces: 0, clusters: 0 });
+      }
+    };
+
+    void loadFaceReviewCounts();
+    const timer = window.setInterval(() => void loadFaceReviewCounts(), 5000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [isLibraryView]);
 
   useEffect(() => {
     if (isZoomReady && !isDraggingSlider.current) {
@@ -806,6 +839,35 @@ export default function BottomBar({
               )}
             </button>
           </>
+
+          {isLibraryView && (
+            <>
+              <div className="h-5 w-px bg-surface"></div>
+              <button
+                type="button"
+                className={clsx(
+                  'relative flex h-8 w-8 shrink-0 items-center justify-center rounded-md transition-colors',
+                  pendingFaceReviewCount > 0
+                    ? 'text-[#e9ab4a] hover:bg-[#d89538]/15 hover:text-[#efb34f]'
+                    : 'text-text-secondary hover:bg-surface hover:text-text-primary',
+                )}
+                onClick={() => setIsNotificationsOpen(true)}
+                data-tooltip={
+                  pendingFaceReviewCount > 0
+                    ? `${pendingFaceReviewCount} face review notification${pendingFaceReviewCount === 1 ? '' : 's'}`
+                    : 'Notifications'
+                }
+                aria-label="Notifications"
+              >
+                <Bell size={17} />
+                {pendingFaceReviewCount > 0 && (
+                  <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-[#d89538] px-1 text-[9px] font-bold text-[#19130b]">
+                    {pendingFaceReviewCount > 99 ? '99+' : pendingFaceReviewCount}
+                  </span>
+                )}
+              </button>
+            </>
+          )}
 
           <div
             className={clsx(
@@ -1392,6 +1454,77 @@ export default function BottomBar({
                   )}
                 </div>
               </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {isNotificationsOpen && (
+          <motion.div
+            className="fixed inset-0 z-[1000] flex items-center justify-center bg-black/50 p-6"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setIsNotificationsOpen(false)}
+          >
+            <motion.div
+              className="w-full max-w-md rounded-lg border border-border-color bg-bg-secondary p-5 shadow-2xl"
+              initial={{ scale: 0.96, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.96, opacity: 0 }}
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="mb-4 flex items-start justify-between gap-4">
+                <div>
+                  <Text variant={TextVariants.heading}>Notifications</Text>
+                  <Text variant={TextVariants.small} color={TextColors.secondary}>
+                    Items that need your attention in this catalog.
+                  </Text>
+                </div>
+                <button
+                  type="button"
+                  className="rounded-md p-2 text-text-secondary hover:bg-surface hover:text-text-primary"
+                  onClick={() => setIsNotificationsOpen(false)}
+                  aria-label="Close notifications"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {pendingFaceReviewCount > 0 ? (
+                <div className="rounded-md border border-[#d89538]/35 bg-[#d89538]/10 p-3">
+                  <div className="flex gap-3">
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[#d89538]/15 text-[#efb34f]">
+                      <ScanFace size={18} />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <Text variant={TextVariants.label}>Face analysis is ready</Text>
+                      <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-1">
+                        {faceReviewCounts.clusters} similarity group{faceReviewCounts.clusters === 1 ? '' : 's'} and{' '}
+                        {faceReviewCounts.faces} face{faceReviewCounts.faces === 1 ? '' : 's'} need review.
+                      </Text>
+                      <button
+                        type="button"
+                        className="mt-3 rounded bg-[#d89538] px-3 py-1.5 text-xs font-semibold text-[#19130b] shadow-sm hover:bg-[#e9ab4a]"
+                        onClick={() => {
+                          setIsNotificationsOpen(false);
+                          setUI({ activeView: 'people' });
+                        }}
+                      >
+                        Review faces
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-md border border-border-color bg-bg-primary px-3 py-8 text-center">
+                  <Bell size={22} className="mx-auto text-text-secondary" />
+                  <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-2">
+                    You are all caught up.
+                  </Text>
+                </div>
+              )}
             </motion.div>
           </motion.div>
         )}
