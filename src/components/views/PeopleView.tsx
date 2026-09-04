@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
@@ -19,6 +19,7 @@ interface FaceItem {
     width: number;
     height: number;
   };
+  clusterId?: number | null;
   imagePath: string;
   cropPath?: string | null;
   thumbnailDataUrl?: string | null;
@@ -43,6 +44,12 @@ interface FaceCluster {
   representativeImagePath: string;
   representativeCropPath?: string | null;
   representativeThumbnailDataUrl?: string | null;
+}
+
+interface FaceReviewGroup {
+  id: number | null;
+  label: string;
+  faces: FaceItem[];
 }
 
 interface PersonNameComboboxProps {
@@ -161,7 +168,7 @@ function PersonNameCombobox({ idPrefix, hasPeople, onAssign, onError }: PersonNa
               else void assignName();
             }
           }}
-          placeholder={hasPeople ? 'Name this person' : 'Enter a name'}
+          placeholder="Name"
           aria-label="Name this face"
           aria-autocomplete="list"
           aria-controls={listId}
@@ -230,6 +237,12 @@ export default function PeopleView() {
   const [selectedFaceIds, setSelectedFaceIds] = useState<Set<number>>(new Set());
   const [coverPickerPerson, setCoverPickerPerson] = useState<Person | null>(null);
   const [coverCandidates, setCoverCandidates] = useState<PersonCoverCandidate[]>([]);
+  const selectedFaceIdsRef = useRef(selectedFaceIds);
+  const faceDragSelectionRef = useRef<{ pointerId: number; shouldSelect: boolean } | null>(null);
+
+  useEffect(() => {
+    selectedFaceIdsRef.current = selectedFaceIds;
+  }, [selectedFaceIds]);
 
   const load = async () => {
     try {
@@ -316,6 +329,7 @@ export default function PeopleView() {
       const next = new Set(current);
       if (next.has(faceId)) next.delete(faceId);
       else next.add(faceId);
+      selectedFaceIdsRef.current = next;
       return next;
     });
   };
@@ -496,6 +510,63 @@ export default function PeopleView() {
   };
 
   const allFacesSelected = faces.length > 0 && selectedFaceIds.size === faces.length;
+  const faceReviewGroups = useMemo<FaceReviewGroup[]>(() => {
+    const knownClusterIds = new Set(clusters.map((cluster) => cluster.id));
+    const facesByCluster = new Map<number, FaceItem[]>();
+    const individualFaces: FaceItem[] = [];
+    for (const face of faces) {
+      if (face.clusterId == null || !knownClusterIds.has(face.clusterId)) {
+        individualFaces.push(face);
+        continue;
+      }
+      const group = facesByCluster.get(face.clusterId) || [];
+      group.push(face);
+      facesByCluster.set(face.clusterId, group);
+    }
+    const similarityGroups = clusters.flatMap((cluster) => {
+      const groupedFaces = facesByCluster.get(cluster.id) || [];
+      return groupedFaces.length > 0
+        ? [{ id: cluster.id, label: 'Similarity group', faces: groupedFaces }]
+        : [];
+    });
+    return individualFaces.length > 0
+      ? [...similarityGroups, { id: null, label: 'Individual faces', faces: individualFaces }]
+      : similarityGroups;
+  }, [clusters, faces]);
+
+  const updateDragSelection = (faceId: number) => {
+    const dragSelection = faceDragSelectionRef.current;
+    if (!dragSelection) return;
+    setSelectedFaceIds((current) => {
+      if (current.has(faceId) === dragSelection.shouldSelect) return current;
+      const next = new Set(current);
+      if (dragSelection.shouldSelect) next.add(faceId);
+      else next.delete(faceId);
+      selectedFaceIdsRef.current = next;
+      return next;
+    });
+  };
+
+  const beginFaceDragSelection = (event: ReactPointerEvent<HTMLDivElement>, faceId: number) => {
+    if (event.pointerType !== 'mouse' || event.button !== 0) return;
+    if (event.target instanceof HTMLElement && event.target.closest('label, input, button')) return;
+    event.preventDefault();
+    const shouldSelect = !selectedFaceIdsRef.current.has(faceId);
+    faceDragSelectionRef.current = { pointerId: event.pointerId, shouldSelect };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    updateDragSelection(faceId);
+  };
+
+  const continueFaceDragSelection = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!faceDragSelectionRef.current) return;
+    const target = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('[data-face-id]');
+    const faceId = Number(target?.dataset.faceId);
+    if (Number.isInteger(faceId)) updateDragSelection(faceId);
+  };
+
+  const endFaceDragSelection = () => {
+    faceDragSelectionRef.current = null;
+  };
 
   return (
     <div className="flex-1 overflow-y-auto p-5">
@@ -859,79 +930,103 @@ export default function PeopleView() {
               </div>
             )}
           </div>
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(148px,1fr))] gap-3">
-            {faces.map((item) => {
-              const suggested = people.find((person) => person.id === item.face.personId);
-              const cropSrc = item.thumbnailDataUrl || (item.cropPath ? convertFileSrc(item.cropPath) : null);
-
-              return (
-                <div
-                  key={item.face.id}
-                  className="relative min-w-0 overflow-visible rounded-md border border-border-color bg-bg-secondary p-2.5"
-                >
-                  <div className="relative flex aspect-square w-full items-center justify-center overflow-hidden rounded-md border border-border-color bg-surface">
-                    <label className="absolute left-2 top-2 z-10 flex h-5 w-5 cursor-pointer items-center justify-center rounded bg-black/60 text-white shadow">
-                      <input
-                        type="checkbox"
-                        className="h-3.5 w-3.5 accent-accent"
-                        checked={selectedFaceIds.has(item.face.id)}
-                        onChange={() => toggleFaceSelection(item.face.id)}
-                        aria-label="Select face for bulk assignment"
-                      />
-                    </label>
-                    {cropSrc ? (
-                      <img
-                        src={cropSrc}
-                        className="w-full h-full object-cover select-none"
-                        alt="Detected face"
-                        onError={() => {
-                          void invoke<string>('get_or_generate_face_crop', { faceId: item.face.id })
-                            .then((freshCrop) => {
-                              if (freshCrop) {
-                                const isDataUrl = freshCrop.startsWith('data:');
-                                setFaces((prev) =>
-                                  prev.map((f) =>
-                                    f.face.id === item.face.id
-                                      ? {
-                                          ...f,
-                                          thumbnailDataUrl: isDataUrl ? freshCrop : f.thumbnailDataUrl,
-                                          cropPath: isDataUrl ? f.cropPath : freshCrop,
-                                        }
-                                      : f,
-                                  ),
-                                );
-                              }
-                            })
-                            .catch(() => {});
-                        }}
-                      />
-                    ) : (
-                      <Loader2 size={24} className="animate-spin text-text-secondary" />
-                    )}
-                  </div>
-                  <div className="mt-2 space-y-2">
-                    <Text as="div" variant={TextVariants.small}>
-                      {suggested ? 'Suggested match' : 'Unknown face'}
-                    </Text>
-                    <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
-                      {Math.round(item.face.confidence * 100)}% confidence
-                    </Text>
-                    <PersonNameCombobox
-                      idPrefix={`face-${item.face.id}`}
-                      hasPeople={people.length > 0}
-                      onAssign={(personId) => review(item.face.id, personId, 'confirmed')}
-                      onError={showError}
-                    />
-                    <button
-                      className="text-red-300 hover:text-red-200 text-xs inline-flex items-center gap-1"
-                      onClick={() => void review(item.face.id, null, 'rejected')}
-                    >
-                      <X size={13} /> Not a face
-                    </button>
-                  </div>
+          <div
+            className="space-y-5 select-none"
+            onPointerMove={continueFaceDragSelection}
+            onPointerUp={endFaceDragSelection}
+            onPointerCancel={endFaceDragSelection}
+          >
+            {faceReviewGroups.map((group) => (
+              <section key={group.id ?? 'individual'}>
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <Text variant={TextVariants.small} color={TextColors.secondary}>
+                    {group.label}
+                  </Text>
+                  <Text variant={TextVariants.small} color={TextColors.secondary} className="shrink-0">
+                    {group.faces.length} face{group.faces.length === 1 ? '' : 's'}
+                  </Text>
                 </div>
-              );
-            })}
+                <div className="grid grid-cols-[repeat(auto-fill,minmax(148px,1fr))] gap-3">
+                  {group.faces.map((item) => {
+                    const suggested = people.find((person) => person.id === item.face.personId);
+                    const cropSrc = item.thumbnailDataUrl || (item.cropPath ? convertFileSrc(item.cropPath) : null);
+
+                    return (
+                      <div
+                        key={item.face.id}
+                        data-face-id={item.face.id}
+                        className="relative min-w-0 overflow-visible rounded-md border border-border-color bg-bg-secondary p-2.5"
+                      >
+                        <div
+                          className="relative flex aspect-square w-full cursor-crosshair items-center justify-center overflow-hidden rounded-md border border-border-color bg-surface"
+                          onPointerDown={(event) => beginFaceDragSelection(event, item.face.id)}
+                        >
+                          <label className="absolute left-2 top-2 z-10 flex h-5 w-5 cursor-pointer items-center justify-center rounded bg-black/60 text-white shadow">
+                            <input
+                              type="checkbox"
+                              className="h-3.5 w-3.5 accent-[#d89538]"
+                              checked={selectedFaceIds.has(item.face.id)}
+                              onChange={() => toggleFaceSelection(item.face.id)}
+                              aria-label="Select face for bulk assignment"
+                            />
+                          </label>
+                          {cropSrc ? (
+                            <img
+                              src={cropSrc}
+                              className="h-full w-full object-cover select-none"
+                              alt="Detected face"
+                              draggable={false}
+                              onError={() => {
+                                void invoke<string>('get_or_generate_face_crop', { faceId: item.face.id })
+                                  .then((freshCrop) => {
+                                    if (freshCrop) {
+                                      const isDataUrl = freshCrop.startsWith('data:');
+                                      setFaces((prev) =>
+                                        prev.map((f) =>
+                                          f.face.id === item.face.id
+                                            ? {
+                                                ...f,
+                                                thumbnailDataUrl: isDataUrl ? freshCrop : f.thumbnailDataUrl,
+                                                cropPath: isDataUrl ? f.cropPath : freshCrop,
+                                              }
+                                            : f,
+                                        ),
+                                      );
+                                    }
+                                  })
+                                  .catch(() => {});
+                              }}
+                            />
+                          ) : (
+                            <Loader2 size={24} className="animate-spin text-text-secondary" />
+                          )}
+                        </div>
+                        <div className="mt-2 space-y-2 select-text">
+                          <Text as="div" variant={TextVariants.small}>
+                            {suggested ? 'Suggested match' : 'Unknown face'}
+                          </Text>
+                          <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
+                            {Math.round(item.face.confidence * 100)}% confidence
+                          </Text>
+                          <PersonNameCombobox
+                            idPrefix={`face-${item.face.id}`}
+                            hasPeople={people.length > 0}
+                            onAssign={(personId) => review(item.face.id, personId, 'confirmed')}
+                            onError={showError}
+                          />
+                          <button
+                            className="inline-flex items-center gap-1 text-xs text-red-300 hover:text-red-200"
+                            onClick={() => void review(item.face.id, null, 'rejected')}
+                          >
+                            <X size={13} /> Not a face
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            ))}
           </div>
         </>
       )}

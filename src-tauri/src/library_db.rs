@@ -322,6 +322,7 @@ pub struct CatalogFace {
 #[serde(rename_all = "camelCase")]
 pub struct CatalogFaceReviewItem {
     pub face: CatalogFace,
+    pub cluster_id: Option<i64>,
     pub image_path: String,
     pub crop_path: Option<String>,
     pub thumbnail_data_url: Option<String>,
@@ -6638,6 +6639,7 @@ pub fn list_catalog_face_review_items_for_path(
                     height: row.get(10)?,
                     review_state: row.get(11)?,
                 },
+                cluster_id: None,
                 image_path: requested_path.clone(),
                 crop_path,
                 thumbnail_data_url,
@@ -6691,7 +6693,7 @@ pub fn list_unreviewed_catalog_faces(
     use base64::Engine;
     let conn = open_connection(&active_library_path(&state)?)?;
     let face_crops_dir = crate::face_detection::get_face_crops_dir(&app_handle).ok();
-    let mut statement = conn.prepare("SELECT f.id, f.image_id, f.person_id, f.model_pack_id, f.detector_model_id, f.recognizer_model_id, f.detector_confidence, f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height, f.review_state, r.absolute_path || '/' || i.relative_path, f.thumbnail_jpeg FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE f.review_state = 'unreviewed' AND i.status = 'present' GROUP BY i.folder_id, substr(i.file_name, 1, instr(i.file_name || '.', '.') - 1), round(f.bbox_x, 2), round(f.bbox_y, 2) ORDER BY f.detector_confidence DESC LIMIT 500").map_err(|error| error.to_string())?;
+    let mut statement = conn.prepare("SELECT f.id, f.image_id, f.person_id, f.model_pack_id, f.detector_model_id, f.recognizer_model_id, f.detector_confidence, f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height, f.review_state, r.absolute_path || '/' || i.relative_path, f.thumbnail_jpeg, (SELECT cm.cluster_id FROM face_cluster_members cm JOIN face_clusters c ON c.id = cm.cluster_id WHERE cm.face_id = f.id AND c.state = 'unreviewed' ORDER BY c.updated_at DESC, c.id DESC LIMIT 1) FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE f.review_state = 'unreviewed' AND i.status = 'present' GROUP BY i.folder_id, substr(i.file_name, 1, instr(i.file_name || '.', '.') - 1), round(f.bbox_x, 2), round(f.bbox_y, 2) ORDER BY f.detector_confidence DESC LIMIT 500").map_err(|error| error.to_string())?;
     statement
         .query_map([], |row| {
             let face_id: i64 = row.get(0)?;
@@ -6725,6 +6727,7 @@ pub fn list_unreviewed_catalog_faces(
                     height: row.get(10)?,
                     review_state: row.get(11)?,
                 },
+                cluster_id: row.get(14)?,
                 image_path: row.get(12)?,
                 crop_path,
                 thumbnail_data_url,
