@@ -45,6 +45,7 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
   } = refs;
 
   const handleGoHome = useCallback(() => {
+    window.dispatchEvent(new Event('rapidraw:discard-global-search'));
     useLibraryStore.getState().setLibrary({
       rootPaths: [],
       currentFolderPath: null,
@@ -60,6 +61,7 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
       isLibraryExportPanelVisible: false,
       libraryDisplayMode: LibraryDisplayMode.Grid,
       cullWorkspaceFolderPath: null,
+      globalCatalogSearchLabel: null,
     });
   }, []);
 

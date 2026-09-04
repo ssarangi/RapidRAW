@@ -228,6 +228,8 @@ export interface AutoCullModalState {
 
 interface UIState {
   activeView: string;
+  /** Human-readable label for the catalog result set currently shown in Library. */
+  globalCatalogSearchLabel: string | null;
   isFullScreen: boolean;
   isWindowFullScreen: boolean;
   isInstantTransition: boolean;
@@ -298,6 +300,7 @@ interface UIState {
 
 export const useUIStore = create<UIState>((set, get) => ({
   activeView: 'library',
+  globalCatalogSearchLabel: null,
   libraryDisplayMode: LibraryDisplayMode.Grid,
   isFullScreen: false,
   isWindowFullScreen: false,

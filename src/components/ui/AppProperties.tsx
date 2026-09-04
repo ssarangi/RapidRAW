@@ -106,6 +106,7 @@ export enum Invokes {
   MergeHdr = 'merge_hdr',
   TestAIConnectorConnection = 'test_ai_connector_connection',
   TestGeminiApiKey = 'test_gemini_api_key',
+  InterpretGeminiCatalogSearch = 'interpret_gemini_catalog_search',
   GetOrGenerateGeminiCritique = 'get_or_generate_gemini_critique',
   UpdateWgpuTransform = 'update_wgpu_transform',
   UpdateExifFields = 'update_exif_fields',
@@ -122,6 +123,9 @@ export enum Invokes {
   InstallVisualModelBundle = 'install_visual_model_bundle',
   RemoveVisualModelPack = 'remove_visual_model_pack',
   ListCatalogPeople = 'list_catalog_people',
+  ListCatalogPersonCoverCandidates = 'list_catalog_person_cover_candidates',
+  SetCatalogPersonCover = 'set_catalog_person_cover',
+  SearchCatalogPeople = 'search_catalog_people',
   ListSmartCollections = 'list_smart_collections',
   SaveSmartCollection = 'save_smart_collection',
   DeleteSmartCollection = 'delete_smart_collection',
@@ -137,6 +141,7 @@ export enum Invokes {
   RemoveCatalogPerson = 'remove_catalog_person',
   MergeCatalogPeople = 'merge_catalog_people',
   ReviewCatalogFace = 'review_catalog_face',
+  ReviewCatalogFaces = 'review_catalog_faces',
   ListBackgroundJobs = 'list_background_jobs',
   ListBackgroundJobEvents = 'list_background_job_events',
   CancelBackgroundJob = 'cancel_background_job',
@@ -553,6 +558,12 @@ export interface CatalogSearchQuery {
   camera?: string | null;
   lens?: string | null;
   person?: string | null;
+  people?: string[] | null;
+  excludedPeople?: string[] | null;
+  excludedTags?: string[] | null;
+  excludedAiTags?: string[] | null;
+  dateFrom?: number | null;
+  dateTo?: number | null;
   color?: string | null;
   isRaw?: boolean | null;
   isEdited?: boolean | null;

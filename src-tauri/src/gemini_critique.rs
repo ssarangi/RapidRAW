@@ -6,7 +6,7 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
-use crate::library_db::{active_library_path, open_connection};
+use crate::library_db::{CatalogSearchQuery, active_library_path, open_connection};
 
 /// Long edge a photo is downsampled to before it's sent to Gemini. Vision
 /// token cost scales with image tile count, and none of the critique
@@ -125,6 +125,237 @@ pub struct GeminiCritique {
     pub overall_summary: String,
     pub regions: Vec<GeminiCritiqueRegion>,
     pub cached: bool,
+}
+
+/// Gemini's interpretation of a natural-language catalog search. The query is
+/// deliberately limited to the same fields accepted by `search_catalog_images`;
+/// Gemini never receives database contents and never emits SQL.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiCatalogSearch {
+    pub summary: String,
+    #[serde(default)]
+    pub query: CatalogSearchQuery,
+}
+
+fn trim_query_string(value: &mut Option<String>, maximum: usize) {
+    if let Some(text) = value {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            *value = None;
+        } else {
+            *text = trimmed.chars().take(maximum).collect();
+        }
+    }
+}
+
+fn sanitize_catalog_search(query: &mut CatalogSearchQuery) {
+    // Scope and pagination belong to the local caller, never the model.
+    query.root_id = None;
+    query.limit = Some(20_000);
+    query.rating = query.rating.filter(|rating| (0..=5).contains(rating));
+    query.min_rating = query.min_rating.filter(|rating| (0..=5).contains(rating));
+    query.year = query.year.filter(|year| (1900..=2100).contains(year));
+    trim_query_string(&mut query.text, 200);
+    trim_query_string(&mut query.camera, 120);
+    trim_query_string(&mut query.lens, 120);
+    trim_query_string(&mut query.person, 120);
+    // A model can occasionally serialize "Swasti and Saket" into the legacy
+    // singular field despite the schema. Recover the intended conjunction so
+    // it produces separate EXISTS clauses instead of one impossible name.
+    if query.people.as_ref().is_none_or(Vec::is_empty) {
+        if let Some(person) = query.person.as_ref() {
+            let split_people: Vec<String> = person
+                .split(",")
+                .flat_map(|part| part.split(" and "))
+                .flat_map(|part| part.split(" & "))
+                .map(|part| part.trim().to_string())
+                .filter(|part| !part.is_empty())
+                .collect();
+            if split_people.len() > 1 {
+                query.people = Some(split_people);
+                query.person = None;
+            }
+        }
+    }
+    if let Some(people) = &mut query.people {
+        let cleaned: Vec<String> = people
+            .iter()
+            .map(|person| person.trim().chars().take(120).collect::<String>())
+            .filter(|person| !person.is_empty())
+            .take(12)
+            .collect();
+        query.people = (!cleaned.is_empty()).then_some(cleaned);
+    }
+    for values in [
+        &mut query.excluded_people,
+        &mut query.excluded_tags,
+        &mut query.excluded_ai_tags,
+    ] {
+        if let Some(items) = values {
+            let cleaned: Vec<String> = items
+                .iter()
+                .map(|item| item.trim().chars().take(120).collect::<String>())
+                .filter(|item| !item.is_empty())
+                .take(12)
+                .collect();
+            *values = (!cleaned.is_empty()).then_some(cleaned);
+        }
+    }
+    query.date_from = query
+        .date_from
+        .filter(|date| *date >= 0 && *date <= 4_102_444_800);
+    query.date_to = query
+        .date_to
+        .filter(|date| *date >= 0 && *date <= 4_102_444_800);
+    if query
+        .date_from
+        .zip(query.date_to)
+        .is_some_and(|(from, to)| from > to)
+    {
+        std::mem::swap(&mut query.date_from, &mut query.date_to);
+    }
+    trim_query_string(&mut query.color, 32);
+    if !matches!(query.tag_mode.as_deref(), Some("AND") | Some("OR")) {
+        query.tag_mode = None;
+    }
+    for tags in [&mut query.tags, &mut query.ai_tags] {
+        if let Some(values) = tags {
+            let cleaned: Vec<String> = values
+                .iter()
+                .map(|value| value.trim().chars().take(80).collect::<String>())
+                .filter(|value| !value.is_empty())
+                .take(12)
+                .collect();
+            *tags = (!cleaned.is_empty()).then_some(cleaned);
+        }
+    }
+}
+
+fn build_catalog_search_request_body(natural_language: &str) -> serde_json::Value {
+    let today = chrono::Utc::now().format("%Y-%m-%d");
+    let prompt = format!(
+        "Convert the user's request into a RapidRAW catalog search. Today is {today}. \
+        Return only the JSON schema below. Use only filters explicitly supported by the schema. \
+        Do not invent names, tags, cameras, dates, ratings, or file properties. Omit a filter \
+        when it is not stated. Put remaining filename/title/caption/path words in query.text. \
+        Ratings are integers 0 through 5. Interpret 'at least N stars' as minRating. \
+        Interpret RAW/non-RAW and edited/unedited as booleans. For relative years, calculate the \
+        matching calendar year from today's date. For requests that name two or more people together, \
+        put each name in query.people; that means every listed person must be in the same photo. Put names \
+        after words such as 'not', 'without', or 'excluding' in excludedPeople. Do the same for tags with \
+        excludedTags and excludedAiTags. Convert date ranges to inclusive Unix timestamps in dateFrom/dateTo. \
+        User request: {natural_language}"
+    );
+    serde_json::json!({
+        "contents": [{ "parts": [{ "text": prompt }] }],
+        "generationConfig": {
+            "temperature": 0,
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "OBJECT",
+                "properties": {
+                    "summary": { "type": "STRING" },
+                    "query": {
+                        "type": "OBJECT",
+                        "properties": {
+                            "text": { "type": "STRING" },
+                            "rating": { "type": "INTEGER" },
+                            "minRating": { "type": "INTEGER" },
+                            "tags": { "type": "ARRAY", "items": { "type": "STRING" } },
+                            "aiTags": { "type": "ARRAY", "items": { "type": "STRING" } },
+                            "tagMode": { "type": "STRING", "enum": ["AND", "OR"] },
+                            "year": { "type": "INTEGER" },
+                            "camera": { "type": "STRING" },
+                            "lens": { "type": "STRING" },
+                            "person": { "type": "STRING" },
+                            "people": { "type": "ARRAY", "items": { "type": "STRING" } },
+                            "excludedPeople": { "type": "ARRAY", "items": { "type": "STRING" } },
+                            "excludedTags": { "type": "ARRAY", "items": { "type": "STRING" } },
+                            "excludedAiTags": { "type": "ARRAY", "items": { "type": "STRING" } },
+                            "dateFrom": { "type": "INTEGER" },
+                            "dateTo": { "type": "INTEGER" },
+                            "color": { "type": "STRING" },
+                            "isRaw": { "type": "BOOLEAN" },
+                            "isEdited": { "type": "BOOLEAN" }
+                        }
+                    }
+                },
+                "required": ["summary", "query"]
+            }
+        }
+    })
+}
+
+async fn call_gemini_catalog_search(
+    api_key: &str,
+    model: &str,
+    natural_language: &str,
+) -> Result<GeminiCatalogSearch, GeminiCallError> {
+    let client = reqwest::Client::new();
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    );
+    let response = client
+        .post(&url)
+        .json(&build_catalog_search_request_body(natural_language))
+        .send()
+        .await
+        .map_err(|error| GeminiCallError::Retryable(format!("Could not reach Gemini: {error}")))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let message = format!("Gemini ({model}) returned HTTP {status}: {body}");
+        return Err(if status.as_u16() == 429 || status.is_server_error() {
+            GeminiCallError::Retryable(message)
+        } else {
+            GeminiCallError::Fatal(message)
+        });
+    }
+    let payload: serde_json::Value = response.json().await.map_err(|error| {
+        GeminiCallError::Fatal(format!("Could not parse Gemini's response: {error}"))
+    })?;
+    let text = payload["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .ok_or_else(|| {
+            GeminiCallError::Fatal("Gemini's response did not contain a search query".to_string())
+        })?;
+    serde_json::from_str(text).map_err(|error| {
+        GeminiCallError::Fatal(format!("Could not parse Gemini's search JSON: {error}"))
+    })
+}
+
+#[tauri::command]
+pub async fn interpret_gemini_catalog_search(
+    natural_language: String,
+    app_handle: AppHandle,
+) -> Result<GeminiCatalogSearch, String> {
+    let request = natural_language.trim();
+    if request.len() < 2 {
+        return Err("Describe what you want to find first".to_string());
+    }
+    let settings = crate::app_settings::load_settings(app_handle).unwrap_or_default();
+    let api_key = settings
+        .gemini_api_key
+        .filter(|key| !key.trim().is_empty())
+        .ok_or_else(|| "Add a Gemini API key in Settings before using AI search".to_string())?;
+    let candidate_models = resolve_flash_models(&api_key).await?;
+    let mut last_error = None;
+    for model in &candidate_models {
+        match call_gemini_catalog_search(&api_key, model, request).await {
+            Ok(mut result) => {
+                sanitize_catalog_search(&mut result.query);
+                result.summary = result.summary.trim().chars().take(240).collect();
+                if result.summary.is_empty() {
+                    result.summary = "Interpreted your search request".to_string();
+                }
+                return Ok(result);
+            }
+            Err(GeminiCallError::Retryable(message)) => last_error = Some(message),
+            Err(GeminiCallError::Fatal(message)) => return Err(message),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| "No Gemini model produced a search query".to_string()))
 }
 
 fn resolve_image_path(conn: &rusqlite::Connection, image_id: i64) -> Result<String, String> {

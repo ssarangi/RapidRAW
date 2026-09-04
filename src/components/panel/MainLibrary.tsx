@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { getVersion } from '@tauri-apps/api/app';
 import { open } from '@tauri-apps/plugin-shell';
 import {
@@ -45,7 +45,7 @@ import { toast } from 'react-toastify';
 import SettingsPanel from './SettingsPanel';
 
 import LibraryGrid from './library/LibraryGrid';
-import { CatalogSearchDropdown, SearchInput, SmartCollectionsDropdown, ViewOptionsDropdown } from './library/LibraryHeader';
+import { SmartCollectionsDropdown, ViewOptionsDropdown } from './library/LibraryHeader';
 
 export interface ColumnWidths {
   thumbnail: number;
@@ -320,7 +320,7 @@ export default function MainLibrary(props: MainLibraryProps) {
         const currentVersion = await getVersion();
         setAppVersion(currentVersion);
 
-        const response = await fetch('https://api.github.com/repos/CyberTimon/RapidRAW/releases/latest');
+        const response = await fetch('https://api.github.com/repos/ssarangi/RapidRAW/releases/latest');
         if (!response.ok) {
           console.error('Failed to fetch latest release info from GitHub.');
           return;
@@ -359,7 +359,9 @@ export default function MainLibrary(props: MainLibraryProps) {
     }
     const isCatalogMode = librarySource.type === 'catalog';
     const hasLastPath = !!props.appSettings.lastRootPath || !!props.appSettings.rootFolders?.length || isCatalogMode;
-    const canContinueSession = !!props.appSettings.lastRootPath || !!props.appSettings.rootFolders?.length ||
+    const canContinueSession =
+      !!props.appSettings.lastRootPath ||
+      !!props.appSettings.rootFolders?.length ||
       (isCatalogMode && catalogRoots.length > 0);
 
     const handleSplashAddFolder = async () => {
@@ -389,8 +391,7 @@ export default function MainLibrary(props: MainLibraryProps) {
         return;
       }
       if (isSplashBusy) return;
-      const root =
-        catalogRoots.find((candidate) => candidate.id === activeCatalogRootId) || catalogRoots[0] || null;
+      const root = catalogRoots.find((candidate) => candidate.id === activeCatalogRootId) || catalogRoots[0] || null;
       if (!root) return;
       setIsSplashBusy(true);
       try {
@@ -538,6 +539,16 @@ export default function MainLibrary(props: MainLibraryProps) {
                         Timon Käch
                       </a>
                     </p>
+                    <p>
+                      <a
+                        href="https://github.com/CyberTimon/RapidRAW"
+                        className="hover:underline"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        {t('library.splash.originalProjectBy')}
+                      </a>
+                    </p>
                     {appVersion && (
                       <div className="flex items-center space-x-2">
                         <p>
@@ -549,7 +560,7 @@ export default function MainLibrary(props: MainLibraryProps) {
                             }`}
                             onClick={() => {
                               if (isUpdateAvailable) {
-                                open('https://github.com/CyberTimon/RapidRAW/releases/latest');
+                                open('https://github.com/ssarangi/RapidRAW/releases/latest');
                               }
                             }}
                             data-tooltip={
@@ -571,16 +582,7 @@ export default function MainLibrary(props: MainLibraryProps) {
                         <span>-</span>
                         <p>
                           <a
-                            href="https://ko-fi.com/cybertimon"
-                            className="hover:underline"
-                            target="_blank"
-                            rel="noopener noreferrer"
-                          >
-                            {t('library.splash.donate')}
-                          </a>
-                          <span className="mx-1">{t('library.splash.or')}</span>
-                          <a
-                            href="https://github.com/CyberTimon/RapidRAW"
+                            href="https://github.com/ssarangi/RapidRAW"
                             className="hover:underline"
                             target="_blank"
                             rel="noopener noreferrer"
@@ -675,13 +677,11 @@ export default function MainLibrary(props: MainLibraryProps) {
           <div className="flex items-center gap-2">
             {libraryDisplayMode !== LibraryDisplayMode.Cull && (
               <>
-                {/* Find */}
+                {/* Saved collections */}
                 <div
                   className="flex items-center bg-surface p-1 rounded-lg gap-1 border border-border-color/20"
-                  data-tooltip="Find"
+                  data-tooltip="Saved collections"
                 >
-                  <SearchInput indexingProgress={props.indexingProgress} isIndexing={props.isIndexing} />
-                  <CatalogSearchDropdown />
                   <SmartCollectionsDropdown />
                 </div>
 

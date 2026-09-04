@@ -16,7 +16,7 @@ use crate::file_management::{ImageFile, parse_virtual_path};
 use crate::file_management::{assign_group_ids, read_file_mapped};
 use crate::formats::{is_raw_file, is_supported_image_file};
 
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -98,6 +98,17 @@ pub struct CatalogSearchQuery {
     pub camera: Option<String>,
     pub lens: Option<String>,
     pub person: Option<String>,
+    /// Every listed person must be confirmed in an image. This complements
+    /// the legacy single-person field so natural-language requests such as
+    /// "Swasti and Saket together" can be represented without SQL parsing.
+    pub people: Option<Vec<String>>,
+    pub excluded_people: Option<Vec<String>>,
+    pub excluded_tags: Option<Vec<String>>,
+    pub excluded_ai_tags: Option<Vec<String>>,
+    /// Unix timestamps, inclusive. Date-only values are converted by the UI
+    /// and Gemini interpreter before they reach the query engine.
+    pub date_from: Option<i64>,
+    pub date_to: Option<i64>,
     pub color: Option<String>,
     pub is_raw: Option<bool>,
     pub is_edited: Option<bool>,
@@ -256,6 +267,9 @@ pub struct CatalogPerson {
     pub display_name: String,
     pub state: String,
     pub face_count: i64,
+    pub cover_face_id: Option<i64>,
+    pub cover_thumbnail_data_url: Option<String>,
+    pub cover_selection: String,
 }
 
 /// A normalized face observation from one source image. Bounding-box values
@@ -295,6 +309,15 @@ pub struct CatalogFaceCluster {
     pub representative_image_path: String,
     pub representative_crop_path: Option<String>,
     pub representative_thumbnail_data_url: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogPersonCoverCandidate {
+    pub face_id: i64,
+    pub thumbnail_data_url: Option<String>,
+    pub confidence: f64,
+    pub frontal_score: f64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -705,6 +728,8 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           display_name TEXT NOT NULL COLLATE NOCASE,
           state TEXT NOT NULL DEFAULT 'active' CHECK(state IN ('active', 'ignored', 'merged')),
           merged_into_person_id INTEGER REFERENCES people(id) ON DELETE SET NULL,
+          cover_face_id INTEGER REFERENCES faces(id) ON DELETE SET NULL,
+          cover_selection TEXT NOT NULL DEFAULT 'automatic' CHECK(cover_selection IN ('automatic', 'manual')),
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
           UNIQUE(display_name)
@@ -960,6 +985,11 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     let _ = conn.execute("ALTER TABLE faces ADD COLUMN thumbnail_jpeg BLOB", []);
+    let _ = conn.execute("ALTER TABLE people ADD COLUMN cover_face_id INTEGER REFERENCES faces(id) ON DELETE SET NULL", []);
+    let _ = conn.execute(
+        "ALTER TABLE people ADD COLUMN cover_selection TEXT NOT NULL DEFAULT 'automatic'",
+        [],
+    );
     let _ = conn.execute(
         "ALTER TABLE faces ADD COLUMN detector_model_id TEXT NOT NULL DEFAULT ''",
         [],
@@ -5317,6 +5347,14 @@ pub fn search_catalog_images(
         sql.push_str(" AND m.year = ?");
         values.push(SqlValue::Integer(year));
     }
+    if let Some(date_from) = query.date_from {
+        sql.push_str(" AND COALESCE(m.date_taken, i.modified_at) >= ?");
+        values.push(SqlValue::Integer(date_from));
+    }
+    if let Some(date_to) = query.date_to {
+        sql.push_str(" AND COALESCE(m.date_taken, i.modified_at) <= ?");
+        values.push(SqlValue::Integer(date_to));
+    }
     if let Some(is_raw) = query.is_raw {
         sql.push_str(" AND i.is_raw = ?");
         values.push(SqlValue::Integer(if is_raw { 1 } else { 0 }));
@@ -5337,7 +5375,16 @@ pub fn search_catalog_images(
         sql.push_str(" AND LOWER(COALESCE(m.camera_make, '') || ' ' || COALESCE(m.camera_model, '')) LIKE LOWER(?)");
         values.push(SqlValue::Text(format!("%{}%", camera.trim())));
     }
+    let mut requested_people = query.people.unwrap_or_default();
     if let Some(person) = query.person.filter(|s| !s.trim().is_empty()) {
+        requested_people.push(person);
+    }
+    for person in requested_people
+        .into_iter()
+        .map(|person| person.trim().to_string())
+        .filter(|person| !person.is_empty())
+        .take(12)
+    {
         sql.push_str(
             " AND EXISTS (
                 SELECT 1
@@ -5355,6 +5402,34 @@ pub fn search_catalog_images(
             )",
         );
         let like = SqlValue::Text(format!("%{}%", person.trim()));
+        values.push(like.clone());
+        values.push(like);
+    }
+    for person in query
+        .excluded_people
+        .unwrap_or_default()
+        .into_iter()
+        .map(|person| person.trim().to_string())
+        .filter(|person| !person.is_empty())
+        .take(12)
+    {
+        sql.push_str(
+            " AND NOT EXISTS (
+                SELECT 1
+                FROM image_tags it
+                JOIN tags t ON t.id = it.tag_id
+                WHERE it.image_version_id = v.id AND t.kind = 'person' AND LOWER(t.name) LIKE LOWER(?)
+                UNION ALL
+                SELECT 1
+                FROM faces f
+                JOIN people p ON p.id = f.person_id
+                WHERE f.image_id = i.id
+                  AND f.review_state = 'confirmed'
+                  AND p.state = 'active'
+                  AND LOWER(p.display_name) LIKE LOWER(?)
+            )",
+        );
+        let like = SqlValue::Text(format!("%{}%", person));
         values.push(like.clone());
         values.push(like);
     }
@@ -5444,6 +5519,42 @@ pub fn search_catalog_images(
             }
         }
     }
+    for tag in query
+        .excluded_tags
+        .unwrap_or_default()
+        .into_iter()
+        .map(|tag| tag.trim().trim_start_matches("user:").to_string())
+        .filter(|tag| !tag.is_empty())
+        .take(12)
+    {
+        sql.push_str(
+            " AND NOT EXISTS (
+                SELECT 1 FROM image_tags it
+                JOIN tags t ON t.id = it.tag_id
+                WHERE it.image_version_id = v.id AND LOWER(t.name) LIKE LOWER(?)
+            )",
+        );
+        values.push(SqlValue::Text(format!("%{}%", tag)));
+    }
+    for tag in query
+        .excluded_ai_tags
+        .unwrap_or_default()
+        .into_iter()
+        .map(|tag| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+        .take(12)
+    {
+        sql.push_str(
+            " AND NOT EXISTS (
+                SELECT 1 FROM image_ai_tags iat
+                JOIN tags t ON t.id = iat.tag_id
+                WHERE iat.image_id = i.id
+                  AND iat.review_state <> 'rejected'
+                  AND LOWER(t.name) LIKE LOWER(?)
+            )",
+        );
+        values.push(SqlValue::Text(format!("%{}%", tag)));
+    }
     if let Some(text) = query.text.filter(|s| !s.trim().is_empty()) {
         sql.push_str(
             " AND (
@@ -5479,14 +5590,26 @@ pub fn list_catalog_people(
 ) -> Result<Vec<CatalogPerson>, String> {
     let db_path = active_library_path(&state)?;
     let conn = open_connection(&db_path)?;
+    let person_ids: Vec<i64> = conn
+        .prepare("SELECT id FROM people WHERE state = 'active'")
+        .map_err(|error| error.to_string())?
+        .query_map([], |row| row.get(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|error| error.to_string())?;
+    for person_id in person_ids {
+        refresh_automatic_person_cover(&conn, person_id)?;
+    }
+    use base64::Engine;
     let mut statement = conn
         .prepare(
-            "SELECT p.id, p.display_name, p.state, COUNT(f.id)
+            "SELECT p.id, p.display_name, p.state,
+                    (SELECT COUNT(*) FROM faces confirmed WHERE confirmed.person_id = p.id AND confirmed.review_state = 'confirmed'),
+                    p.cover_face_id, cover.thumbnail_jpeg, p.cover_selection
              FROM people p
-             LEFT JOIN faces f ON f.person_id = p.id AND f.review_state = 'confirmed'
+             LEFT JOIN faces cover ON cover.id = p.cover_face_id
              WHERE p.state = 'active'
-             GROUP BY p.id
-             ORDER BY COUNT(f.id) DESC, p.display_name COLLATE NOCASE",
+             ORDER BY 4 DESC, p.display_name COLLATE NOCASE",
         )
         .map_err(|error| error.to_string())?;
     statement
@@ -5496,6 +5619,244 @@ pub fn list_catalog_people(
                 display_name: row.get(1)?,
                 state: row.get(2)?,
                 face_count: row.get(3)?,
+                cover_face_id: row.get(4)?,
+                cover_thumbnail_data_url: row.get::<_, Option<Vec<u8>>>(5)?.map(|bytes| {
+                    format!(
+                        "data:image/jpeg;base64,{}",
+                        base64::prelude::BASE64_STANDARD.encode(bytes)
+                    )
+                }),
+                cover_selection: row.get(6)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn thumbnail_sharpness(bytes: &[u8]) -> f64 {
+    let Ok(image) = image::load_from_memory(bytes) else {
+        return 0.0;
+    };
+    let luma = image.thumbnail(96, 96).to_luma8();
+    let (width, height) = luma.dimensions();
+    if width < 3 || height < 3 {
+        return 0.0;
+    }
+    let mut energy = 0.0;
+    let mut count = 0.0;
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            let center = luma.get_pixel(x, y)[0] as f64 * 4.0;
+            let neighbors = luma.get_pixel(x - 1, y)[0] as f64
+                + luma.get_pixel(x + 1, y)[0] as f64
+                + luma.get_pixel(x, y - 1)[0] as f64
+                + luma.get_pixel(x, y + 1)[0] as f64;
+            energy += (center - neighbors).abs();
+            count += 1.0;
+        }
+    }
+    ((energy / count) / 36.0).clamp(0.0, 1.0)
+}
+
+fn refresh_automatic_person_cover(conn: &Connection, person_id: i64) -> Result<(), String> {
+    let current: Option<(Option<i64>, String)> = conn
+        .query_row(
+            "SELECT cover_face_id, cover_selection FROM people WHERE id = ?1 AND state = 'active'",
+            [person_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some((current_cover, selection)) = current else {
+        return Ok(());
+    };
+    if selection == "manual" {
+        let valid = current_cover
+            .map(|face_id| {
+                conn.query_row(
+                    "SELECT 1 FROM faces WHERE id = ?1 AND person_id = ?2 AND review_state = 'confirmed'",
+                    params![face_id, person_id],
+                    |_| Ok(()),
+                )
+                .is_ok()
+            })
+            .unwrap_or(false);
+        if valid {
+            return Ok(());
+        }
+    }
+
+    let mut statement = conn
+        .prepare(
+            "SELECT id, detector_confidence, bbox_width, bbox_height, landmarks_json, thumbnail_jpeg
+             FROM faces WHERE person_id = ?1 AND review_state = 'confirmed'",
+        )
+        .map_err(|error| error.to_string())?;
+    let candidates = statement
+        .query_map([person_id], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, f64>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<Vec<u8>>>(5)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut best: Option<(i64, f64)> = None;
+    for candidate in candidates {
+        let (face_id, confidence, width, height, landmarks, thumbnail) =
+            candidate.map_err(|error| error.to_string())?;
+        let pose = landmarks
+            .as_deref()
+            .and_then(|json| crate::face_detection::estimate_stored_face_pose(json, width, height));
+        let frontal = pose.map(|value| value.frontal_score as f64).unwrap_or(0.12);
+        let roll = pose.map(|value| value.roll_degrees as f64).unwrap_or(45.0);
+        let roll_score = (1.0 - roll / 35.0).clamp(0.0, 1.0);
+        let size_score = ((width * height).sqrt() / 0.20).clamp(0.0, 1.0);
+        let sharpness = thumbnail
+            .as_deref()
+            .map(thumbnail_sharpness)
+            .unwrap_or(0.15);
+        let score = frontal * 0.48
+            + roll_score * 0.14
+            + sharpness * 0.18
+            + size_score * 0.12
+            + confidence.clamp(0.0, 1.0) * 0.08;
+        if best.is_none_or(|(_, best_score)| score > best_score) {
+            best = Some((face_id, score));
+        }
+    }
+    conn.execute(
+        "UPDATE people SET cover_face_id = ?1, cover_selection = 'automatic', updated_at = ?2 WHERE id = ?3",
+        params![best.map(|(face_id, _)| face_id), now_secs(), person_id],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn list_catalog_person_cover_candidates(
+    person_id: i64,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<CatalogPersonCoverCandidate>, String> {
+    use base64::Engine;
+    let conn = open_connection(&active_library_path(&state)?)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT id, detector_confidence, bbox_width, bbox_height, landmarks_json, thumbnail_jpeg
+             FROM faces WHERE person_id = ?1 AND review_state = 'confirmed'",
+        )
+        .map_err(|error| error.to_string())?;
+    let mut candidates = statement
+        .query_map([person_id], |row| {
+            let width: f64 = row.get(2)?;
+            let height: f64 = row.get(3)?;
+            let landmarks: Option<String> = row.get(4)?;
+            let frontal_score = landmarks
+                .as_deref()
+                .and_then(|json| {
+                    crate::face_detection::estimate_stored_face_pose(json, width, height)
+                })
+                .map(|pose| pose.frontal_score as f64)
+                .unwrap_or(0.0);
+            let thumbnail_data_url = row.get::<_, Option<Vec<u8>>>(5)?.map(|bytes| {
+                format!(
+                    "data:image/jpeg;base64,{}",
+                    base64::prelude::BASE64_STANDARD.encode(bytes)
+                )
+            });
+            Ok(CatalogPersonCoverCandidate {
+                face_id: row.get(0)?,
+                confidence: row.get(1)?,
+                frontal_score,
+                thumbnail_data_url,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    candidates.sort_by(|a, b| {
+        b.frontal_score
+            .total_cmp(&a.frontal_score)
+            .then_with(|| b.confidence.total_cmp(&a.confidence))
+    });
+    Ok(candidates)
+}
+
+#[tauri::command]
+pub fn set_catalog_person_cover(
+    person_id: i64,
+    face_id: Option<i64>,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<(), String> {
+    let conn = open_connection(&active_library_path(&state)?)?;
+    if let Some(face_id) = face_id {
+        let is_confirmed: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM faces WHERE id = ?1 AND person_id = ?2 AND review_state = 'confirmed'",
+                params![face_id, person_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if is_confirmed.is_none() {
+            return Err("Choose a confirmed face belonging to this person".to_string());
+        }
+        conn.execute(
+            "UPDATE people SET cover_face_id = ?1, cover_selection = 'manual', updated_at = ?2 WHERE id = ?3 AND state = 'active'",
+            params![face_id, now_secs(), person_id],
+        )
+        .map_err(|error| error.to_string())?;
+    } else {
+        conn.execute(
+            "UPDATE people SET cover_face_id = NULL, cover_selection = 'automatic', updated_at = ?1 WHERE id = ?2 AND state = 'active'",
+            params![now_secs(), person_id],
+        )
+        .map_err(|error| error.to_string())?;
+        refresh_automatic_person_cover(&conn, person_id)?;
+    }
+    Ok(())
+}
+
+/// Finds active people by display name for name-assignment controls. Keeping
+/// this query in SQLite avoids loading an ever-growing people library into
+/// every face-review card just to provide autocomplete.
+#[tauri::command]
+pub fn search_catalog_people(
+    query: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<Vec<CatalogPerson>, String> {
+    let db_path = active_library_path(&state)?;
+    let conn = open_connection(&db_path)?;
+    let query = query.trim();
+    let like = format!("%{query}%");
+    let mut statement = conn
+        .prepare(
+            "SELECT p.id, p.display_name, p.state, COUNT(f.id)
+             FROM people p
+             LEFT JOIN faces f ON f.person_id = p.id AND f.review_state = 'confirmed'
+             WHERE p.state = 'active' AND LOWER(p.display_name) LIKE LOWER(?1)
+             GROUP BY p.id
+             ORDER BY
+                CASE WHEN LOWER(p.display_name) = LOWER(?2) THEN 0 ELSE 1 END,
+                COUNT(f.id) DESC,
+                p.display_name COLLATE NOCASE
+             LIMIT 25",
+        )
+        .map_err(|error| error.to_string())?;
+    statement
+        .query_map(params![like, query], |row| {
+            Ok(CatalogPerson {
+                id: row.get(0)?,
+                display_name: row.get(1)?,
+                state: row.get(2)?,
+                face_count: row.get(3)?,
+                cover_face_id: None,
+                cover_thumbnail_data_url: None,
+                cover_selection: "automatic".to_string(),
             })
         })
         .map_err(|error| error.to_string())?
@@ -5890,6 +6251,9 @@ pub fn create_catalog_person(
                 display_name: row.get(1)?,
                 state: row.get(2)?,
                 face_count: row.get(3)?,
+                cover_face_id: None,
+                cover_thumbnail_data_url: None,
+                cover_selection: "automatic".to_string(),
             })
         },
     )
@@ -5929,6 +6293,9 @@ pub fn rename_catalog_person(
                 display_name: row.get(1)?,
                 state: row.get(2)?,
                 face_count: row.get(3)?,
+                cover_face_id: None,
+                cover_thumbnail_data_url: None,
+                cover_selection: "automatic".to_string(),
             })
         },
     )
@@ -6484,6 +6851,79 @@ pub fn review_catalog_face(
     );
 
     Ok(())
+}
+
+/// Confirms or rejects multiple face observations in one transaction. This is
+/// used by the People review grid, where a photographer commonly labels a
+/// burst or a group of detections together.
+#[tauri::command]
+pub fn review_catalog_faces(
+    face_ids: Vec<i64>,
+    person_id: Option<i64>,
+    review_state: String,
+    state: tauri::State<'_, crate::AppState>,
+) -> Result<usize, String> {
+    if !matches!(
+        review_state.as_str(),
+        "unreviewed" | "confirmed" | "rejected"
+    ) {
+        return Err("Invalid face review state".to_string());
+    }
+    if review_state == "confirmed" && person_id.is_none() {
+        return Err("A confirmed face must be assigned to a person".to_string());
+    }
+    if face_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut conn = open_connection(&active_library_path(&state)?)?;
+    if let Some(person_id) = person_id {
+        let is_active: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM people WHERE id = ?1 AND state = 'active'",
+                [person_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if is_active.is_none() {
+            return Err("Selected person is not available".to_string());
+        }
+    }
+
+    let transaction = conn.transaction().map_err(|error| error.to_string())?;
+    let now = now_secs();
+    let mut changed = 0;
+    for face_id in face_ids {
+        changed += transaction
+            .execute(
+                "UPDATE faces
+                 SET person_id = ?1, review_state = ?2, updated_at = ?3
+                 WHERE id = ?4",
+                params![person_id, review_state, now, face_id],
+            )
+            .map_err(|error| error.to_string())?;
+        // Keep RAW+JPG companion observations in sync, matching the behavior
+        // of the single-face review command.
+        let _ = transaction.execute(
+            "UPDATE faces
+             SET person_id = ?1, review_state = ?2, updated_at = ?3
+             WHERE id IN (
+                 SELECT f2.id FROM faces f2
+                 JOIN images i2 ON i2.id = f2.image_id
+                 JOIN faces f1 ON f1.id = ?4
+                 JOIN images i1 ON i1.id = f1.image_id
+                 WHERE i2.folder_id = i1.folder_id
+                   AND i2.id != i1.id
+                   AND substr(i2.file_name, 1, instr(i2.file_name || '.', '.') - 1) = substr(i1.file_name, 1, instr(i1.file_name || '.', '.') - 1)
+                   AND abs(f2.bbox_x - f1.bbox_x) < 0.05
+                   AND abs(f2.bbox_y - f1.bbox_y) < 0.05
+             )",
+            params![person_id, review_state, now, face_id],
+        );
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(changed)
 }
 
 fn facet_query(conn: &Connection, sql: &str) -> Result<Vec<CatalogFacetValue>, String> {

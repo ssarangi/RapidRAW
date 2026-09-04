@@ -21,6 +21,7 @@ import FolderTree from './components/panel/right/FolderTree';
 import SettingsPanel from './components/panel/SettingsPanel';
 import ExportPanel from './components/panel/right/ExportPanel';
 import GlobalTooltip from './components/ui/GlobalTooltip';
+import GlobalSearchPalette from './components/ui/GlobalSearchPalette';
 import AppModals from './components/modals/AppModals';
 
 import SidePanelArea from './components/panel/SidePanelArea';
@@ -1035,6 +1036,7 @@ function App() {
                     </div>
                   </div>
                 )}
+                <GlobalSearchPalette />
               </div>
               {!useCompactPanels && hasMainContent && !isCullingMode && (
                 <SidePanelArea

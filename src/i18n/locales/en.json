@@ -1073,7 +1073,6 @@
       "contribute": "Contribute on GitHub",
       "descriptionAndroid": "A blazingly fast, GPU-accelerated RAW image editor. Open the library to begin.",
       "descriptionDesktop": "A blazingly fast, GPU-accelerated RAW image editor. Open a folder to begin.",
-      "donate": "Donate on Ko-Fi",
       "downloadVersion": "Click to download version {{version}}",
       "goToSettings": "Go to Settings",
       "imagesBy": "Images by",
@@ -1081,7 +1080,7 @@
       "newVersionAvailable": "New version available!",
       "openFolder": "Open Folder",
       "openLibrary": "Open Library",
-      "or": "or",
+      "originalProjectBy": "Original project by CyberTimon",
       "version": "Version {{version}}",
       "welcomeBack": "Welcome back!",
       "welcomeBackDesc": "Continue where you left off or start a new session."

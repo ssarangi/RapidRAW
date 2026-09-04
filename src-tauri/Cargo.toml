@@ -105,9 +105,10 @@ hex = "0.4"
 [profile.dev]
 opt-level = 2
 debug = 1
-# Keep the optimized debug runtime, but retain intermediate compilation artifacts
-# so ordinary edit/build cycles do not rebuild the entire crate graph.
-incremental = true
+# Rust 1.98 can emit invalid hidden LLVM symbols when incremental codegen is
+# combined with this optimized desktop crate. `sccache` still reuses compiler
+# outputs safely across builds and worktrees without producing stale link input.
+incremental = false
 
 [profile.dev.package."*"]
 opt-level = 3

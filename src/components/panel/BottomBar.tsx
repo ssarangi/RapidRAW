@@ -16,6 +16,8 @@ import {
   Play,
   RotateCcw,
   Square,
+  Search,
+  Sparkles,
 } from 'lucide-react';
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 import clsx from 'clsx';
@@ -177,10 +179,11 @@ export default function BottomBar({
 }: BottomBarProps) {
   const { t } = useTranslation();
 
-  const { isInstantTransition, uiVisibility, setUI } = useUIStore(
+  const { isInstantTransition, uiVisibility, globalCatalogSearchLabel, setUI } = useUIStore(
     useShallow((state) => ({
       isInstantTransition: state.isInstantTransition,
       uiVisibility: state.uiVisibility,
+      globalCatalogSearchLabel: state.globalCatalogSearchLabel,
       setUI: state.setUI,
     })),
   );
@@ -293,6 +296,12 @@ export default function BottomBar({
     ['queued', 'running', 'paused', 'cancelling'].includes(job.state),
   );
   const activeBackgroundJob = activeBackgroundJobs[0];
+  const activeBackgroundJobLabel = activeBackgroundJob
+    ? activeBackgroundJob.kind
+        .split('_')
+        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ')
+    : '';
   const currentDisplayedPath = catalogScan.isActive
     ? catalogScan.currentPath
     : activeBackgroundJob?.currentItem || catalogScan.currentPath || null;
@@ -573,12 +582,12 @@ export default function BottomBar({
 
       <div
         className={clsx(
-          'shrink-0 h-12 flex items-center justify-between px-3',
+          'shrink-0 h-12 flex items-center px-3',
           !isLibraryView && 'border-t transition-colors duration-300',
           !isLibraryView && showFilmstrip && isFilmstripVisible ? 'border-surface' : 'border-transparent',
         )}
       >
-        <div className="flex items-center gap-4">
+        <div className="flex min-w-0 items-center gap-4">
           <StarRating rating={rating} onRate={onRate} disabled={isRatingDisabled} />
           <div className="h-5 w-px bg-surface"></div>
           <div className="flex items-center gap-2">
@@ -748,13 +757,19 @@ export default function BottomBar({
             </div>
           </div>
 
-          {(catalogScan.isActive || catalogScan.error || isLibraryView || activeBackgroundJobs.length > 0) && (
+          {(catalogScan.isActive || catalogScan.isPaused || catalogScan.error || activeBackgroundJobs.length > 0) && (
             <>
               <div className="h-5 w-px bg-surface"></div>
               <button
-                className="flex items-center gap-2 rounded-md px-2 py-1 text-text-secondary hover:bg-surface hover:text-text-primary transition-colors max-w-[440px]"
+                className="flex shrink-0 items-center gap-2 rounded-md px-2 py-1 text-text-secondary hover:bg-surface hover:text-text-primary transition-colors max-w-[440px]"
                 onClick={() => setIsCatalogScanModalOpen(true)}
-                data-tooltip="Indexing details"
+                data-tooltip={
+                  catalogScan.isActive
+                    ? 'Catalog indexing details'
+                    : activeBackgroundJob
+                      ? `${activeBackgroundJobLabel}: ${activeBackgroundJob.message || 'Running'}`
+                      : 'Background jobs'
+                }
               >
                 {catalogScanThumbnail && catalogScan.isActive ? (
                   <img
@@ -776,7 +791,7 @@ export default function BottomBar({
                         ? `Indexing collection ${catalogScan.current}/${catalogScan.total}${catalogScanFileName ? ` · ${catalogScanFileName}` : ''}`
                         : activeBackgroundJobs.length > 0
                           ? activeBackgroundJobs.length === 1
-                            ? `${activeBackgroundJob?.message || 'Background job running'}${
+                            ? `${activeBackgroundJobLabel}: ${activeBackgroundJob?.message || 'Running'}${
                                 activeBackgroundJob && activeBackgroundJob.total > 0
                                   ? ` ${activeBackgroundJob.current}/${activeBackgroundJob.total}`
                                   : ''
@@ -804,9 +819,41 @@ export default function BottomBar({
           </div>
         </div>
 
-        <div className="grow" />
+        <div className="flex min-w-0 flex-1 justify-center px-4">
+          {globalCatalogSearchLabel ? (
+            <div className="flex h-8 w-full max-w-sm items-center gap-2 rounded-full border border-accent/35 bg-accent/10 py-0.5 pl-3 pr-1 text-sm text-text-primary">
+              <Search size={14} className="shrink-0 text-accent" />
+              <span className="min-w-0 flex-1 truncate" title={globalCatalogSearchLabel}>
+                Search: {globalCatalogSearchLabel}
+              </span>
+              <button
+                type="button"
+                onClick={() => window.dispatchEvent(new Event('rapidraw:clear-global-search'))}
+                className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-text-secondary transition hover:bg-bg-primary hover:text-text-primary"
+                aria-label="Clear search and restore previous collection"
+                title="Clear search"
+              >
+                <X size={14} />
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => window.dispatchEvent(new Event('rapidraw:open-global-search'))}
+              className="flex h-8 w-full max-w-sm items-center gap-2 rounded-md border border-border-color/70 bg-bg-primary/70 px-3 text-left text-sm text-text-secondary transition hover:border-accent/60 hover:bg-surface hover:text-text-primary focus:outline-none focus:ring-2 focus:ring-accent/50"
+              aria-label="Search your library"
+            >
+              <Search size={15} className="shrink-0 text-accent" />
+              <span className="min-w-0 flex-1 truncate">Search catalog — ask Gemini with natural language</span>
+              <Sparkles size={14} className="shrink-0 text-accent/80" aria-hidden="true" />
+              <kbd className="hidden shrink-0 rounded border border-border-color bg-surface px-1.5 py-0.5 text-[10px] text-text-secondary xl:inline">
+                ⌘/Ctrl K
+              </kbd>
+            </button>
+          )}
+        </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex shrink-0 items-center gap-4">
           {!isLibraryView && showZoomControls && (
             <>
               <div className="flex items-center gap-2 w-56">
