@@ -209,13 +209,13 @@ function CatalogAnalysisModal({ node, onClose }: { node: FolderTree; onClose(): 
           </Text>
         </div>
         <div className="space-y-2">
-          {coverage('Face scan', face)}
+          {coverage('Face detection & recognition', face)}
           {coverage('RAM++ broad tags', ramPlus)}
         </div>
         <div className="mt-5 space-y-3">
           <div>
             <Text variant={TextVariants.small} weight={TextWeights.semibold}>
-              Face scan
+              Face detection & recognition
             </Text>
             <div className="mt-1.5 flex gap-2">
               {action('face', false, 'Scan & recognize missing')}
@@ -726,7 +726,7 @@ function TreeNode({
   }
 
   const iconKey = isDropTarget ? 'drop-target' : currentFolderIconKey || (isExpanded ? 'folder-open' : 'folder-closed');
-  const faceStatus = coverageLabel('Face scan', node.faceCoverage, analysisJobs?.face);
+  const faceStatus = coverageLabel('Face detection & recognition', node.faceCoverage, analysisJobs?.face);
   const ramPlusStatus = coverageLabel('RAM++ tags', node.ramPlusCoverage, analysisJobs?.ramPlus);
 
   return (

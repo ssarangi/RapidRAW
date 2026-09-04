@@ -47,8 +47,9 @@ pub struct CatalogRoot {
 }
 
 /// Processing coverage for the images contained in a catalog folder, including
-/// every descendant folder. A completed face scan also means "no faces found"
-/// is a known result rather than an unprocessed image.
+/// every descendant folder. Face coverage is complete only after detection has
+/// finished and every retained detected face has an embedding; a completed
+/// detection with no faces is also a known, complete result.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogAnalysisCoverage {
@@ -2960,7 +2961,19 @@ pub fn list_catalog_folder_tree(
             .prepare(
                 "
                 SELECT f.relative_path, COUNT(i.id),
-                  COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM face_scan_state s WHERE s.image_id = i.id AND s.status = 'complete') OR EXISTS (SELECT 1 FROM faces detected WHERE detected.image_id = i.id AND detected.review_state <> 'rejected') THEN 1 ELSE 0 END), 0),
+                  COALESCE(SUM(CASE
+                    WHEN (
+                      EXISTS (SELECT 1 FROM face_scan_state s WHERE s.image_id = i.id AND s.status = 'complete')
+                      OR EXISTS (SELECT 1 FROM faces detected WHERE detected.image_id = i.id AND detected.review_state <> 'rejected')
+                    )
+                    AND NOT EXISTS (
+                      SELECT 1 FROM faces unembedded
+                      WHERE unembedded.image_id = i.id
+                        AND unembedded.review_state <> 'rejected'
+                        AND unembedded.embedding_id IS NULL
+                    )
+                    THEN 1 ELSE 0
+                  END), 0),
                   COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM face_scan_state s WHERE s.image_id = i.id AND s.status = 'processing') THEN 1 ELSE 0 END), 0),
                   COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM face_scan_state s WHERE s.image_id = i.id AND s.status = 'failed') THEN 1 ELSE 0 END), 0),
                   COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.image_modified_at = i.modified_at AND s.state = 'completed') THEN 1 ELSE 0 END), 0),
