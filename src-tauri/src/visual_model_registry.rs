@@ -6,11 +6,10 @@ use std::path::{Path, PathBuf};
 /// Stable identifier for the locally packaged BioCLIP runtime.  Keep this in
 /// one place: it is persisted in catalog rows as well as used to locate its
 /// artifacts on disk.
-pub const BIOCLIP_V1_MODEL_ID: &str = "bioclip-v1";
 pub const BIOCLIP_V2_MODEL_ID: &str = "bioclip-v2";
-/// Species classifiers in descending correctness preference. The loader picks
-/// the first fully installed pack, retaining BioCLIP v1 as a fallback.
-pub const BIOCLIP_MODEL_IDS_BY_ACCURACY: [&str; 2] = [BIOCLIP_V2_MODEL_ID, BIOCLIP_V1_MODEL_ID];
+/// BioCLIP 2 is the only supported species classifier. Keeping this list
+/// allows an explicit accuracy order without retaining a lower-quality fallback.
+pub const BIOCLIP_MODEL_IDS_BY_ACCURACY: [&str; 1] = [BIOCLIP_V2_MODEL_ID];
 use std::sync::{Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
@@ -165,47 +164,6 @@ pub fn visual_model_packs() -> Vec<VisualModelPack> {
             license_name: "Apache-2.0".to_string(),
             license_url: "https://huggingface.co/benjaminjonard/ram-plus-onnx".to_string(),
             model_source_url: "https://github.com/xinyu1205/recognize-anything".to_string(),
-        },
-        // Pack: BioCLIP (Imageomics ViT-B/16 with Tree-of-Life taxonomy)
-        // Upstream Repository: https://github.com/ssarangi/RapidRAW / https://huggingface.co/imageomics/bioclip
-        // Immutable Release Tag: v0.1.0-models
-        // Date Verified: 2026-08-28
-        // Verified SHA-256:
-        //   - vision_encoder.onnx: 3ed2c2ad149851297481727463c3085c030bafcf278c070bd9617d810beed5a4
-        //   - vision_encoder.onnx.data: c0cdb287d84c0e66dcf58f5f4c1e8ba75b5f42bf2b701addfff60b0879ed5bf1
-        //   - species_embeddings.bin: 5c4383ca3cd4cfb33ba3166d935a521a2034ae20f0c2045bdab5561331bf81cd
-        //   - species_labels.json: 57fa63a8bf67c0fbcb9329400939d7352da576283684361fece1fde04c8b9eda
-        VisualModelPack {
-            id: BIOCLIP_V1_MODEL_ID.to_string(),
-            display_name: "BioCLIP".to_string(),
-            description: "Taxonomy-aware organism classification, including birds. Uses an ONNX ViT encoder with Tree-of-Life taxonomy embeddings.".to_string(),
-            task: "Wildlife and species classification".to_string(),
-            availability: VisualModelAvailability::DirectDownload,
-            artifacts: vec![
-                visual_artifact(
-                    "vision_encoder.onnx",
-                    "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/vision_encoder.onnx",
-                    Some("3ed2c2ad149851297481727463c3085c030bafcf278c070bd9617d810beed5a4"),
-                ),
-                visual_artifact(
-                    "vision_encoder.onnx.data",
-                    "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/vision_encoder.onnx.data",
-                    Some("c0cdb287d84c0e66dcf58f5f4c1e8ba75b5f42bf2b701addfff60b0879ed5bf1"),
-                ),
-                visual_artifact(
-                    "species_embeddings.bin",
-                    "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/species_embeddings.bin",
-                    Some("5c4383ca3cd4cfb33ba3166d935a521a2034ae20f0c2045bdab5561331bf81cd"),
-                ),
-                visual_artifact(
-                    "species_labels.json",
-                    "https://github.com/ssarangi/RapidRAW/releases/download/v0.1.0-models/species_labels.json",
-                    Some("57fa63a8bf67c0fbcb9329400939d7352da576283684361fece1fde04c8b9eda"),
-                ),
-            ],
-            license_name: "MIT".to_string(),
-            license_url: "https://huggingface.co/imageomics/bioclip".to_string(),
-            model_source_url: "https://github.com/Imageomics/bioclip".to_string(),
         },
         // Pack: BioCLIP 2 (Imageomics ViT-L/14 with full Tree-of-Life taxonomy)
         // Upstream model revision: 2957b322090f9cb17ae72c71981c7218a28d81e0
@@ -1029,7 +987,6 @@ mod tests {
             ids,
             vec![
                 "ram-plus-onnx".to_string(),
-                BIOCLIP_V1_MODEL_ID.to_string(),
                 BIOCLIP_V2_MODEL_ID.to_string(),
                 "ocec-eye-state".to_string(),
                 "rawnind-utnet2-bayer".to_string(),

@@ -1258,11 +1258,7 @@ fn sha256_file(path: &std::path::Path) -> Result<String, String> {
 fn verify_visual_runtime(directory: &std::path::Path, model_id: &str) -> Result<(), String> {
     let model_name = match model_id {
         "ram-plus-onnx" => "model.onnx",
-        id if [
-            rapidraw_lib::visual_model_registry::BIOCLIP_V1_MODEL_ID,
-            rapidraw_lib::visual_model_registry::BIOCLIP_V2_MODEL_ID,
-        ]
-        .contains(&id) => "vision_encoder.onnx",
+        rapidraw_lib::visual_model_registry::BIOCLIP_V2_MODEL_ID => "vision_encoder.onnx",
         "rawnind-utnet2-bayer" => "rawnind_bayer.onnx",
         "nafnet-sidd-rgb" => "nafnet_sidd.onnx",
         _ => return Err("No runtime adapter is available in this build".to_string()),
@@ -1272,14 +1268,9 @@ fn verify_visual_runtime(directory: &std::path::Path, model_id: &str) -> Result<
         .and_then(|builder| builder.commit_from_file(&model_path))
         .map_err(|error| format!("ONNX session could not be created: {error}"))?;
 
-    if [
-        rapidraw_lib::visual_model_registry::BIOCLIP_V1_MODEL_ID,
-        rapidraw_lib::visual_model_registry::BIOCLIP_V2_MODEL_ID,
-    ]
-    .contains(&model_id)
-    {
+    if model_id == rapidraw_lib::visual_model_registry::BIOCLIP_V2_MODEL_ID {
         let labels = directory.join("species_labels.json");
-        let embeddings = directory.join("species_embeddings.bin");
+        let manifest = directory.join("taxonomy_manifest.json");
         let labels_json = fs::read_to_string(labels)
             .map_err(|error| format!("BioCLIP taxonomy cannot be read: {error}"))?;
         let taxonomy = serde_json::from_str::<serde_json::Value>(&labels_json)
@@ -1287,11 +1278,23 @@ fn verify_visual_runtime(directory: &std::path::Path, model_id: &str) -> Result<
         if taxonomy.as_array().is_none_or(Vec::is_empty) {
             return Err("BioCLIP taxonomy has no labels".to_string());
         }
-        let embedding_bytes = fs::metadata(embeddings)
-            .map_err(|error| format!("BioCLIP embeddings cannot be read: {error}"))?
-            .len();
-        if embedding_bytes == 0 || embedding_bytes % 4 != 0 {
-            return Err("BioCLIP embeddings are not a packed f32 array".to_string());
+        let manifest_json = fs::read_to_string(manifest)
+            .map_err(|error| format!("BioCLIP taxonomy manifest cannot be read: {error}"))?;
+        let parts = serde_json::from_str::<serde_json::Value>(&manifest_json)
+            .map_err(|error| format!("BioCLIP taxonomy manifest is invalid JSON: {error}"))?
+            .get("embeddingParts")
+            .and_then(serde_json::Value::as_array)
+            .ok_or("BioCLIP taxonomy manifest has no embedding parts")?;
+        for part in parts {
+            let name = part
+                .as_str()
+                .ok_or("BioCLIP taxonomy manifest has an invalid embedding part")?;
+            let embedding_bytes = fs::metadata(directory.join(name))
+                .map_err(|error| format!("BioCLIP embeddings cannot be read: {error}"))?
+                .len();
+            if embedding_bytes == 0 || embedding_bytes % 4 != 0 {
+                return Err("BioCLIP embeddings are not a packed f32 array".to_string());
+            }
         }
     }
     Ok(())
