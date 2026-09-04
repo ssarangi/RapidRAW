@@ -730,7 +730,7 @@ export default function PeopleView() {
       {clusters.length > 0 && (
         <div className="space-y-2">
           <Text variant={TextVariants.small} color={TextColors.secondary}>
-            Unknown clusters
+            Review & name similarity groups
           </Text>
           <div className="mt-2 flex gap-2 overflow-x-auto">
             {clusters.map((cluster) => {
@@ -747,20 +747,14 @@ export default function PeopleView() {
                     )}
                   </div>
                   <Text variant={TextVariants.small}>{cluster.faceCount} faces</Text>
-                  <select
-                    className="mt-1 w-full bg-surface border border-border-color rounded px-1 py-1 text-xs"
-                    defaultValue=""
-                    onChange={(event) => {
-                      if (event.target.value) void confirmCluster(cluster.id, Number(event.target.value));
-                    }}
-                  >
-                    <option value="">Assign...</option>
-                    {people.map((person) => (
-                      <option key={person.id} value={person.id}>
-                        {person.displayName}
-                      </option>
-                    ))}
-                  </select>
+                  <div className="mt-1 w-40">
+                    <PersonNameCombobox
+                      idPrefix={`face-cluster-${cluster.id}`}
+                      hasPeople={people.length > 0}
+                      onAssign={(personId) => confirmCluster(cluster.id, personId)}
+                      onError={showError}
+                    />
+                  </div>
                 </div>
               );
             })}

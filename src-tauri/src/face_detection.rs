@@ -6,7 +6,7 @@ use image::{DynamicImage, Rgb, RgbImage, imageops::FilterType};
 use ndarray::{Array4, ArrayViewD};
 use ort::session::Session;
 use ort::value::Tensor;
-use rusqlite::params;
+use rusqlite::{params, types::Value};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::face_model_registry::FaceModelPackId;
@@ -1102,15 +1102,42 @@ pub fn start_face_detection(
                 &runtime.detector,
                 &worker_job_id,
                 &job_control,
-                ai_semaphore,
+                ai_semaphore.clone(),
             )
+            .and_then(|_| {
+                update_job(
+                    &db_path,
+                    &worker_job_id,
+                    "running",
+                    "Face scan complete; identifying faces",
+                    0,
+                    0,
+                    None,
+                    None,
+                )?;
+                // Detection and recognition are one catalog operation. The
+                // recognizer selects every unembedded, already-detected face
+                // in this scope as well as any face found by this scan.
+                run_face_recognition(
+                    &app,
+                    &db_path,
+                    root_id,
+                    relative_path.as_deref(),
+                    runtime.pack_id.as_str(),
+                    &runtime.recognizer,
+                    &worker_job_id,
+                    &job_control,
+                    ai_semaphore,
+                )
+            })
         });
         if let Err(error) = result {
-            let job_state = if error == "Face detection cancelled" {
-                "cancelled"
-            } else {
-                "failed"
-            };
+            let job_state =
+                if error == "Face detection cancelled" || error == "Face recognition cancelled" {
+                    "cancelled"
+                } else {
+                    "failed"
+                };
             let _ = update_job(
                 &db_path,
                 &worker_job_id,
@@ -1165,6 +1192,7 @@ pub fn start_face_recognition(
             &app,
             &db_path,
             root_id,
+            None,
             runtime.pack_id.as_str(),
             &runtime.recognizer,
             &worker_job_id,
@@ -1259,6 +1287,7 @@ pub fn reprocess_face_index(
                 &app,
                 &db_path,
                 None,
+                None,
                 runtime.pack_id.as_str(),
                 &runtime.recognizer,
                 &worker_job_id,
@@ -1301,6 +1330,7 @@ fn run_face_recognition(
     app_handle: &AppHandle,
     db_path: &Path,
     root_id: Option<i64>,
+    relative_path: Option<&str>,
     model_pack_id: &str,
     model_path: &Path,
     job_id: &str,
@@ -1310,6 +1340,7 @@ fn run_face_recognition(
     run_face_recognition_with_loader(
         db_path,
         root_id,
+        relative_path,
         model_pack_id,
         model_path,
         job_id,
@@ -1353,6 +1384,7 @@ pub fn run_face_recognition_headless_for_pack(
     run_face_recognition_with_loader(
         db_path,
         root_id,
+        None,
         model_pack_id,
         model_path,
         job_id,
@@ -1365,6 +1397,7 @@ pub fn run_face_recognition_headless_for_pack(
 fn run_face_recognition_with_loader<F>(
     db_path: &Path,
     root_id: Option<i64>,
+    relative_path: Option<&str>,
     model_pack_id: &str,
     model_path: &Path,
     job_id: &str,
@@ -1394,47 +1427,34 @@ where
         [model_pack_id, recognizer_model_id],
     )
     .map_err(|error| error.to_string())?;
-    let mut sql = "SELECT f.id, r.absolute_path, i.relative_path, f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height, f.landmarks_json FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present' AND f.model_pack_id = ?1 AND f.review_state <> 'rejected' AND f.embedding_id IS NULL".to_string();
-    if root_id.is_some() {
-        sql.push_str(" AND i.root_id = ?2");
+    let mut sql = "SELECT f.id, r.absolute_path, i.relative_path, f.bbox_x, f.bbox_y, f.bbox_width, f.bbox_height, f.landmarks_json FROM faces f JOIN images i ON i.id = f.image_id JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present' AND f.model_pack_id = ? AND f.review_state <> 'rejected' AND f.embedding_id IS NULL".to_string();
+    let mut query_params = vec![Value::Text(model_pack_id.to_string())];
+    if let Some(root_id) = root_id {
+        sql.push_str(" AND i.root_id = ?");
+        query_params.push(Value::Integer(root_id));
+    }
+    if let Some(relative_path) = relative_path.filter(|path| *path != ".") {
+        sql.push_str(" AND (i.relative_path = ? OR i.relative_path LIKE ?)");
+        query_params.push(Value::Text(relative_path.to_string()));
+        query_params.push(Value::Text(format!("{relative_path}/%")));
     }
     let mut statement = conn.prepare(&sql).map_err(|error| error.to_string())?;
-    let faces: Vec<(i64, String, String, f64, f64, f64, f64, Option<String>)> =
-        if let Some(root_id) = root_id {
-            statement
-                .query_map(params![model_pack_id, root_id], |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                    ))
-                })
-                .map_err(|error| error.to_string())?
-                .collect::<Result<_, _>>()
-                .map_err(|error| error.to_string())?
-        } else {
-            statement
-                .query_map([model_pack_id], |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
-                    ))
-                })
-                .map_err(|error| error.to_string())?
-                .collect::<Result<_, _>>()
-                .map_err(|error| error.to_string())?
-        };
+    let faces: Vec<(i64, String, String, f64, f64, f64, f64, Option<String>)> = statement
+        .query_map(rusqlite::params_from_iter(query_params.iter()), |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|error| error.to_string())?;
     let total = faces.len() as i64;
     update_job(
         db_path,

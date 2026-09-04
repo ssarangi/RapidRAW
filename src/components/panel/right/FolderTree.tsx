@@ -218,8 +218,8 @@ function CatalogAnalysisModal({ node, onClose }: { node: FolderTree; onClose(): 
               Face scan
             </Text>
             <div className="mt-1.5 flex gap-2">
-              {action('face', false, 'Scan missing')}
-              {action('face', true, 'Re-scan all')}
+              {action('face', false, 'Scan & recognize missing')}
+              {action('face', true, 'Re-scan & recognize all')}
             </div>
           </div>
           <div>

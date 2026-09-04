@@ -561,6 +561,42 @@ function App() {
     };
   }, [setEditor]);
 
+  useEffect(() => {
+    const promptForFaceReview = async () => {
+      try {
+        const [faces, clusters] = await Promise.all([
+          invoke<Array<unknown>>(Invokes.ListUnreviewedCatalogFaces),
+          invoke<Array<unknown>>(Invokes.ListUnreviewedFaceClusters),
+        ]);
+        if (faces.length === 0 && clusters.length === 0) return;
+        toast.info(
+          <div className="flex items-center gap-3">
+            <span>
+              Face analysis is ready: {clusters.length} similarity group{clusters.length === 1 ? '' : 's'} and{' '}
+              {faces.length} face{faces.length === 1 ? '' : 's'} need review.
+            </span>
+            <button
+              type="button"
+              className="shrink-0 rounded bg-accent px-2 py-1 text-xs font-medium text-white hover:brightness-110"
+              onClick={() => setUI({ activeView: 'people' })}
+            >
+              Review faces
+            </button>
+          </div>,
+          { autoClose: false, closeOnClick: false },
+        );
+      } catch {
+        // A catalog can be closed before its worker sends the completion event.
+      }
+    };
+    const detectionListener = listen('face-detection-complete', () => void promptForFaceReview());
+    const recognitionListener = listen('face-recognition-complete', () => void promptForFaceReview());
+    return () => {
+      detectionListener.then((unlisten) => unlisten());
+      recognitionListener.then((unlisten) => unlisten());
+    };
+  }, [setUI]);
+
   const createResizeHandler = (stateKey: string, startSize: number) => (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     e.preventDefault();
