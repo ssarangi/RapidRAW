@@ -226,7 +226,9 @@ export function useAppNavigation({ clearThumbnailQueue, refs }: AppNavigationPro
       const imageFile = useLibraryStore.getState().imageList.find((img) => img.path === path);
       setEditor({
         selectedImage: {
-          exif: null,
+          // Catalog image rows already carry extracted EXIF. Preserve it while
+          // the full image decode runs so RAW metadata does not flash blank.
+          exif: imageFile?.exif ?? null,
           group_id: imageFile?.group_id ?? null,
           height: 0,
           isRaw: false,

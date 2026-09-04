@@ -113,7 +113,12 @@ export function useImageLoader(cachedEditStateRef: React.RefObject<any>) {
               return {
                 selectedImage: {
                   ...state.selectedImage,
-                  exif: loadImageResult.exif,
+                  // Retain catalog EXIF when a live decoder cannot read a
+                  // RAW's metadata. The catalog extractor has already read
+                  // and persisted this same source file successfully.
+                  exif: Object.keys(loadImageResult.exif || {}).length > 0
+                    ? loadImageResult.exif
+                    : state.selectedImage.exif,
                   height: loadImageResult.height,
                   isRaw: loadImageResult.is_raw,
                   isReady: true,
