@@ -117,32 +117,26 @@ export default function RawDevelopPanel({
         <div
           className={`rounded-md border p-3 transition-colors ${adjustments.rawAiDenoiseEnabled ? 'border-[#d89538]/40 bg-[#d89538]/[0.055]' : 'border-border-color bg-bg-primary/60'}`}
         >
-          <div className="flex items-start justify-between gap-3">
-            <div className="flex min-w-0 items-start gap-2">
-              <span
-                className={`mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-sm ${adjustments.rawAiDenoiseEnabled ? 'bg-[#d89538]/15 text-[#e9ab4a]' : 'bg-surface text-text-secondary'}`}
-              >
-                <Sparkles size={14} />
-              </span>
-              <div className="min-w-0">
-                <Text variant={TextVariants.small} color={TextColors.primary} className="font-medium">
-                  AI sensor denoise
-                </Text>
-                <Text
-                  as="div"
-                  variant={TextVariants.small}
-                  color={TextColors.secondary}
-                  className="mt-0.5 leading-relaxed"
-                >
-                  Uses RawNIND directly on the Bayer sensor data during RAW development.
-                </Text>
-              </div>
+          <div className="flex items-center gap-3">
+            <span
+              className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-sm ${adjustments.rawAiDenoiseEnabled ? 'bg-[#d89538]/15 text-[#e9ab4a]' : 'bg-surface text-text-secondary'}`}
+            >
+              <Sparkles size={14} />
+            </span>
+            <div className="min-w-0 flex-1">
+              <Text variant={TextVariants.small} color={TextColors.primary} className="truncate font-medium">
+                AI sensor denoise
+              </Text>
+              <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="truncate">
+                RawNIND · Bayer RAW
+              </Text>
             </div>
             <Switch
               id="raw-develop-ai-denoise-enabled"
               label="Enable AI sensor denoise"
               checked={adjustments.rawAiDenoiseEnabled}
               onChange={(checked) => setField(RawDevelopAdjustment.AiDenoiseEnabled, checked)}
+              hideLabel
               className="shrink-0 scale-90"
             />
           </div>

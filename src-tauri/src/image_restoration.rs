@@ -8,6 +8,9 @@ use tauri::{Emitter, Manager};
 /// RawNIND's exported ONNX graph has a fixed 4×512×512 Bayer input.
 const RAWNIND_BAYER_TILE_SIZE: u32 = 512;
 const RAWNIND_SOURCE_TILE_SIZE: u32 = RAWNIND_BAYER_TILE_SIZE * 2;
+/// The exported RawNIND graph emits linear Rec.2020 values scaled by 1e6.
+/// This is part of its tensor contract, not image-display normalization.
+const RAWNIND_OUTPUT_SCALE: f32 = 1_000_000.0;
 
 /// Recipe and configuration parameters for a restoration operation.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -424,14 +427,26 @@ pub fn run_rawnind_restoration_tiled(
         for x in 0..width as u32 {
             let idx = (y * width as u32 + x) as usize;
             let w = weight_accum[idx].max(f32::EPSILON);
-            // Model outputs linear Rec.2020. We apply a simple gamma for sRGB preview here
-            let r_lin = (output_accum[idx * 3] / w).clamp(0.0, 1.0);
-            let g_lin = (output_accum[idx * 3 + 1] / w).clamp(0.0, 1.0);
-            let b_lin = (output_accum[idx * 3 + 2] / w).clamp(0.0, 1.0);
+            let r_2020 = output_accum[idx * 3] / w / RAWNIND_OUTPUT_SCALE;
+            let g_2020 = output_accum[idx * 3 + 1] / w / RAWNIND_OUTPUT_SCALE;
+            let b_2020 = output_accum[idx * 3 + 2] / w / RAWNIND_OUTPUT_SCALE;
 
-            let r = (r_lin.powf(1.0 / 2.2) * 255.0) as u8;
-            let g = (g_lin.powf(1.0 / 2.2) * 255.0) as u8;
-            let b = (b_lin.powf(1.0 / 2.2) * 255.0) as u8;
+            // RawNIND emits linear Rec.2020. Convert to linear sRGB before
+            // applying the editor's display-referred transfer function.
+            let r_lin = (1.6605 * r_2020 - 0.5876 * g_2020 - 0.0728 * b_2020).clamp(0.0, 1.0);
+            let g_lin = (-0.1246 * r_2020 + 1.1329 * g_2020 - 0.0083 * b_2020).clamp(0.0, 1.0);
+            let b_lin = (-0.0182 * r_2020 - 0.1006 * g_2020 + 1.1187 * b_2020).clamp(0.0, 1.0);
+            let to_srgb = |value: f32| {
+                if value <= 0.0031308 {
+                    value * 12.92
+                } else {
+                    1.055 * value.powf(1.0 / 2.4) - 0.055
+                }
+            };
+
+            let r = (to_srgb(r_lin) * 255.0).round().clamp(0.0, 255.0) as u8;
+            let g = (to_srgb(g_lin) * 255.0).round().clamp(0.0, 255.0) as u8;
+            let b = (to_srgb(b_lin) * 255.0).round().clamp(0.0, 255.0) as u8;
 
             out_buffer.put_pixel(x, y, Rgb([r, g, b]));
         }

@@ -511,7 +511,13 @@ const Slider = ({
 
   const numericValue = isNaN(Number(value)) ? 0 : Number(value);
   const hasSemanticTrack = /(?:gradient|hue|sat|lum)/.test(trackClassName ?? '');
-  const effectiveTrackClass = hasSemanticTrack ? trackClassName : 'slider-warm-track';
+  const effectiveTrackClass = hasSemanticTrack ? trackClassName : '';
+  const trackFillPercent = ((displayValue - min) / (max - min || 1)) * 100;
+  const standardTrackStyle = hasSemanticTrack
+    ? undefined
+    : {
+        background: `linear-gradient(to right, #e4a842 0%, #e4a842 ${trackFillPercent}%, #777d86 ${trackFillPercent}%, #777d86 100%)`,
+      };
 
   return (
     <div className={`mb-2 group ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`} ref={containerRef}>
@@ -574,6 +580,7 @@ const Slider = ({
       <div className="relative w-full h-5">
         <div
           className={`absolute top-1/2 left-0 w-full h-1.5 -translate-y-1/2 rounded-full pointer-events-none ${effectiveTrackClass}`}
+          style={standardTrackStyle}
         />
         <input
           ref={rangeInputRef}

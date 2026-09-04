@@ -8,6 +8,7 @@ interface SwitchProps {
   checked: boolean;
   className?: string;
   disabled?: boolean;
+  hideLabel?: boolean;
   id?: string;
   label: string;
   onChange(val: boolean): any;
@@ -29,6 +30,7 @@ const Switch = ({
   checked,
   className = '',
   disabled = false,
+  hideLabel = false,
   id,
   label,
   onChange,
@@ -53,19 +55,22 @@ const Switch = ({
   return (
     <label
       className={clsx(
-        'flex items-center justify-between',
+        'flex items-center justify-between gap-2',
         disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer',
         className,
       )}
       htmlFor={uniqueId}
       data-tooltip={tooltip}
     >
-      <Text variant={TextVariants.label} className="select-none">
-        {label}
-      </Text>
+      {!hideLabel && (
+        <Text variant={TextVariants.label} className="select-none">
+          {label}
+        </Text>
+      )}
       <div className="relative w-10 h-5">
         <input
           checked={checked}
+          aria-label={hideLabel ? label : undefined}
           className="sr-only"
           disabled={disabled}
           id={uniqueId}
