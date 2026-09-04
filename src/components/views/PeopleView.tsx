@@ -7,6 +7,8 @@ import Button from '../ui/Button';
 import Text from '../ui/Text';
 import { TextColors, TextVariants } from '../../types/typography';
 import { Invokes } from '../ui/AppProperties';
+import { useLibraryStore } from '../../store/useLibraryStore';
+import { useUIStore } from '../../store/useUIStore';
 
 interface FaceItem {
   face: {
