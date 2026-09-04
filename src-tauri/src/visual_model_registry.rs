@@ -406,6 +406,31 @@ fn is_complete_install(
     verified
 }
 
+/// Fast, non-cryptographic install check for settings/status surfaces.
+///
+/// Full SHA-256 verification is intentionally reserved for model execution
+/// (`verified_visual_model_pack_dir`) and download/install operations. Running
+/// it here would hash every BioCLIP 2 taxonomy shard on the Tauri command
+/// thread just to render Settings, freezing the navigation for many seconds.
+fn has_registered_install(
+    pack: &VisualModelPack,
+    directory: &Path,
+    manifest: Option<&InstalledVisualModelPack>,
+) -> bool {
+    let Some(manifest) = manifest else {
+        return false;
+    };
+    manifest.pack_id == pack.id
+        && manifest.artifacts.len() == pack.artifacts.len()
+        && pack.artifacts.iter().all(|artifact| {
+            manifest
+                .artifacts
+                .iter()
+                .any(|recorded| recorded.file_name == artifact.file_name)
+                && directory.join(&artifact.file_name).is_file()
+        })
+}
+
 fn pack_fingerprint(
     pack: &VisualModelPack,
     directory: &Path,
@@ -479,7 +504,7 @@ pub fn list_visual_model_pack_statuses(
         .map(|pack| {
             let directory = pack_dir(&app_handle, &pack.id)?;
             Ok(VisualModelPackStatus {
-                installed: is_complete_install(
+                installed: has_registered_install(
                     &pack,
                     &directory,
                     read_installed_manifest(&directory)?.as_ref(),
