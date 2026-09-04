@@ -86,8 +86,20 @@ export function useEditorActions() {
   }, [setAdjustments]);
 
   const toggleShowOriginal = useCallback(() => {
+    let rawDevelopComparison: Adjustments | null = null;
     setEditor((state) => {
       const isShowing = !state.showOriginal;
+
+      // RawNIND changes the decoded RAW base, while ordinary edits only
+      // change the adjustment recipe. For a genuine before/after comparison
+      // we must re-develop the source with RawNIND disabled for "before",
+      // then restore the enabled recipe for "after".
+      if (state.selectedImage?.isRaw && state.selectedImage.isReady && state.adjustments.rawAiDenoiseEnabled) {
+        rawDevelopComparison = {
+          ...state.adjustments,
+          rawAiDenoiseEnabled: !isShowing,
+        };
+      }
 
       if (isShowing) {
         const override = { ...INITIAL_ADJUSTMENTS };
@@ -126,6 +138,15 @@ export function useEditorActions() {
         return { showOriginal: false, previewOverride: null };
       }
     });
+
+    if (rawDevelopComparison) {
+      useEditorStore.getState().setEditor({ isRawReprocessing: true });
+      invoke(Invokes.ReprocessRawDevelop, { jsAdjustments: rawDevelopComparison }).catch((err) => {
+        console.error('Failed to switch RAW AI denoise comparison:', err);
+        useEditorStore.getState().setEditor({ isRawReprocessing: false });
+        toast.error(`Could not switch RAW AI denoise comparison: ${err}`);
+      });
+    }
   }, [setEditor]);
 
   const handleLutSelect = useCallback(
