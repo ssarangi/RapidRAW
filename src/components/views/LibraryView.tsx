@@ -12,7 +12,7 @@ import { useEditorStore } from '../../store/useEditorStore';
 import { useProcessStore } from '../../store/useProcessStore';
 import { useSettingsStore } from '../../store/useSettingsStore';
 
-import { ImageFile, LibraryViewMode, ThumbnailAspectRatio, ThumbnailSize } from '../ui/AppProperties';
+import { ImageFile, LibraryDisplayMode, LibraryViewMode, ThumbnailAspectRatio, ThumbnailSize } from '../ui/AppProperties';
 import { GroupBadgeInfo, GroupId } from '../../utils/imageGrouping';
 
 interface LibraryViewProps {
@@ -70,9 +70,10 @@ export default function LibraryView({
   handleResetAdjustments,
   requestThumbnails,
 }: LibraryViewProps) {
-  const { activeView, setUI } = useUIStore(
+  const { activeView, libraryDisplayMode, setUI } = useUIStore(
     useShallow((state) => ({
       activeView: state.activeView,
+      libraryDisplayMode: state.libraryDisplayMode,
       setUI: state.setUI,
     })),
   );
@@ -122,6 +123,9 @@ export default function LibraryView({
         isPasted: state.isPasted,
       })),
     );
+
+  const isSplashScreen =
+    activeView === 'library' && libraryDisplayMode !== LibraryDisplayMode.Cull && rootPaths.length === 0;
 
   return (
     <div className="flex flex-row grow h-full min-h-0">
@@ -177,7 +181,7 @@ export default function LibraryView({
             onNavigateToCommunity={() => setUI({ activeView: 'community' })}
           />
         )}
-        {(rootPaths.length > 0 || librarySource.type === 'catalog') && (
+        {!isSplashScreen && (rootPaths.length > 0 || librarySource.type === 'catalog') && (
           <BottomBar
             isCopied={isCopied}
             isCopyDisabled={multiSelectedPaths.length !== 1}
