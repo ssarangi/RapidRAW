@@ -1003,6 +1003,12 @@ pub fn save_face_crop_image(
 /// window. RAW files use embedded previews, a JPEG companion, or rawler.
 /// Callers with an application handle may use `load_image_for_face_ai` for an
 /// additional thumbnail-cache fallback.
+fn load_oriented_raster_for_local_ai(path: &Path) -> Result<DynamicImage, String> {
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    crate::image_loader::load_image_with_orientation(&bytes, None)
+        .map_err(|error| error.to_string())
+}
+
 pub fn load_image_for_local_ai(path: &Path) -> Result<DynamicImage, String> {
     let path_str = path.to_string_lossy();
     if crate::formats::is_raw_file(path) {
@@ -1020,7 +1026,7 @@ pub fn load_image_for_local_ai(path: &Path) -> Result<DynamicImage, String> {
         for ext in &["JPG", "jpg", "JPEG", "jpeg"] {
             let companion = path.with_extension(ext);
             if companion.exists() && companion != path {
-                if let Ok(img) = image::open(&companion) {
+                if let Ok(img) = load_oriented_raster_for_local_ai(&companion) {
                     return Ok(img);
                 }
             }
@@ -1037,7 +1043,7 @@ pub fn load_image_for_local_ai(path: &Path) -> Result<DynamicImage, String> {
             return Ok(img);
         }
     }
-    if let Ok(img) = image::open(path) {
+    if let Ok(img) = load_oriented_raster_for_local_ai(path) {
         return Ok(img);
     }
     Err(format!(
