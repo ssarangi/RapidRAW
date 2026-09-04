@@ -16,7 +16,7 @@ use crate::file_management::{ImageFile, parse_virtual_path};
 use crate::file_management::{assign_group_ids, read_file_mapped};
 use crate::formats::{is_raw_file, is_supported_image_file};
 
-const SCHEMA_VERSION: i64 = 14;
+const SCHEMA_VERSION: i64 = 15;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -259,6 +259,7 @@ pub struct SpeciesDetail {
     pub confidence: f64,
     pub review_state: String,
     pub model_id: String,
+    pub is_ambiguous: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -992,6 +993,7 @@ fn migrate(conn: &Connection) -> Result<(), String> {
           taxon_rank TEXT,
           confidence REAL NOT NULL,
           review_state TEXT NOT NULL DEFAULT 'suggested' CHECK(review_state IN ('suggested', 'accepted', 'rejected')),
+          is_ambiguous INTEGER NOT NULL DEFAULT 0,
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL
         );
@@ -1078,6 +1080,10 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     );
     let _ = conn.execute(
         "ALTER TABLE cull_analysis_cache ADD COLUMN exposure_metric REAL NOT NULL DEFAULT 0.0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE species_classifications ADD COLUMN is_ambiguous INTEGER NOT NULL DEFAULT 0",
         [],
     );
 
@@ -7320,7 +7326,7 @@ pub fn get_image_provenance(
 
     let mut species_stmt = conn
         .prepare(
-            "SELECT id, scientific_name, common_name, taxon_rank, confidence, review_state, model_id
+            "SELECT id, scientific_name, common_name, taxon_rank, confidence, review_state, model_id, is_ambiguous
              FROM species_classifications
              WHERE image_id = ?1
              ORDER BY confidence DESC",
@@ -7337,6 +7343,7 @@ pub fn get_image_provenance(
                 confidence: row.get(4)?,
                 review_state: row.get(5)?,
                 model_id: row.get(6)?,
+                is_ambiguous: row.get(7)?,
             })
         })
         .map_err(|e| e.to_string())?

@@ -497,8 +497,9 @@ fn store_bioclip_suggestion(
     );
 }
 
-/// Persists only a clearly separated species candidate.  A near tie is more
-/// useful as "needs another look" than as an incorrect name in the catalog.
+/// Persists a strong species candidate. Near ties are kept as explicitly
+/// ambiguous evidence so the user can see what BioCLIP produced, but they are
+/// never presented as a confident automatic classification.
 fn store_bioclip_inference(
     db_path: &Path,
     image_id: i64,
@@ -517,18 +518,20 @@ fn store_bioclip_inference(
         "DELETE FROM species_classifications WHERE image_id = ?1 AND model_id = ?2 AND review_state = 'suggested'",
         rusqlite::params![image_id, model_id],
     );
-    // Remove a prior unreviewed guess even when this pass is ambiguous.  We do
-    // not leave a stale species name visible merely because the new evidence is
-    // insufficient to replace it. Accepted/rejected reviewer decisions stay.
-    if !inference.is_confident_species() {
-        return;
-    }
     let Some((taxon, confidence)) = inference.best_taxon_and_similarity() else {
         return;
     };
+    // A score below the species floor is not useful evidence. A high-scoring
+    // near tie, however, is valuable to surface as a candidate — especially
+    // with BioCLIP v2's much denser taxonomy — as long as it remains visibly
+    // marked for review.
+    if confidence < BIOCLIP_MIN_SPECIES_SIMILARITY {
+        return;
+    }
+    let is_ambiguous = !inference.is_confident_species();
     let _ = conn.execute(
-        "INSERT INTO species_classifications(image_id, model_id, model_revision, scientific_name, common_name, taxon_rank, confidence, review_state, created_at, updated_at)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 'suggested', ?8, ?8)",
+        "INSERT INTO species_classifications(image_id, model_id, model_revision, scientific_name, common_name, taxon_rank, confidence, review_state, is_ambiguous, created_at, updated_at)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 'suggested', ?8, ?9, ?9)",
         rusqlite::params![
             image_id,
             model_id,
@@ -537,6 +540,7 @@ fn store_bioclip_inference(
             taxon.common_name.as_deref(),
             &taxon.taxon_rank,
             confidence as f64,
+            is_ambiguous,
             now,
         ],
     );

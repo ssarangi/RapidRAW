@@ -540,7 +540,13 @@ fn collect_catalog_subject_factors(
             if subject_mode == "birds" {
                 let species: Option<(String, Option<String>, f64)> = conn
                     .query_row(
-                        "SELECT scientific_name, common_name, confidence FROM species_classifications WHERE image_id = ?1 AND review_state != 'rejected' ORDER BY confidence DESC LIMIT 1",
+                        "SELECT scientific_name, common_name, confidence
+                         FROM species_classifications
+                         WHERE image_id = ?1
+                           AND review_state != 'rejected'
+                           AND (is_ambiguous = 0 OR review_state = 'accepted')
+                         ORDER BY confidence DESC
+                         LIMIT 1",
                         [image_id],
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )

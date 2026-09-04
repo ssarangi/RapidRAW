@@ -258,7 +258,15 @@ export default function MetadataPanel() {
 
   const [aiProvenance, setAiProvenance] = useState<{
     aiTags: Array<{ id: number; name: string; confidence: number; reviewState: string }>;
-    species: Array<{ id: number; commonName?: string | null; scientificName: string; confidence: number; reviewState: string }>;
+    species: Array<{
+      id: number;
+      commonName?: string | null;
+      scientificName: string;
+      confidence: number;
+      reviewState: string;
+      modelId: string;
+      isAmbiguous: boolean;
+    }>;
   } | null>(null);
 
   useEffect(() => {
@@ -279,7 +287,14 @@ export default function MetadataPanel() {
     if (!aiProvenance) return [];
     const speciesChips = aiProvenance.species
       .filter((item) => item.reviewState !== 'rejected')
-      .map((item) => ({ id: item.id, label: item.commonName || item.scientificName, kind: 'species' as const }));
+      .map((item) => ({
+        id: item.id,
+        label: item.commonName || item.scientificName,
+        kind: 'species' as const,
+        modelId: item.modelId,
+        isAmbiguous: item.isAmbiguous,
+        confidence: item.confidence,
+      }));
     const aiTagChips = aiProvenance.aiTags
       .filter((item) => item.reviewState !== 'rejected')
       .map((item) => ({ id: item.id, label: item.name, kind: 'ai' as const }));
@@ -538,15 +553,22 @@ export default function MetadataPanel() {
                         animate={{ opacity: 1, scale: 1 }}
                         exit={{ opacity: 0, scale: 0.8 }}
                         onClick={() => void handleRejectAiSuggestion(item)}
-                        data-tooltip={t('editor.metadata.organization.removeAiSuggestion')}
+                        data-tooltip={item.kind === 'species' && item.isAmbiguous
+                          ? `${item.modelId === 'bioclip-v2' ? 'BioCLIP 2' : 'BioCLIP'} candidate (${Math.round(item.confidence * 100)}% similarity). Similar species labels were too close to classify automatically; click to dismiss.`
+                          : t('editor.metadata.organization.removeAiSuggestion')}
                         className={clsx(
                           'group flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium cursor-pointer transition-colors',
                           item.kind === 'species'
-                            ? 'bg-cyan-400/15 text-cyan-200 hover:bg-cyan-400/25'
+                            ? item.isAmbiguous
+                              ? 'bg-sky-400/15 text-sky-200 ring-1 ring-sky-300/25 hover:bg-sky-400/25'
+                              : 'bg-cyan-400/15 text-cyan-200 hover:bg-cyan-400/25'
                             : 'bg-accent/15 text-accent hover:bg-accent/25',
                         )}
                       >
                         {item.label}
+                        {item.kind === 'species' && item.isAmbiguous && (
+                          <span className="text-[10px] font-semibold opacity-80">review</span>
+                        )}
                         <X size={10} className="opacity-50 group-hover:opacity-100" />
                       </motion.button>
                     ))}
