@@ -1053,15 +1053,19 @@ pub fn load_image_for_local_ai(path: &Path) -> Result<DynamicImage, String> {
 }
 
 pub fn load_image_for_face_ai(path: &Path, app_handle: &AppHandle) -> Result<DynamicImage, String> {
-    match load_image_for_local_ai(path) {
-        Ok(image) => Ok(image),
-        Err(_) => crate::file_management::get_cached_or_generate_thumbnail_image(
+    if crate::formats::is_raw_file(path) {
+        // The library grid has the authoritative RAW orientation pipeline.
+        // Reuse its medium cached preview so face coordinates and crops match
+        // the upright image users see, including camera and sidecar rotation.
+        return crate::file_management::get_cached_or_generate_thumbnail_image(
             &path.to_string_lossy(),
             app_handle,
             None,
         )
-        .map_err(|error| error.to_string()),
+        .map_err(|error| error.to_string());
     }
+
+    load_image_for_local_ai(path)
 }
 
 #[tauri::command]
