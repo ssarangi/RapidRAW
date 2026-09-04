@@ -3872,7 +3872,7 @@ pub fn start_catalog_scan(
                 // This must not depend on AI tagging being enabled: camera
                 // metadata is core catalog data, including for RAW files.
                 let metadata_app_handle = app_for_task.clone();
-                let metadata_state = metadata_app_handle.state::<crate::AppState>();
+                let metadata_state = app_for_task.state::<crate::AppState>();
                 if let Err(error) = start_catalog_metadata_extraction(
                     Some(root_id),
                     metadata_app_handle,
