@@ -859,7 +859,7 @@ export default function PeopleView() {
               </div>
             )}
           </div>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(148px,1fr))] gap-3">
             {faces.map((item) => {
               const suggested = people.find((person) => person.id === item.face.personId);
               const cropSrc = item.thumbnailDataUrl || (item.cropPath ? convertFileSrc(item.cropPath) : null);
@@ -867,9 +867,9 @@ export default function PeopleView() {
               return (
                 <div
                   key={item.face.id}
-                  className="relative rounded-md border border-border-color bg-bg-primary overflow-visible"
+                  className="relative min-w-0 overflow-visible rounded-md border border-border-color bg-bg-secondary p-2.5"
                 >
-                  <div className="w-full aspect-square overflow-hidden bg-surface flex items-center justify-center relative">
+                  <div className="relative flex aspect-square w-full items-center justify-center overflow-hidden rounded-md border border-border-color bg-surface">
                     <label className="absolute left-2 top-2 z-10 flex h-5 w-5 cursor-pointer items-center justify-center rounded bg-black/60 text-white shadow">
                       <input
                         type="checkbox"
@@ -909,9 +909,11 @@ export default function PeopleView() {
                       <Loader2 size={24} className="animate-spin text-text-secondary" />
                     )}
                   </div>
-                  <div className="p-2 space-y-2">
-                    <Text variant={TextVariants.small}>{suggested ? 'Suggested match' : 'Unknown face'}</Text>
-                    <Text variant={TextVariants.small} color={TextColors.secondary}>
+                  <div className="mt-2 space-y-2">
+                    <Text as="div" variant={TextVariants.small}>
+                      {suggested ? 'Suggested match' : 'Unknown face'}
+                    </Text>
+                    <Text as="div" variant={TextVariants.small} color={TextColors.secondary}>
                       {Math.round(item.face.confidence * 100)}% confidence
                     </Text>
                     <PersonNameCombobox
