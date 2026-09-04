@@ -1067,14 +1067,10 @@ pub fn start_face_detection(
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<String, String> {
     let db_path = active_library_path(&state)?;
-    let runtime = crate::face_model_registry::installed_face_runtime_paths(
-        &app_handle,
-        configured_face_model_policy(&db_path),
-    )?;
     let job_id = create_background_job(
         &db_path,
         "face_detection",
-        serde_json::json!({ "rootId": root_id, "relativePath": relative_path, "onlyPending": only_pending.unwrap_or(false), "modelPackId": runtime.pack_id.as_str() }),
+        serde_json::json!({ "rootId": root_id, "relativePath": relative_path, "onlyPending": only_pending.unwrap_or(false) }),
     )?;
     crate::library_db::set_background_job_root_id(&db_path, &job_id, root_id)?;
     let job_control = crate::app_state::BackgroundJobControl::new();
@@ -1088,18 +1084,27 @@ pub fn start_face_detection(
     let worker_job_id = job_id.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let ai_semaphore = app.state::<crate::AppState>().ai_job_semaphore.clone();
-        let result = run_face_detection(
+        // Resolving an installed pack verifies its model artifacts. Keep that
+        // disk work in the worker so the modal can close immediately after the
+        // job has been durably queued.
+        let result = crate::face_model_registry::installed_face_runtime_paths(
             &app,
-            &db_path,
-            root_id,
-            relative_path.as_deref(),
-            only_pending.unwrap_or(false),
-            runtime.pack_id.as_str(),
-            &runtime.detector,
-            &worker_job_id,
-            &job_control,
-            ai_semaphore,
-        );
+            configured_face_model_policy(&db_path),
+        )
+        .and_then(|runtime| {
+            run_face_detection(
+                &app,
+                &db_path,
+                root_id,
+                relative_path.as_deref(),
+                only_pending.unwrap_or(false),
+                runtime.pack_id.as_str(),
+                &runtime.detector,
+                &worker_job_id,
+                &job_control,
+                ai_semaphore,
+            )
+        });
         if let Err(error) = result {
             let job_state = if error == "Face detection cancelled" {
                 "cancelled"
@@ -1724,10 +1729,14 @@ where
     }
     if only_pending {
         let mut state = conn
-            .prepare("SELECT image_id FROM face_scan_state WHERE model_pack_id = ?1 AND status = 'complete'")
+            .prepare(
+                "SELECT image_id FROM face_scan_state WHERE status = 'complete'
+                 UNION
+                 SELECT image_id FROM faces",
+            )
             .map_err(|error| error.to_string())?;
         let completed_ids = state
-            .query_map([model_pack_id], |row| row.get::<_, i64>(0))
+            .query_map([], |row| row.get::<_, i64>(0))
             .map_err(|error| error.to_string())?
             .collect::<Result<HashSet<_>, _>>()
             .map_err(|error| error.to_string())?;
