@@ -191,7 +191,7 @@ function PersonNameCombobox({ idPrefix, hasPeople, onAssign, onError }: PersonNa
               role="option"
               aria-selected={activeIndex === index}
               className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-xs text-text-primary ${
-                activeIndex === index ? 'bg-accent text-white' : 'hover:bg-surface'
+                activeIndex === index ? 'bg-[#d89538] text-[#19130b]' : 'hover:bg-surface'
               }`}
               onMouseEnter={() => setActiveIndex(index)}
               onMouseDown={(event) => event.preventDefault()}
@@ -625,7 +625,7 @@ export default function PeopleView() {
                   </div>
                 </div>
                 {person.coverSelection === 'manual' && (
-                  <span className="absolute bottom-12 right-2 rounded-full bg-accent px-2 py-0.5 text-[10px] font-medium text-white">
+                  <span className="absolute bottom-12 right-2 rounded-full border border-[#d89538]/45 bg-[#21180e]/90 px-2 py-0.5 text-[10px] font-medium text-[#f6ce83] shadow-sm">
                     Chosen portrait
                   </span>
                 )}

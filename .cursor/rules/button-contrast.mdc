@@ -1,0 +1,13 @@
+---
+description: Ensure buttons and interactive badges remain legible across every RapidRAW theme
+globs: src/**/*.tsx
+alwaysApply: false
+---
+
+# Button contrast
+
+- Verify the normal, hover, disabled, and selected states of every new or edited button, badge, and action chip in Dark, Light, and Grey themes.
+- Never pair `bg-accent` with `text-white` by default. RapidRAW's Dark theme has a white accent, so this can produce white text on a white background.
+- Use the shared `Button` component for standard primary actions; it supplies the theme's `text-button-text` foreground.
+- For bespoke controls, use a foreground with guaranteed contrast (for example `text-button-text` with a themed background, or an explicit reviewed foreground/background pair).
+- Check text-bearing badges as carefully as buttons; they must not become blank-looking pills in any theme.
