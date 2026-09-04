@@ -545,7 +545,7 @@ fn collect_catalog_subject_factors(
                          WHERE image_id = ?1
                            AND review_state != 'rejected'
                            AND (is_ambiguous = 0 OR review_state = 'accepted')
-                         ORDER BY confidence DESC
+                         ORDER BY CASE review_state WHEN 'accepted' THEN 0 WHEN 'suggested' THEN 1 ELSE 2 END, confidence DESC
                          LIMIT 1",
                         [image_id],
                         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),

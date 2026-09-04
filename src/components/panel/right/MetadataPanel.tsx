@@ -294,6 +294,7 @@ export default function MetadataPanel() {
         modelId: item.modelId,
         isAmbiguous: item.isAmbiguous,
         confidence: item.confidence,
+        reviewState: item.reviewState,
       }));
     const aiTagChips = aiProvenance.aiTags
       .filter((item) => item.reviewState !== 'rejected')
@@ -315,6 +316,30 @@ export default function MetadataPanel() {
       });
     } catch (err) {
       console.error('Failed to reject AI suggestion:', err);
+      if (catalogImageId) {
+        invoke(Invokes.GetImageProvenance, { imageId: catalogImageId })
+          .then((evidence: any) => setAiProvenance({ aiTags: evidence.aiTags ?? [], species: evidence.species ?? [] }))
+          .catch(() => {});
+      }
+    }
+  };
+
+  const handleReviewSpecies = async (id: number, reviewState: 'accepted' | 'rejected') => {
+    setAiProvenance((current) => {
+      if (!current) return current;
+      return reviewState === 'rejected'
+        ? { ...current, species: current.species.filter((species) => species.id !== id) }
+        : {
+            ...current,
+            species: current.species.map((species) =>
+              species.id === id ? { ...species, reviewState } : species,
+            ),
+          };
+    });
+    try {
+      await invoke(Invokes.ReviewSpecies, { id, reviewState });
+    } catch (err) {
+      console.error('Failed to review BioCLIP species:', err);
       if (catalogImageId) {
         invoke(Invokes.GetImageProvenance, { imageId: catalogImageId })
           .then((evidence: any) => setAiProvenance({ aiTags: evidence.aiTags ?? [], species: evidence.species ?? [] }))
@@ -545,7 +570,36 @@ export default function MetadataPanel() {
                 </Text>
                 <div className="flex flex-wrap gap-1.5">
                   <AnimatePresence>
-                    {aiSuggestedTags.map((item) => (
+                    {aiSuggestedTags.map((item) => item.kind === 'species' && item.isAmbiguous && item.reviewState === 'suggested' ? (
+                      <motion.div
+                        key={`${item.kind}-${item.id}`}
+                        layout
+                        initial={{ opacity: 0, scale: 0.8 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.8 }}
+                        data-tooltip={`BioCLIP 2 candidate (${Math.round(item.confidence * 100)}% similarity). Confirm to use this as the photo's species classification.`}
+                        className="group flex items-center gap-1 rounded-md bg-sky-400/15 px-1 py-1 pl-2.5 text-xs font-medium text-sky-200 ring-1 ring-sky-300/25"
+                      >
+                        {item.label}
+                        <span className="text-[10px] font-semibold opacity-80">review</span>
+                        <button
+                          type="button"
+                          onClick={() => void handleReviewSpecies(item.id, 'accepted')}
+                          data-tooltip="Confirm species"
+                          className="rounded-sm p-0.5 text-emerald-200 hover:bg-emerald-400/20 hover:text-emerald-100"
+                        >
+                          <Check size={12} strokeWidth={2.5} />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleReviewSpecies(item.id, 'rejected')}
+                          data-tooltip="Reject species"
+                          className="rounded-sm p-0.5 text-sky-100/70 hover:bg-red-400/20 hover:text-red-200"
+                        >
+                          <X size={12} strokeWidth={2.5} />
+                        </button>
+                      </motion.div>
+                    ) : (
                       <motion.button
                         key={`${item.kind}-${item.id}`}
                         layout
@@ -553,22 +607,18 @@ export default function MetadataPanel() {
                         animate={{ opacity: 1, scale: 1 }}
                         exit={{ opacity: 0, scale: 0.8 }}
                         onClick={() => void handleRejectAiSuggestion(item)}
-                        data-tooltip={item.kind === 'species' && item.isAmbiguous
-                          ? `${item.modelId === 'bioclip-v2' ? 'BioCLIP 2' : 'BioCLIP'} candidate (${Math.round(item.confidence * 100)}% similarity). Similar species labels were too close to classify automatically; click to dismiss.`
-                          : t('editor.metadata.organization.removeAiSuggestion')}
+                        data-tooltip={t('editor.metadata.organization.removeAiSuggestion')}
                         className={clsx(
                           'group flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium cursor-pointer transition-colors',
                           item.kind === 'species'
-                            ? item.isAmbiguous
-                              ? 'bg-sky-400/15 text-sky-200 ring-1 ring-sky-300/25 hover:bg-sky-400/25'
+                            ? item.reviewState === 'accepted'
+                              ? 'bg-teal-400/20 text-teal-100 ring-1 ring-teal-300/30 hover:bg-teal-400/30'
                               : 'bg-cyan-400/15 text-cyan-200 hover:bg-cyan-400/25'
                             : 'bg-accent/15 text-accent hover:bg-accent/25',
                         )}
                       >
                         {item.label}
-                        {item.kind === 'species' && item.isAmbiguous && (
-                          <span className="text-[10px] font-semibold opacity-80">review</span>
-                        )}
+                        {item.kind === 'species' && item.reviewState === 'accepted' && <Check size={11} strokeWidth={2.5} />}
                         <X size={10} className="opacity-50 group-hover:opacity-100" />
                       </motion.button>
                     ))}

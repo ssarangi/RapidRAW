@@ -7346,7 +7346,7 @@ pub fn get_image_provenance(
             "SELECT id, scientific_name, common_name, taxon_rank, confidence, review_state, model_id, is_ambiguous
              FROM species_classifications
              WHERE image_id = ?1
-             ORDER BY confidence DESC",
+             ORDER BY CASE review_state WHEN 'accepted' THEN 0 WHEN 'suggested' THEN 1 ELSE 2 END, confidence DESC",
         )
         .map_err(|e| e.to_string())?;
 
