@@ -1758,6 +1758,15 @@ where
         let path = Path::new(&primary.root).join(&primary.relative);
         let current = index as i64 + 1;
         let file_name = primary.file_name.as_str();
+        let mut processed_ids = companion_ids.clone();
+        processed_ids.push(primary.id);
+        for image_id in &processed_ids {
+            conn.execute(
+                "INSERT INTO face_scan_state(image_id, model_pack_id, status, model_revision, error_message, processed_at, updated_at) VALUES(?1, ?2, 'processing', NULL, NULL, NULL, strftime('%s','now')) ON CONFLICT(image_id, model_pack_id) DO UPDATE SET status = 'processing', error_message = NULL, processed_at = NULL, updated_at = excluded.updated_at",
+                params![image_id, model_pack_id],
+            )
+            .map_err(|error| error.to_string())?;
+        }
         let (detections, loaded_image) = match load_image(&path) {
             Ok(image) => {
                 let _permit =
@@ -1770,6 +1779,12 @@ where
                 }
             }
             Err(e) => {
+                for image_id in &processed_ids {
+                    let _ = conn.execute(
+                        "UPDATE face_scan_state SET status = 'failed', error_message = ?3, processed_at = strftime('%s','now'), updated_at = strftime('%s','now') WHERE image_id = ?1 AND model_pack_id = ?2",
+                        params![image_id, model_pack_id, &e],
+                    );
+                }
                 let _ = update_job(
                     db_path,
                     job_id,
@@ -1881,6 +1896,13 @@ where
                     );
                 }
             }
+        }
+        for image_id in &processed_ids {
+            conn.execute(
+                "UPDATE face_scan_state SET status = 'complete', error_message = NULL, processed_at = strftime('%s','now'), updated_at = strftime('%s','now') WHERE image_id = ?1 AND model_pack_id = ?2",
+                params![image_id, model_pack_id],
+            )
+            .map_err(|error| error.to_string())?;
         }
     }
     update_job(

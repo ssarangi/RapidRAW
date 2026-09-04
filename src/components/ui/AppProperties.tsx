@@ -405,6 +405,16 @@ export interface CatalogFolderNode {
   created?: number | null;
   rootId: number;
   relativePath: string;
+  faceCoverage: CatalogAnalysisCoverage;
+  ramPlusCoverage: CatalogAnalysisCoverage;
+}
+
+export interface CatalogAnalysisCoverage {
+  total: number;
+  completed: number;
+  processing: number;
+  failed: number;
+  pending: number;
 }
 
 export interface ScanResult {
