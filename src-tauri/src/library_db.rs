@@ -46,6 +46,29 @@ pub struct CatalogRoot {
     pub image_count: i64,
 }
 
+/// Processing coverage for the images contained in a catalog folder, including
+/// every descendant folder. A completed face scan also means "no faces found"
+/// is a known result rather than an unprocessed image.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogAnalysisCoverage {
+    pub total: i64,
+    pub completed: i64,
+    pub processing: i64,
+    pub failed: i64,
+    pub pending: i64,
+}
+
+impl CatalogAnalysisCoverage {
+    fn combine(&mut self, other: &Self) {
+        self.total += other.total;
+        self.completed += other.completed;
+        self.processing += other.processing;
+        self.failed += other.failed;
+        self.pending += other.pending;
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct CatalogFolderNode {
@@ -59,6 +82,8 @@ pub struct CatalogFolderNode {
     pub created: Option<u64>,
     pub root_id: i64,
     pub relative_path: String,
+    pub face_coverage: CatalogAnalysisCoverage,
+    pub ram_plus_coverage: CatalogAnalysisCoverage,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -2886,8 +2911,55 @@ pub fn list_catalog_folder_tree(
         .map_err(|e| e.to_string())?
     };
 
+    // Aggregate only direct images here, then combine the values while the
+    // hierarchy is built below. That gives a parent folder an honest status
+    // for all of its descendants without issuing one query per tree node.
+    let coverage_rows = {
+        let mut stmt = conn
+            .prepare(
+                "
+                SELECT f.relative_path, COUNT(i.id),
+                  COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM face_scan_state s WHERE s.image_id = i.id AND s.status = 'complete') THEN 1 ELSE 0 END), 0),
+                  COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM face_scan_state s WHERE s.image_id = i.id AND s.status = 'processing') THEN 1 ELSE 0 END), 0),
+                  COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM face_scan_state s WHERE s.image_id = i.id AND s.status = 'failed') THEN 1 ELSE 0 END), 0),
+                  COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.image_modified_at = i.modified_at AND s.state = 'completed') THEN 1 ELSE 0 END), 0),
+                  COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.image_modified_at = i.modified_at AND s.state = 'processing') THEN 1 ELSE 0 END), 0),
+                  COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.image_modified_at = i.modified_at AND s.state = 'failed') THEN 1 ELSE 0 END), 0)
+                FROM folders f
+                LEFT JOIN images i ON i.folder_id = f.id AND i.status = 'present'
+                WHERE f.root_id = ?1
+                GROUP BY f.id, f.relative_path
+                ",
+            )
+            .map_err(|e| e.to_string())?;
+        stmt.query_map(params![root_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                CatalogAnalysisCoverage {
+                    total: row.get(1)?,
+                    completed: row.get(2)?,
+                    processing: row.get(3)?,
+                    failed: row.get(4)?,
+                    pending: 0,
+                },
+                CatalogAnalysisCoverage {
+                    total: row.get(1)?,
+                    completed: row.get(5)?,
+                    processing: row.get(6)?,
+                    failed: row.get(7)?,
+                    pending: 0,
+                },
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?
+    };
+
     let mut child_paths: HashMap<String, Vec<String>> = HashMap::new();
     let mut folder_info: HashMap<String, (String, i64, Option<i64>)> = HashMap::new();
+    let mut direct_coverage: HashMap<String, (CatalogAnalysisCoverage, CatalogAnalysisCoverage)> =
+        HashMap::new();
     for (relative_path, name, image_count, modified_at) in rows {
         let parent = if relative_path == "." {
             None
@@ -2905,6 +2977,12 @@ pub fn list_catalog_folder_tree(
                 .push(relative_path.clone());
         }
         folder_info.insert(relative_path, (name, image_count, modified_at));
+    }
+    for (relative_path, mut face, mut ram_plus) in coverage_rows {
+        face.pending = (face.total - face.completed - face.processing - face.failed).max(0);
+        ram_plus.pending =
+            (ram_plus.total - ram_plus.completed - ram_plus.processing - ram_plus.failed).max(0);
+        direct_coverage.insert(relative_path, (face, ram_plus));
     }
 
     folder_info.entry(".".to_string()).or_insert_with(|| {
@@ -2927,6 +3005,7 @@ pub fn list_catalog_folder_tree(
         relative_path: &str,
         folder_info: &HashMap<String, (String, i64, Option<i64>)>,
         child_paths: &HashMap<String, Vec<String>>,
+        direct_coverage: &HashMap<String, (CatalogAnalysisCoverage, CatalogAnalysisCoverage)>,
     ) -> CatalogFolderNode {
         let (name, image_count, modified_at) = folder_info
             .get(relative_path)
@@ -2937,10 +3016,18 @@ pub fn list_catalog_folder_tree(
             .cloned()
             .unwrap_or_default()
             .into_iter()
-            .map(|child| build_node(root_id, &child, folder_info, child_paths))
+            .map(|child| build_node(root_id, &child, folder_info, child_paths, direct_coverage))
             .collect::<Vec<_>>();
         children.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         let has_subdirs = !children.is_empty();
+        let (mut face_coverage, mut ram_plus_coverage) = direct_coverage
+            .get(relative_path)
+            .cloned()
+            .unwrap_or_default();
+        for child in &children {
+            face_coverage.combine(&child.face_coverage);
+            ram_plus_coverage.combine(&child.ram_plus_coverage);
+        }
         CatalogFolderNode {
             children,
             is_dir: true,
@@ -2952,10 +3039,18 @@ pub fn list_catalog_folder_tree(
             created: None,
             root_id,
             relative_path: relative_path.to_string(),
+            face_coverage,
+            ram_plus_coverage,
         }
     }
 
-    Ok(build_node(root_id, ".", &folder_info, &child_paths))
+    Ok(build_node(
+        root_id,
+        ".",
+        &folder_info,
+        &child_paths,
+        &direct_coverage,
+    ))
 }
 
 fn unix_modified(path: &Path) -> u64 {

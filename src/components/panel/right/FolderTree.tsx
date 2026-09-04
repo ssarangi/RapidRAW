@@ -26,6 +26,8 @@ import {
   RefreshCw,
   Loader2,
   BarChart3,
+  ScanFace,
+  Tags,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { motion, AnimatePresence, LayoutGroup } from 'framer-motion';
@@ -47,6 +49,7 @@ import {
   AlbumGroup,
   Album,
   CatalogFolderNode,
+  CatalogAnalysisCoverage,
   CatalogRoot,
   CatalogSearchQuery,
   ImageFile,
@@ -55,6 +58,7 @@ import {
   LibraryViewMode,
   SortDirection,
   SmartCollection,
+  BackgroundJob,
 } from '../../ui/AppProperties';
 import { addLibraryCollection, browseCatalogRoot } from '../../../utils/libraryCollections';
 import { CatalogAiAnalysisMenu, CatalogReviewQueueButton } from '../library/LibraryHeader';
@@ -68,6 +72,13 @@ export interface FolderTree {
   hasSubdirs?: boolean;
   modified?: number | null;
   created?: number | null;
+  faceCoverage?: CatalogAnalysisCoverage;
+  ramPlusCoverage?: CatalogAnalysisCoverage;
+}
+
+interface CatalogAnalysisJobs {
+  face?: BackgroundJob;
+  ramPlus?: BackgroundJob;
 }
 
 interface FolderTreeProps {
@@ -98,6 +109,24 @@ interface TreeNodeProps {
   isLayoutDragging: boolean;
   isRescanning?: boolean;
   onRescan?(event: React.MouseEvent, node: FolderTree): void;
+  analysisJobs?: CatalogAnalysisJobs;
+}
+
+const ACTIVE_JOB_STATES = new Set<BackgroundJob['state']>(['queued', 'running', 'paused', 'cancelling']);
+
+function coverageLabel(label: string, coverage?: CatalogAnalysisCoverage, job?: BackgroundJob) {
+  if (!coverage || coverage.total === 0) return null;
+  const active = job && ACTIVE_JOB_STATES.has(job.state);
+  const title = `${label}: ${coverage.completed}/${coverage.total} complete`;
+  if (active) return { title: `${title} · ${job.message}`, className: 'text-sky-400', spinning: true };
+  if ((job?.state === 'failed' && coverage.completed < coverage.total) || (coverage.failed > 0 && coverage.completed === 0)) {
+    return { title: `${title} · ${coverage.failed} failed`, className: 'text-rose-400', spinning: false };
+  }
+  if (coverage.completed === coverage.total) return { title, className: 'text-emerald-400', spinning: false };
+  if (coverage.completed > 0 || coverage.processing > 0) {
+    return { title: `${title} · ${coverage.pending + coverage.failed} remaining`, className: 'text-amber-400', spinning: false };
+  }
+  return { title: `${label}: not started`, className: 'text-slate-400', spinning: false };
 }
 
 interface VisibleProps {
@@ -517,6 +546,7 @@ function TreeNode({
   isLayoutDragging,
   isRescanning = false,
   onRescan,
+  analysisJobs,
 }: TreeNodeProps) {
   const hasChildren = node.hasSubdirs || (node.children && node.children.length > 0);
   const isSelected = node.path === selectedPath;
@@ -581,6 +611,8 @@ function TreeNode({
   }
 
   const iconKey = isDropTarget ? 'drop-target' : currentFolderIconKey || (isExpanded ? 'folder-open' : 'folder-closed');
+  const faceStatus = coverageLabel('Face scan', node.faceCoverage, analysisJobs?.face);
+  const ramPlusStatus = coverageLabel('RAM++ tags', node.ramPlusCoverage, analysisJobs?.ramPlus);
 
   return (
     <Text as="div" color={TextColors.primary} weight={TextWeights.medium}>
@@ -620,6 +652,21 @@ function TreeNode({
         <span onDoubleClick={handleNameDoubleClick} className="min-w-0 flex-1 select-none">
           <span className="block truncate">{node.name}</span>
         </span>
+
+        {(faceStatus || ramPlusStatus) && (
+          <span className="flex shrink-0 items-center gap-1" aria-label="Catalog analysis coverage">
+            {faceStatus && (
+              <span className={faceStatus.className} data-tooltip={faceStatus.title}>
+                <ScanFace size={14} className={faceStatus.spinning ? 'animate-spin' : ''} />
+              </span>
+            )}
+            {ramPlusStatus && (
+              <span className={ramPlusStatus.className} data-tooltip={ramPlusStatus.title}>
+                <Tags size={13} className={ramPlusStatus.spinning ? 'animate-spin' : ''} />
+              </span>
+            )}
+          </span>
+        )}
 
         {typeof node.imageCount === 'number' && node.imageCount > 0 && (
           <Text
@@ -700,6 +747,7 @@ function TreeNode({
                       isInstantTransition={isInstantTransition}
                       folderIcons={folderIcons}
                       isLayoutDragging={isLayoutDragging}
+                      analysisJobs={analysisJobs}
                     />
                   </motion.div>
                 ))}
@@ -770,6 +818,7 @@ export default function FolderTree({
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
   const [catalogFolderTrees, setCatalogFolderTrees] = useState<Record<number, CatalogFolderNode>>({});
   const [loadingCatalogTreeIds, setLoadingCatalogTreeIds] = useState<Set<number>>(new Set());
+  const [catalogAnalysisJobs, setCatalogAnalysisJobs] = useState<Record<number, CatalogAnalysisJobs>>({});
   const [rescanningFolders, setRescanningFolders] = useState<Set<string>>(new Set());
   const [smartCollections, setSmartCollections] = useState<SmartCollection[]>([]);
   const [isLoadingSmartCollections, setIsLoadingSmartCollections] = useState(false);
@@ -949,9 +998,9 @@ export default function FolderTree({
     return { path: selectedPath, name };
   }, [selectedPath, isSearching, folderTrees, pinnedFolderTrees]);
 
-  const loadCatalogFolderTree = async (root: CatalogRoot) => {
+  const loadCatalogFolderTree = async (root: CatalogRoot, force = false) => {
     const cachedTree = catalogFolderTrees[root.id];
-    if (cachedTree && cachedTree.imageCount === root.imageCount) return;
+    if (!force && cachedTree && cachedTree.imageCount === root.imageCount) return;
     if (loadingCatalogTreeIds.has(root.id)) return;
     setLoadingCatalogTreeIds((prev) => new Set(prev).add(root.id));
     try {
@@ -983,6 +1032,43 @@ export default function FolderTree({
     catalogRoots.forEach((root) => {
       loadCatalogFolderTree(root);
     });
+  }, [librarySource.type, catalogRoots]);
+
+  useEffect(() => {
+    if (librarySource.type !== 'catalog') {
+      setCatalogAnalysisJobs({});
+      return;
+    }
+
+    let cancelled = false;
+    const refreshCoverage = async () => {
+      try {
+        const jobs = await invoke<BackgroundJob[]>(Invokes.ListBackgroundJobs);
+        if (cancelled) return;
+        const next: Record<number, CatalogAnalysisJobs> = {};
+        for (const root of catalogRoots) {
+          const relevant = jobs.filter(
+            (job) =>
+              (job.kind === 'face_detection' || job.kind === 'face_recognition' || job.kind === 'face_reindex' || job.kind === 'ram_plus_tagging') &&
+              (job.rootId == null || job.rootId === root.id),
+          );
+          const face = relevant.find((job) => job.kind === 'face_detection' || job.kind === 'face_recognition' || job.kind === 'face_reindex');
+          const ramPlus = relevant.find((job) => job.kind === 'ram_plus_tagging');
+          if (face || ramPlus) next[root.id] = { face, ramPlus };
+        }
+        setCatalogAnalysisJobs(next);
+        await Promise.all(catalogRoots.map((root) => loadCatalogFolderTree(root, true)));
+      } catch (error) {
+        console.error('Failed to refresh catalog analysis coverage:', error);
+      }
+    };
+
+    void refreshCoverage();
+    const interval = window.setInterval(() => void refreshCoverage(), 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
   }, [librarySource.type, catalogRoots]);
 
   const loadSmartCollections = async () => {
@@ -1428,6 +1514,7 @@ export default function FolderTree({
                               isLayoutDragging={isLayoutDragging}
                               isRescanning={rescanningFolders.has(`catalog:${root.id}`)}
                               onRescan={(event) => handleRescanCatalogRoot(event, root)}
+                              analysisJobs={catalogAnalysisJobs[root.id]}
                             />
                           );
                         })}
