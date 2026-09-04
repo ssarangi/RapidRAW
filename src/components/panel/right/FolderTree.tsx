@@ -26,6 +26,7 @@ import {
   RefreshCw,
   Loader2,
   BarChart3,
+  Smile,
   Tags,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -772,7 +773,7 @@ function TreeNode({
             {faceStatus && (
               <button
                 className={clsx(
-                  'rounded-full p-0.5 leading-none ring-1 ring-current hover:bg-surface',
+                  'rounded-sm p-0.5 hover:bg-surface',
                   faceStatus.className,
                   faceStatus.spinning && 'animate-pulse',
                 )}
@@ -783,9 +784,7 @@ function TreeNode({
                 }}
                 type="button"
               >
-                <span aria-hidden="true" className="block text-[15px] leading-none">
-                  🙂
-                </span>
+                <Smile size={17} strokeWidth={2.2} className="fill-current/20" aria-hidden="true" />
               </button>
             )}
             {ramPlusStatus && (
