@@ -26,7 +26,6 @@ import {
   RefreshCw,
   Loader2,
   BarChart3,
-  ScanFace,
   Tags,
 } from 'lucide-react';
 import clsx from 'clsx';
@@ -772,7 +771,11 @@ function TreeNode({
           <span className="flex shrink-0 items-center gap-1" aria-label="Catalog analysis coverage">
             {faceStatus && (
               <button
-                className={clsx('rounded-sm p-0.5 hover:bg-surface', faceStatus.className)}
+                className={clsx(
+                  'rounded-full p-0.5 leading-none ring-1 ring-current hover:bg-surface',
+                  faceStatus.className,
+                  faceStatus.spinning && 'animate-pulse',
+                )}
                 data-tooltip={`${faceStatus.title} · Open analysis status`}
                 onClick={(event) => {
                   event.stopPropagation();
@@ -780,7 +783,9 @@ function TreeNode({
                 }}
                 type="button"
               >
-                <ScanFace size={17} className={faceStatus.spinning ? 'animate-spin' : ''} />
+                <span aria-hidden="true" className="block text-[15px] leading-none">
+                  🙂
+                </span>
               </button>
             )}
             {ramPlusStatus && (
