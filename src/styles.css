@@ -65,6 +65,13 @@
   }
 }
 
+/* Standard adjustment scales move from warm amber at the minimum end to a
+ * neutral graphite gray at the maximum. Color-semantic controls retain their
+ * dedicated temperature, tint, and hue tracks. */
+@utility slider-warm-track {
+  background: linear-gradient(90deg, #efb34f 0%, #d89538 38%, #777d86 100%) !important;
+}
+
 @utility temperature-gradient-track {
   background: linear-gradient(to right, #2d4a74, #3f94b6, #8a8a8a, #c7c549, #c7863c) !important;
 }
