@@ -436,7 +436,7 @@ const SRGB_TO_XYZ: [[f32; 3]; 3] = [
 /// truly maps to equal-RGB camera values), and only *then* inverts to get
 /// camera->sRGB - normalizing before inverting is not the same operation
 /// as inverting then normalizing the result.
-fn apply_color_matrix(rgb: &mut [[f32; 3]], xyz_to_cam: &Matrix3<f32>) {
+fn camera_to_linear_srgb_matrix(xyz_to_cam: &Matrix3<f32>) -> Matrix3<f32> {
     let srgb_to_xyz = Matrix3::from_row_slice(&[
         SRGB_TO_XYZ[0][0],
         SRGB_TO_XYZ[0][1],
@@ -463,10 +463,27 @@ fn apply_color_matrix(rgb: &mut [[f32; 3]], xyz_to_cam: &Matrix3<f32>) {
     // camera -> sRGB, fused (rawler's `cam2rgb`, via pseudo-inverse for
     // the general 4-channel case - a plain inverse is equivalent here
     // since we only ever build a full-rank 3x3 matrix).
-    let cam_to_srgb = match rgb_to_cam.try_inverse() {
-        Some(m) => m,
-        None => Matrix3::identity(),
-    };
+    rgb_to_cam.try_inverse().unwrap_or_else(Matrix3::identity)
+}
+
+/// Returns the transform required after a normalized camera-RGB model output.
+/// RawNIND has already had black level removed and white level normalized, so
+/// only camera white balance and camera-RGB → linear sRGB remain.
+pub fn normalized_camera_rgb_to_linear_srgb_transform(
+    sensor: &RawSensorData,
+) -> (Matrix3<f32>, [f32; 3]) {
+    (
+        camera_to_linear_srgb_matrix(&sensor.xyz_to_cam),
+        [
+            sensor.wb_coeffs[0],
+            sensor.wb_coeffs[1],
+            sensor.wb_coeffs[2],
+        ],
+    )
+}
+
+fn apply_color_matrix(rgb: &mut [[f32; 3]], xyz_to_cam: &Matrix3<f32>) {
+    let cam_to_srgb = camera_to_linear_srgb_matrix(xyz_to_cam);
 
     rgb.par_iter_mut().for_each(|px| {
         let v = nalgebra::Vector3::new(px[0], px[1], px[2]);

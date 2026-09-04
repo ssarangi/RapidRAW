@@ -100,8 +100,9 @@ pub fn develop_raw_image_for_editor(
             ));
         }
         let model_path = crate::image_loader::raw_nind_model_path()?;
-        let image = crate::image_restoration::develop_rawnind_in_memory(file_bytes, &model_path)
-            .map_err(|error| anyhow!(error))?;
+        let image =
+            crate::image_restoration::develop_rawnind_in_memory(file_bytes, &model_path, &sensor)
+                .map_err(|error| anyhow!(error))?;
         let image = crate::custom_raw_pipeline::crop_sensor_develop_image(image, &sensor);
         return Ok(apply_orientation(image, sensor.orientation));
     }

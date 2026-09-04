@@ -8,9 +8,6 @@ use tauri::{Emitter, Manager};
 /// RawNIND's exported ONNX graph has a fixed 4×512×512 Bayer input.
 const RAWNIND_BAYER_TILE_SIZE: u32 = 512;
 const RAWNIND_SOURCE_TILE_SIZE: u32 = RAWNIND_BAYER_TILE_SIZE * 2;
-/// The exported RawNIND graph emits linear Rec.2020 values scaled by 1e6.
-/// This is part of its tensor contract, not image-display normalization.
-const RAWNIND_OUTPUT_SCALE: f32 = 1_000_000.0;
 
 /// Recipe and configuration parameters for a restoration operation.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -313,6 +310,7 @@ pub fn run_rawnind_restoration_tiled(
     tile_size: u32,
     tile_overlap: u32,
     _denoise_strength: f32,
+    camera_sensor: Option<&crate::custom_raw_pipeline::RawSensorData>,
 ) -> Result<DynamicImage, String> {
     let packed_bayer = pack_bayer_cfa_with_pattern(
         raw_mosaic,
@@ -325,6 +323,7 @@ pub fn run_rawnind_restoration_tiled(
     let bayer_w = width / 2;
     let bayer_h = height / 2;
     let channel_size = bayer_w * bayer_h;
+    let input_mean = packed_bayer.iter().copied().sum::<f32>() / packed_bayer.len().max(1) as f32;
 
     // We tile on the Bayer domain, so the source tile is halved. Edge tiles
     // are padded below to this fixed graph size before inference.
@@ -422,20 +421,57 @@ pub fn run_rawnind_restoration_tiled(
         }
     }
 
+    // The network is trained with arbitrary output gain. Match its global
+    // output mean to the normalized Bayer input mean before color handling.
+    let mut output_sum = 0.0f64;
+    for y in 0..height as u32 {
+        for x in 0..width as u32 {
+            let idx = (y * width as u32 + x) as usize;
+            let weight = weight_accum[idx].max(f32::EPSILON);
+            output_sum += (output_accum[idx * 3]
+                + output_accum[idx * 3 + 1]
+                + output_accum[idx * 3 + 2]) as f64
+                / weight as f64;
+        }
+    }
+    let output_mean = (output_sum / (width * height * 3) as f64) as f32;
+    let gain_match = if output_mean.is_finite() && output_mean.abs() > f32::EPSILON {
+        input_mean / output_mean
+    } else {
+        return Err("RawNIND produced an invalid output gain".to_string());
+    };
+    let camera_transform = camera_sensor
+        .map(crate::custom_raw_pipeline::normalized_camera_rgb_to_linear_srgb_transform);
+
     let mut out_buffer = ImageBuffer::<Rgb<u8>, Vec<u8>>::new(width as u32, height as u32);
     for y in 0..height as u32 {
         for x in 0..width as u32 {
             let idx = (y * width as u32 + x) as usize;
             let w = weight_accum[idx].max(f32::EPSILON);
-            let r_2020 = output_accum[idx * 3] / w / RAWNIND_OUTPUT_SCALE;
-            let g_2020 = output_accum[idx * 3 + 1] / w / RAWNIND_OUTPUT_SCALE;
-            let b_2020 = output_accum[idx * 3 + 2] / w / RAWNIND_OUTPUT_SCALE;
-
-            // RawNIND emits linear Rec.2020. Convert to linear sRGB before
-            // applying the editor's display-referred transfer function.
-            let r_lin = (1.6605 * r_2020 - 0.5876 * g_2020 - 0.0728 * b_2020).clamp(0.0, 1.0);
-            let g_lin = (-0.1246 * r_2020 + 1.1329 * g_2020 - 0.0083 * b_2020).clamp(0.0, 1.0);
-            let b_lin = (-0.0182 * r_2020 - 0.1006 * g_2020 + 1.1187 * b_2020).clamp(0.0, 1.0);
+            let camera_rgb = [
+                output_accum[idx * 3] / w * gain_match,
+                output_accum[idx * 3 + 1] / w * gain_match,
+                output_accum[idx * 3 + 2] / w * gain_match,
+            ];
+            let (r_lin, g_lin, b_lin) = if let Some((camera_to_srgb, wb)) = &camera_transform {
+                let input = nalgebra::Vector3::new(
+                    camera_rgb[0] * wb[0],
+                    camera_rgb[1] * wb[1],
+                    camera_rgb[2] * wb[2],
+                );
+                let output = camera_to_srgb * input;
+                (
+                    output[0].clamp(0.0, 1.0),
+                    output[1].clamp(0.0, 1.0),
+                    output[2].clamp(0.0, 1.0),
+                )
+            } else {
+                (
+                    camera_rgb[0].clamp(0.0, 1.0),
+                    camera_rgb[1].clamp(0.0, 1.0),
+                    camera_rgb[2].clamp(0.0, 1.0),
+                )
+            };
             let to_srgb = |value: f32| {
                 if value <= 0.0031308 {
                     value * 12.92
@@ -460,6 +496,7 @@ pub fn run_rawnind_restoration_tiled(
 pub fn develop_rawnind_in_memory(
     file_bytes: &[u8],
     model_path: &Path,
+    camera_sensor: &crate::custom_raw_pipeline::RawSensorData,
 ) -> Result<DynamicImage, String> {
     let source = rawler::rawsource::RawSource::new_from_slice(file_bytes);
     let raw_image = rawler::get_decoder(&source)
@@ -498,6 +535,7 @@ pub fn develop_rawnind_in_memory(
         RAWNIND_SOURCE_TILE_SIZE,
         64,
         1.0,
+        Some(camera_sensor),
     )
 }
 
@@ -876,6 +914,7 @@ pub fn run_restoration_worker(
                                 recipe.tile_size,
                                 recipe.tile_overlap,
                                 recipe.denoise_strength,
+                                None,
                             );
                             drop(_permit);
                             match result {
