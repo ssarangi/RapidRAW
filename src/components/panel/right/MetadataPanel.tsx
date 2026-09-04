@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Check, ChevronDown, ChevronRight, Plus, Star, Tag, X, User } from 'lucide-react';
+import { Camera, Check, ChevronDown, ChevronRight, Plus, Star, Tag, X, User } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -279,8 +279,12 @@ export default function MetadataPanel() {
       .then((evidence: any) => {
         if (active) setAiProvenance({ aiTags: evidence.aiTags ?? [], species: evidence.species ?? [] });
       })
-      .catch(() => { if (active) setAiProvenance(null); });
-    return () => { active = false; };
+      .catch(() => {
+        if (active) setAiProvenance(null);
+      });
+    return () => {
+      active = false;
+    };
   }, [catalogImageId]);
 
   const aiSuggestedTags = useMemo(() => {
@@ -331,9 +335,7 @@ export default function MetadataPanel() {
         ? { ...current, species: current.species.filter((species) => species.id !== id) }
         : {
             ...current,
-            species: current.species.map((species) =>
-              species.id === id ? { ...species, reviewState } : species,
-            ),
+            species: current.species.map((species) => (species.id === id ? { ...species, reviewState } : species)),
           };
     });
     try {
@@ -355,7 +357,7 @@ export default function MetadataPanel() {
     return expandGroupedPaths(imageList, targetPaths, groupingMode);
   };
 
-  const { cameraGridSettings, lensSetting, gpsData, otherExifEntries } = useMemo(() => {
+  const { cameraGridSettings, cameraSetting, lensSetting, gpsData, otherExifEntries } = useMemo(() => {
     const exif = selectedImage?.exif || {};
 
     const cameraGridKeys = ['ExposureTime', 'FNumber', 'PhotographicSensitivity', 'FocalLengthIn35mmFilm'];
@@ -399,6 +401,13 @@ export default function MetadataPanel() {
             : '-',
     };
 
+    const cameraSetting = {
+      label: 'Camera',
+      value:
+        [exif.Make, exif.Model].filter((value) => value !== undefined && value !== null && value !== '').join(' ') ||
+        '-',
+    };
+
     const latStr = exif.GPSLatitude;
     const latRef = exif.GPSLatitudeRef;
     const lonStr = exif.GPSLongitude;
@@ -414,12 +423,12 @@ export default function MetadataPanel() {
       }
     }
 
-    const handledKeys = [...cameraGridKeys, 'LensModel', ...EDITABLE_FIELDS.map((f) => f.key)];
+    const handledKeys = [...cameraGridKeys, 'Make', 'Model', 'LensModel', ...EDITABLE_FIELDS.map((f) => f.key)];
     const otherExifEntries = Object.entries(exif)
       .filter(([key]) => !handledKeys.includes(key))
       .sort(([keyA], [keyB]) => keyA.localeCompare(keyB));
 
-    return { cameraGridSettings, lensSetting, gpsData, otherExifEntries };
+    return { cameraGridSettings, cameraSetting, lensSetting, gpsData, otherExifEntries };
   }, [selectedImage?.exif, t]);
 
   const currentColor = useMemo(() => {
@@ -570,58 +579,62 @@ export default function MetadataPanel() {
                 </Text>
                 <div className="flex flex-wrap gap-1.5">
                   <AnimatePresence>
-                    {aiSuggestedTags.map((item) => item.kind === 'species' && item.isAmbiguous && item.reviewState === 'suggested' ? (
-                      <motion.div
-                        key={`${item.kind}-${item.id}`}
-                        layout
-                        initial={{ opacity: 0, scale: 0.8 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        exit={{ opacity: 0, scale: 0.8 }}
-                        data-tooltip={`BioCLIP 2 candidate (${Math.round(item.confidence * 100)}% similarity). Confirm to use this as the photo's species classification.`}
-                        className="group flex items-center gap-1 rounded-md bg-sky-400/15 px-1 py-1 pl-2.5 text-xs font-medium text-sky-200 ring-1 ring-sky-300/25"
-                      >
-                        {item.label}
-                        <span className="text-[10px] font-semibold opacity-80">review</span>
-                        <button
-                          type="button"
-                          onClick={() => void handleReviewSpecies(item.id, 'accepted')}
-                          data-tooltip="Confirm species"
-                          className="rounded-sm p-0.5 text-emerald-200 hover:bg-emerald-400/20 hover:text-emerald-100"
+                    {aiSuggestedTags.map((item) =>
+                      item.kind === 'species' && item.isAmbiguous && item.reviewState === 'suggested' ? (
+                        <motion.div
+                          key={`${item.kind}-${item.id}`}
+                          layout
+                          initial={{ opacity: 0, scale: 0.8 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.8 }}
+                          data-tooltip={`BioCLIP 2 candidate (${Math.round(item.confidence * 100)}% similarity). Confirm to use this as the photo's species classification.`}
+                          className="group flex items-center gap-1 rounded-md bg-sky-400/15 px-1 py-1 pl-2.5 text-xs font-medium text-sky-200 ring-1 ring-sky-300/25"
                         >
-                          <Check size={12} strokeWidth={2.5} />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void handleReviewSpecies(item.id, 'rejected')}
-                          data-tooltip="Reject species"
-                          className="rounded-sm p-0.5 text-sky-100/70 hover:bg-red-400/20 hover:text-red-200"
+                          {item.label}
+                          <span className="text-[10px] font-semibold opacity-80">review</span>
+                          <button
+                            type="button"
+                            onClick={() => void handleReviewSpecies(item.id, 'accepted')}
+                            data-tooltip="Confirm species"
+                            className="rounded-sm p-0.5 text-emerald-200 hover:bg-emerald-400/20 hover:text-emerald-100"
+                          >
+                            <Check size={12} strokeWidth={2.5} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleReviewSpecies(item.id, 'rejected')}
+                            data-tooltip="Reject species"
+                            className="rounded-sm p-0.5 text-sky-100/70 hover:bg-red-400/20 hover:text-red-200"
+                          >
+                            <X size={12} strokeWidth={2.5} />
+                          </button>
+                        </motion.div>
+                      ) : (
+                        <motion.button
+                          key={`${item.kind}-${item.id}`}
+                          layout
+                          initial={{ opacity: 0, scale: 0.8 }}
+                          animate={{ opacity: 1, scale: 1 }}
+                          exit={{ opacity: 0, scale: 0.8 }}
+                          onClick={() => void handleRejectAiSuggestion(item)}
+                          data-tooltip={t('editor.metadata.organization.removeAiSuggestion')}
+                          className={clsx(
+                            'group flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium cursor-pointer transition-colors',
+                            item.kind === 'species'
+                              ? item.reviewState === 'accepted'
+                                ? 'bg-teal-400/20 text-teal-100 ring-1 ring-teal-300/30 hover:bg-teal-400/30'
+                                : 'bg-cyan-400/15 text-cyan-200 hover:bg-cyan-400/25'
+                              : 'bg-accent/15 text-accent hover:bg-accent/25',
+                          )}
                         >
-                          <X size={12} strokeWidth={2.5} />
-                        </button>
-                      </motion.div>
-                    ) : (
-                      <motion.button
-                        key={`${item.kind}-${item.id}`}
-                        layout
-                        initial={{ opacity: 0, scale: 0.8 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        exit={{ opacity: 0, scale: 0.8 }}
-                        onClick={() => void handleRejectAiSuggestion(item)}
-                        data-tooltip={t('editor.metadata.organization.removeAiSuggestion')}
-                        className={clsx(
-                          'group flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium cursor-pointer transition-colors',
-                          item.kind === 'species'
-                            ? item.reviewState === 'accepted'
-                              ? 'bg-teal-400/20 text-teal-100 ring-1 ring-teal-300/30 hover:bg-teal-400/30'
-                              : 'bg-cyan-400/15 text-cyan-200 hover:bg-cyan-400/25'
-                            : 'bg-accent/15 text-accent hover:bg-accent/25',
-                        )}
-                      >
-                        {item.label}
-                        {item.kind === 'species' && item.reviewState === 'accepted' && <Check size={11} strokeWidth={2.5} />}
-                        <X size={10} className="opacity-50 group-hover:opacity-100" />
-                      </motion.button>
-                    ))}
+                          {item.label}
+                          {item.kind === 'species' && item.reviewState === 'accepted' && (
+                            <Check size={11} strokeWidth={2.5} />
+                          )}
+                          <X size={10} className="opacity-50 group-hover:opacity-100" />
+                        </motion.button>
+                      ),
+                    )}
                   </AnimatePresence>
                 </div>
               </div>
@@ -632,6 +645,23 @@ export default function MetadataPanel() {
                 {t('editor.metadata.camera.title')}
               </Text>
               <div className="flex flex-col gap-2">
+                <div
+                  className="flex items-center gap-2 bg-surface border border-surface px-3 py-2 rounded-xl cursor-default"
+                  data-tooltip={cameraSetting.label}
+                >
+                  <span className="text-text-secondary opacity-90 flex items-center justify-center shrink-0">
+                    <Camera size={16} />
+                  </span>
+                  <Text
+                    as="span"
+                    variant={TextVariants.small}
+                    weight={TextWeights.medium}
+                    color={TextColors.primary}
+                    className="truncate"
+                  >
+                    {cameraSetting.value}
+                  </Text>
+                </div>
                 <div className="grid grid-cols-2 gap-2">
                   {cameraGridSettings.map((item: any) => {
                     const Icon = CAMERA_ICONS[item.key];
@@ -957,9 +987,14 @@ export default function MetadataPanel() {
                       >
                         <div className="p-3 border-t border-surface/50 space-y-2">
                           {derivatives.map((deriv) => (
-                            <div key={deriv.id} className="p-2.5 bg-bg-primary rounded-lg border border-border-color/30 text-xs">
+                            <div
+                              key={deriv.id}
+                              className="p-2.5 bg-bg-primary rounded-lg border border-border-color/30 text-xs"
+                            >
                               <div className="flex justify-between items-center mb-1">
-                                <span className="font-semibold capitalize text-accent">{deriv.operationKind.replace('_', ' ')}</span>
+                                <span className="font-semibold capitalize text-accent">
+                                  {deriv.operationKind.replace('_', ' ')}
+                                </span>
                                 <span className="text-emerald-400 uppercase font-medium">{deriv.state}</span>
                               </div>
                               <div className="text-text-secondary truncate mb-1">
