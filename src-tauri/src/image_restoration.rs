@@ -5,6 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{Emitter, Manager};
 
+/// RawNIND's exported ONNX graph has a fixed 4×512×512 Bayer input.
+const RAWNIND_BAYER_TILE_SIZE: u32 = 512;
+const RAWNIND_SOURCE_TILE_SIZE: u32 = RAWNIND_BAYER_TILE_SIZE * 2;
+
 /// Recipe and configuration parameters for a restoration operation.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -30,10 +34,9 @@ impl Default for RestorationRecipe {
             // Finish-stage adjustments are deliberately never applied here.
             microcontrast_strength: 0.0,
             detail_recovery: 0.0,
-            // rawnind-utnet2-bayer's ONNX graph has a static 512x512 input and
-            // Bayer tiling halves tile_size before feeding the model, so the
-            // default (model_id above) needs 1024, not nafnet-sidd-rgb's 768.
-            tile_size: 1024,
+            // Bayer tiling halves tile_size before feeding RawNIND's static
+            // 512×512 graph, so the source tile must be 1024 pixels.
+            tile_size: RAWNIND_SOURCE_TILE_SIZE,
             tile_overlap: 64,
         }
     }
@@ -65,6 +68,10 @@ pub fn validate_restoration_recipe(recipe: &RestorationRecipe) -> Result<(), Str
         "raw_denoise" if recipe.model_id != "rawnind-utnet2-bayer" => {
             Err("RAW denoise requires the RawNIND Bayer model".to_string())
         }
+        "raw_denoise" if recipe.tile_size != RAWNIND_SOURCE_TILE_SIZE => Err(format!(
+            "RawNIND requires a {}px source tile for its fixed {}×{} Bayer input",
+            RAWNIND_SOURCE_TILE_SIZE, RAWNIND_BAYER_TILE_SIZE, RAWNIND_BAYER_TILE_SIZE
+        )),
         "rgb_denoise" if recipe.model_id != "nafnet-sidd-rgb" => {
             Err("RGB denoise requires the NAFNet SIDD model".to_string())
         }
@@ -316,9 +323,16 @@ pub fn run_rawnind_restoration_tiled(
     let bayer_h = height / 2;
     let channel_size = bayer_w * bayer_h;
 
-    // We tile on the Bayer domain, so tile size is halved
+    // We tile on the Bayer domain, so the source tile is halved. Edge tiles
+    // are padded below to this fixed graph size before inference.
     let bayer_tile_size = tile_size / 2;
     let bayer_tile_overlap = tile_overlap / 2;
+    if bayer_tile_size != RAWNIND_BAYER_TILE_SIZE {
+        return Err(format!(
+            "RawNIND requires {}×{} Bayer tiles, got {}×{}",
+            RAWNIND_BAYER_TILE_SIZE, RAWNIND_BAYER_TILE_SIZE, bayer_tile_size, bayer_tile_size
+        ));
+    }
 
     let tiles = calculate_tiles(
         bayer_w as u32,
@@ -331,14 +345,24 @@ pub fn run_rawnind_restoration_tiled(
     let mut weight_accum = vec![0.0f32; (width * height) as usize];
 
     for (tx, ty, tw, th) in tiles {
-        // Output from model is full resolution, so we reconstruct it
-        let out_w = tw * 2;
-        let out_h = th * 2;
-
-        let mut input_tile = ndarray::Array4::<f32>::zeros((1, 4, th as usize, tw as usize));
-        for y in 0..th as usize {
-            for x in 0..tw as usize {
-                let src_idx = (ty as usize + y) * bayer_w + (tx as usize + x);
+        // The model outputs full-resolution RGB. It is static, so every input
+        // — including partial right/bottom edge tiles — must remain 512×512.
+        // Replicate the nearest valid Bayer sample into padding, then crop the
+        // predicted 1024×1024 RGB output to the actual image extent.
+        let valid_out_w = tw * 2;
+        let valid_out_h = th * 2;
+        let model_out_size = RAWNIND_BAYER_TILE_SIZE * 2;
+        let mut input_tile = ndarray::Array4::<f32>::zeros((
+            1,
+            4,
+            RAWNIND_BAYER_TILE_SIZE as usize,
+            RAWNIND_BAYER_TILE_SIZE as usize,
+        ));
+        for y in 0..RAWNIND_BAYER_TILE_SIZE as usize {
+            for x in 0..RAWNIND_BAYER_TILE_SIZE as usize {
+                let source_y = (ty as usize + y).min(bayer_h - 1);
+                let source_x = (tx as usize + x).min(bayer_w - 1);
+                let src_idx = source_y * bayer_w + source_x;
                 input_tile[[0, 0, y, x]] = packed_bayer[src_idx];
                 input_tile[[0, 1, y, x]] = packed_bayer[channel_size + src_idx];
                 input_tile[[0, 2, y, x]] = packed_bayer[channel_size * 2 + src_idx];
@@ -359,20 +383,20 @@ pub fn run_rawnind_restoration_tiled(
         if shape.len() != 4
             || shape[0] != 1
             || shape[1] != 3
-            || shape[2] != out_h as usize
-            || shape[3] != out_w as usize
+            || shape[2] != model_out_size as usize
+            || shape[3] != model_out_size as usize
         {
             return Err(format!(
                 "Model output shape mismatch. Expected [1, 3, {}, {}], got {:?}",
-                out_h, out_w, shape
+                model_out_size, model_out_size, shape
             ));
         }
 
-        for y in 0..out_h {
-            let wy = (std::f32::consts::PI * (y as f32 + 0.5) / out_h as f32).sin();
+        for y in 0..valid_out_h {
+            let wy = (std::f32::consts::PI * (y as f32 + 0.5) / valid_out_h as f32).sin();
             let wy = wy * wy; // Hann window
-            for x in 0..out_w {
-                let wx = (std::f32::consts::PI * (x as f32 + 0.5) / out_w as f32).sin();
+            for x in 0..valid_out_w {
+                let wx = (std::f32::consts::PI * (x as f32 + 0.5) / valid_out_w as f32).sin();
                 let wx = wx * wx; // Hann window
                 let w = (wx * wy).max(0.01);
 
