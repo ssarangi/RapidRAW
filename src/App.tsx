@@ -577,7 +577,7 @@ function App() {
             </span>
             <button
               type="button"
-              className="shrink-0 rounded bg-accent px-2 py-1 text-xs font-medium text-white hover:brightness-110"
+              className="shrink-0 rounded bg-[#d89538]! px-2 py-1 text-xs font-semibold text-[#19130b]! shadow-sm hover:bg-[#e9ab4a]!"
               onClick={() => setUI({ activeView: 'people' })}
             >
               Review faces
