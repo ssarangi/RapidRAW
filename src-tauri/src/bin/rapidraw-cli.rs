@@ -1258,7 +1258,11 @@ fn sha256_file(path: &std::path::Path) -> Result<String, String> {
 fn verify_visual_runtime(directory: &std::path::Path, model_id: &str) -> Result<(), String> {
     let model_name = match model_id {
         "ram-plus-onnx" => "model.onnx",
-        rapidraw_lib::visual_model_registry::BIOCLIP_V1_MODEL_ID => "vision_encoder.onnx",
+        id if [
+            rapidraw_lib::visual_model_registry::BIOCLIP_V1_MODEL_ID,
+            rapidraw_lib::visual_model_registry::BIOCLIP_V2_MODEL_ID,
+        ]
+        .contains(&id) => "vision_encoder.onnx",
         "rawnind-utnet2-bayer" => "rawnind_bayer.onnx",
         "nafnet-sidd-rgb" => "nafnet_sidd.onnx",
         _ => return Err("No runtime adapter is available in this build".to_string()),
@@ -1268,7 +1272,12 @@ fn verify_visual_runtime(directory: &std::path::Path, model_id: &str) -> Result<
         .and_then(|builder| builder.commit_from_file(&model_path))
         .map_err(|error| format!("ONNX session could not be created: {error}"))?;
 
-    if model_id == rapidraw_lib::visual_model_registry::BIOCLIP_V1_MODEL_ID {
+    if [
+        rapidraw_lib::visual_model_registry::BIOCLIP_V1_MODEL_ID,
+        rapidraw_lib::visual_model_registry::BIOCLIP_V2_MODEL_ID,
+    ]
+    .contains(&model_id)
+    {
         let labels = directory.join("species_labels.json");
         let embeddings = directory.join("species_embeddings.bin");
         let labels_json = fs::read_to_string(labels)

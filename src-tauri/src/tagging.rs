@@ -159,8 +159,19 @@ pub(crate) fn generate_tags_with_ram_plus(
 
 pub(crate) struct BioClipModels {
     session: std::sync::Mutex<ort::session::Session>,
-    embeddings: Vec<Vec<f32>>,
+    model_id: &'static str,
+    /// One contiguous, normalized taxonomy matrix. This avoids a separate heap
+    /// allocation per species when loading the full BioCLIP 2 taxonomy.
+    embeddings: Vec<f32>,
+    embedding_dimension: usize,
     labels: Vec<BioClipTaxon>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BioClipTaxonomyManifest {
+    embedding_dimension: usize,
+    embedding_parts: Vec<String>,
 }
 
 /// Number of taxonomy neighbours retained while deciding whether a species
@@ -241,23 +252,35 @@ pub(crate) fn load_bioclip_models(app_handle: &tauri::AppHandle) -> Result<BioCl
 }
 
 fn load_bioclip_models_in_dir(visual_models_dir: &Path) -> Result<BioClipModels, String> {
+    let mut errors = Vec::new();
+    for model_id in crate::visual_model_registry::BIOCLIP_MODEL_IDS_BY_ACCURACY {
+        match load_bioclip_model_in_dir(visual_models_dir, model_id) {
+            Ok(models) => return Ok(models),
+            Err(error) => errors.push(format!("{model_id}: {error}")),
+        }
+    }
+    Err(format!(
+        "No compatible BioCLIP model is installed ({})",
+        errors.join("; ")
+    ))
+}
+
+fn load_bioclip_model_in_dir(
+    visual_models_dir: &Path,
+    model_id: &'static str,
+) -> Result<BioClipModels, String> {
     let model_path = crate::visual_model_registry::installed_visual_model_path_in_dir(
         visual_models_dir,
-        crate::visual_model_registry::BIOCLIP_V1_MODEL_ID,
+        model_id,
         "vision_encoder.onnx",
-    )?;
-    let embeddings_path = crate::visual_model_registry::installed_visual_model_path_in_dir(
-        visual_models_dir,
-        crate::visual_model_registry::BIOCLIP_V1_MODEL_ID,
-        "species_embeddings.bin",
     )?;
     let labels_path = crate::visual_model_registry::installed_visual_model_path_in_dir(
         visual_models_dir,
-        crate::visual_model_registry::BIOCLIP_V1_MODEL_ID,
+        model_id,
         "species_labels.json",
     )?;
 
-    if !model_path.exists() || !embeddings_path.exists() || !labels_path.exists() {
+    if !model_path.exists() || !labels_path.exists() {
         return Err("BioCLIP artifacts missing".into());
     }
 
@@ -270,35 +293,92 @@ fn load_bioclip_models_in_dir(visual_models_dir: &Path) -> Result<BioClipModels,
         "BioCLIP species_labels.json must contain taxonomy records with scientificName".to_string()
     })?;
 
-    let embeddings_bytes = std::fs::read(&embeddings_path).map_err(|e| e.to_string())?;
-    if embeddings_bytes.len() % 4 != 0 {
-        return Err("BioCLIP embeddings file is not a packed f32 array".to_string());
-    }
-    let total_f32 = embeddings_bytes.len() / 4;
+    let pack_dir = model_path
+        .parent()
+        .ok_or("BioCLIP model path has no parent directory")?;
+    let manifest_path = pack_dir.join("taxonomy_manifest.json");
+    let (embedding_dimension, embedding_paths) = if manifest_path.exists() {
+        let manifest: BioClipTaxonomyManifest =
+            serde_json::from_slice(&std::fs::read(&manifest_path).map_err(|e| e.to_string())?)
+                .map_err(|_| "BioCLIP taxonomy_manifest.json is invalid".to_string())?;
+        if manifest.embedding_dimension == 0 || manifest.embedding_parts.is_empty() {
+            return Err("BioCLIP taxonomy manifest has no embeddings".to_string());
+        }
+        (
+            manifest.embedding_dimension,
+            manifest
+                .embedding_parts
+                .into_iter()
+                .map(|part| pack_dir.join(part))
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        (
+            0,
+            vec![
+                crate::visual_model_registry::installed_visual_model_path_in_dir(
+                    visual_models_dir,
+                    model_id,
+                    "species_embeddings.bin",
+                )?,
+            ],
+        )
+    };
 
-    if labels.is_empty() || total_f32 % labels.len() != 0 {
+    let total_bytes = embedding_paths.iter().try_fold(0usize, |total, path| {
+        let bytes = std::fs::metadata(path)
+            .map_err(|_| format!("BioCLIP taxonomy part is missing: {}", path.display()))?
+            .len() as usize;
+        total
+            .checked_add(bytes)
+            .ok_or_else(|| "BioCLIP taxonomy is too large".to_string())
+    })?;
+    if total_bytes % 4 != 0 {
+        return Err("BioCLIP embeddings are not a packed f32 array".to_string());
+    }
+    let total_f32 = total_bytes / 4;
+    let dim = if embedding_dimension == 0 {
+        if labels.is_empty() || total_f32 % labels.len() != 0 {
+            return Err("Invalid BioCLIP embeddings/labels shape".into());
+        }
+        total_f32 / labels.len()
+    } else {
+        embedding_dimension
+    };
+    if labels.is_empty() || total_f32 != labels.len() * dim {
         return Err("Invalid BioCLIP embeddings/labels shape".into());
     }
 
-    let dim = total_f32 / labels.len();
-    let mut embeddings = Vec::with_capacity(labels.len());
-
-    for chunk in embeddings_bytes.chunks_exact(dim * 4) {
-        let mut vec = Vec::with_capacity(dim);
-        for i in 0..dim {
-            let start = i * 4;
-            let val = f32::from_le_bytes(chunk[start..start + 4].try_into().unwrap());
+    let mut embeddings = Vec::with_capacity(total_f32);
+    for path in embedding_paths {
+        let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+        for chunk in bytes.chunks_exact(4) {
+            let val = f32::from_le_bytes(chunk.try_into().unwrap());
             if !val.is_finite() {
                 return Err("BioCLIP embeddings contain a non-finite value".to_string());
             }
-            vec.push(val);
+            embeddings.push(val);
         }
-        embeddings.push(vec);
+    }
+    for embedding in embeddings.chunks_exact_mut(dim) {
+        let norm = embedding
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        if !norm.is_finite() || norm <= 1e-8 {
+            return Err("BioCLIP embeddings contain a zero-length vector".to_string());
+        }
+        for value in embedding {
+            *value /= norm;
+        }
     }
 
     Ok(BioClipModels {
         session: std::sync::Mutex::new(session),
+        model_id,
         embeddings,
+        embedding_dimension: dim,
         labels,
     })
 }
@@ -340,11 +420,7 @@ pub(crate) fn bioclip_embedding(
         .iter()
         .copied()
         .collect::<Vec<_>>();
-    let expected_dimension = models
-        .embeddings
-        .first()
-        .map(Vec::len)
-        .ok_or("BioCLIP taxonomy is empty")?;
+    let expected_dimension = models.embedding_dimension;
     if img_emb.len() != expected_dimension || img_emb.iter().any(|value| !value.is_finite()) {
         return Err(format!(
             "BioCLIP encoder emitted {} values; taxonomy expects {expected_dimension}",
@@ -366,10 +442,13 @@ pub(crate) fn run_bioclip_ranked_inference(
 
     let mut candidates = Vec::with_capacity(BIOCLIP_CANDIDATE_COUNT);
 
-    for (i, tax_emb) in models.embeddings.iter().enumerate() {
+    for (i, tax_emb) in models
+        .embeddings
+        .chunks_exact(models.embedding_dimension)
+        .enumerate()
+    {
         let dot: f32 = img_emb.iter().zip(tax_emb).map(|(a, b)| a * b).sum();
-        let norm_tax: f32 = tax_emb.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
-        let score = dot / (norm_img * norm_tax);
+        let score = dot / norm_img;
         // Keep a fixed-size leaderboard. Tree-of-Life taxonomies can contain
         // hundreds of thousands of labels, so cloning every taxon for every
         // image would make the ambiguity check itself needlessly expensive.
@@ -409,7 +488,13 @@ fn store_bioclip_suggestion(
     let Ok(inference) = inference_result else {
         return;
     };
-    store_bioclip_inference(db_path, image_id, &inference, model_revision);
+    store_bioclip_inference(
+        db_path,
+        image_id,
+        &inference,
+        bioclip.model_id,
+        model_revision,
+    );
 }
 
 /// Persists only a clearly separated species candidate.  A near tie is more
@@ -418,6 +503,7 @@ fn store_bioclip_inference(
     db_path: &Path,
     image_id: i64,
     inference: &BioClipInference,
+    model_id: &str,
     model_revision: &str,
 ) {
     let Ok(conn) = rusqlite::Connection::open(db_path) else {
@@ -429,7 +515,7 @@ fn store_bioclip_inference(
         .as_secs() as i64;
     let _ = conn.execute(
         "DELETE FROM species_classifications WHERE image_id = ?1 AND model_id = ?2 AND review_state = 'suggested'",
-        rusqlite::params![image_id, crate::visual_model_registry::BIOCLIP_V1_MODEL_ID],
+        rusqlite::params![image_id, model_id],
     );
     // Remove a prior unreviewed guess even when this pass is ambiguous.  We do
     // not leave a stale species name visible merely because the new evidence is
@@ -445,7 +531,7 @@ fn store_bioclip_inference(
          VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 'suggested', ?8, ?8)",
         rusqlite::params![
             image_id,
-            crate::visual_model_registry::BIOCLIP_V1_MODEL_ID,
+            model_id,
             model_revision,
             &taxon.scientific_name,
             taxon.common_name.as_deref(),
@@ -513,10 +599,10 @@ pub fn run_catalog_ram_plus_tagging_headless(
     let bioclip_models = include_bioclip
         .then(|| load_bioclip_models_in_dir(visual_models_dir))
         .unwrap_or_else(|| Err("BioCLIP disabled for this job".to_string()));
-    let bioclip_revision = bioclip_models.as_ref().ok().and_then(|_| {
+    let bioclip_revision = bioclip_models.as_ref().ok().and_then(|models| {
         crate::visual_model_registry::visual_model_pack_revision_in_dir(
             visual_models_dir,
-            crate::visual_model_registry::BIOCLIP_V1_MODEL_ID,
+            models.model_id,
         )
         .ok()
     });
@@ -781,10 +867,10 @@ pub fn start_catalog_ram_plus_tagging(
         let ai_semaphore = worker_state.state::<AppState>().ai_job_semaphore.clone();
         // BioCLIP is optional, but loading it must not block the Tauri command/UI thread.
         let bioclip_models = load_bioclip_models(&species_app_handle);
-        let bioclip_revision = bioclip_models.as_ref().ok().and_then(|_| {
+        let bioclip_revision = bioclip_models.as_ref().ok().and_then(|models| {
             crate::visual_model_registry::visual_model_pack_revision_in_dir(
                 &visual_models_dir,
-                crate::visual_model_registry::BIOCLIP_V1_MODEL_ID,
+                models.model_id,
             )
             .ok()
         });
@@ -891,6 +977,7 @@ pub fn start_catalog_ram_plus_tagging(
                                             &worker_db_path,
                                             image_id,
                                             &inference,
+                                            bioclip.model_id,
                                             bioclip_revision,
                                         );
                                     }
