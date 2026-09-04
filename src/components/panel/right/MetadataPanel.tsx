@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Camera, Check, ChevronDown, ChevronRight, Plus, Star, Tag, X, User } from 'lucide-react';
+import { Camera, Check, ChevronDown, ChevronRight, FolderOpen, Plus, Sparkles, Star, Tag, X, User } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -451,14 +451,14 @@ export default function MetadataPanel() {
   const [isDerivativesExpanded, setIsDerivativesExpanded] = useState(true);
 
   useEffect(() => {
-    if (!selectedImage?.id) {
+    if (!catalogImageId) {
       setDerivatives([]);
       return;
     }
-    invoke('list_image_derivatives', { imageId: selectedImage.id })
+    invoke('list_image_derivatives', { imageId: catalogImageId })
       .then((res: any) => setDerivatives(res || []))
       .catch((err) => console.error('Failed to load derivatives:', err));
-  }, [selectedImage?.id]);
+  }, [catalogImageId]);
 
   const isVirtualCopy = fullPath.includes('?vc=');
   const basePath = fullPath.split('?vc=')[0];
@@ -969,7 +969,7 @@ export default function MetadataPanel() {
                       color={TextColors.primary}
                       className="flex items-center gap-2"
                     >
-                      <Tag size={16} /> AI Derivatives
+                      <Sparkles size={16} /> AI Derivatives
                     </Text>
                     <Text color={TextColors.secondary}>
                       {isDerivativesExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
@@ -997,27 +997,42 @@ export default function MetadataPanel() {
                                 </span>
                                 <span className="text-emerald-400 uppercase font-medium">{deriv.state}</span>
                               </div>
-                              <div className="text-text-secondary truncate mb-1">
-                                Path: <span className="text-text-primary">{deriv.outputPath}</span>
-                              </div>
                               <div className="text-text-secondary mb-2">
-                                Model: {deriv.modelId} ({deriv.width}x{deriv.height})
+                                {deriv.outputFormat?.toUpperCase() || 'TIFF'} · {deriv.modelId} · {deriv.width} ×{' '}
+                                {deriv.height}
                               </div>
                               {deriv.state === 'completed' && (
-                                <button
-                                  className="w-full py-1 bg-surface-hover border border-border-color/40 text-text-primary rounded text-xs hover:bg-card-active transition-colors"
-                                  onClick={() => {
-                                    useEditorStore.getState().setSelectedImage({
-                                      path: deriv.outputPath,
-                                      name: deriv.outputPath.split(/[\\/]/).pop() || 'derivative.tiff',
-                                      width: deriv.width || 0,
-                                      height: deriv.height || 0,
-                                    } as any);
-                                    useUIStore.getState().setActivePanel('editor');
-                                  }}
-                                >
-                                  Open in Editor
-                                </button>
+                                <div className="grid grid-cols-2 gap-2">
+                                  <button
+                                    className="py-1.5 bg-surface-hover border border-border-color/40 text-text-primary rounded text-xs hover:bg-card-active transition-colors"
+                                    onClick={() => {
+                                      useEditorStore.getState().setEditor({
+                                        selectedImage: {
+                                          exif: {},
+                                          height: deriv.height || 0,
+                                          isRaw: false,
+                                          isReady: false,
+                                          metadata: null,
+                                          path: deriv.outputPath,
+                                          thumbnailUrl: '',
+                                          width: deriv.width || 0,
+                                        },
+                                        finalPreviewUrl: null,
+                                        uncroppedAdjustedPreviewUrl: null,
+                                        histogram: null,
+                                        waveform: null,
+                                      });
+                                    }}
+                                  >
+                                    Open restored image
+                                  </button>
+                                  <button
+                                    className="inline-flex items-center justify-center gap-1 py-1.5 bg-bg-primary border border-border-color/40 text-text-secondary rounded text-xs hover:bg-card-active hover:text-text-primary transition-colors"
+                                    onClick={() => invoke(Invokes.ShowInFinder, { path: deriv.outputPath })}
+                                  >
+                                    <FolderOpen size={13} /> Show in folder
+                                  </button>
+                                </div>
                               )}
                             </div>
                           ))}
