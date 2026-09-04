@@ -728,26 +728,36 @@ export default function PeopleView() {
         </div>
       )}
       {clusters.length > 0 && (
-        <div className="space-y-2">
-          <Text variant={TextVariants.small} color={TextColors.secondary}>
-            Review & name similarity groups
-          </Text>
-          <div className="mt-2 flex gap-2 overflow-x-auto">
+        <section className="mb-6 rounded-lg border border-border-color bg-bg-primary/65 p-3">
+          <div className="mb-3 flex items-end justify-between gap-3">
+            <div>
+              <Text variant={TextVariants.heading}>Review & name similarity groups</Text>
+              <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-0.5">
+                Name a group once to confirm every matching face in it.
+              </Text>
+            </div>
+            <Text as="span" variant={TextVariants.small} color={TextColors.secondary} className="shrink-0">
+              {clusters.length} group{clusters.length === 1 ? '' : 's'}
+            </Text>
+          </div>
+          <div className="grid grid-cols-[repeat(auto-fill,minmax(148px,1fr))] gap-3">
             {clusters.map((cluster) => {
               const cropSrc =
                 cluster.representativeThumbnailDataUrl ||
                 (cluster.representativeCropPath ? convertFileSrc(cluster.representativeCropPath) : null);
               return (
-                <div key={cluster.id} className="w-28 shrink-0">
-                  <div className="w-28 h-28 rounded-md border border-border-color overflow-hidden bg-surface flex items-center justify-center mb-1.5">
+                <div key={cluster.id} className="min-w-0 rounded-md border border-border-color bg-bg-secondary p-2.5">
+                  <div className="aspect-square w-full overflow-hidden rounded-md border border-border-color bg-surface flex items-center justify-center">
                     {cropSrc ? (
                       <img src={cropSrc} className="w-full h-full object-cover select-none" alt="Face cluster" />
                     ) : (
                       <Loader2 size={16} className="animate-spin text-text-secondary" />
                     )}
                   </div>
-                  <Text variant={TextVariants.small}>{cluster.faceCount} faces</Text>
-                  <div className="mt-1 w-40">
+                  <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-2">
+                    {cluster.faceCount} face{cluster.faceCount === 1 ? '' : 's'}
+                  </Text>
+                  <div className="mt-1.5 w-full">
                     <PersonNameCombobox
                       idPrefix={`face-cluster-${cluster.id}`}
                       hasPeople={people.length > 0}
@@ -759,7 +769,7 @@ export default function PeopleView() {
               );
             })}
           </div>
-        </div>
+        </section>
       )}
       <div className="mb-5 flex flex-wrap gap-2">
         <input
