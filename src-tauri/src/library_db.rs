@@ -3866,6 +3866,23 @@ pub fn start_catalog_scan(
                 );
                 let _ = app_for_task.emit("catalog-scan-complete", scan);
 
+                // A scan only indexes files. Schedule metadata extraction as
+                // its own background job so catalog items receive EXIF and
+                // sidecar state without holding the scan (or its UI) open.
+                // This must not depend on AI tagging being enabled: camera
+                // metadata is core catalog data, including for RAW files.
+                let metadata_app_handle = app_for_task.clone();
+                let metadata_state = metadata_app_handle.state::<crate::AppState>();
+                if let Err(error) = start_catalog_metadata_extraction(
+                    Some(root_id),
+                    metadata_app_handle,
+                    metadata_state,
+                ) {
+                    eprintln!(
+                        "Failed to auto-start metadata extraction after catalog scan: {error}"
+                    );
+                }
+
                 // Genre/subject tags (RAM++, plus the BioCLIP species pass
                 // that rides along in the same job) were previously
                 // catalog-only-manual: a user had to notice and click the
