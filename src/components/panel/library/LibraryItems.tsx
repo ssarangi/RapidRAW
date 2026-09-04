@@ -26,6 +26,27 @@ interface ImageLayer {
   opacity: number;
 }
 
+function formatShutterSpeed(value: unknown): string {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+
+  const fraction = /^(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)$/.exec(raw);
+  const numeric = fraction
+    ? Number(fraction[1]) / Number(fraction[2])
+    : /^\d+(?:\.\d+)?$/.test(raw)
+      ? Number(raw)
+      : Number.NaN;
+  if (!Number.isFinite(numeric) || numeric <= 0) return raw;
+
+  if (numeric < 1) {
+    const denominator = Math.round(1 / numeric);
+    return denominator > 1 ? `1/${denominator}` : '1s';
+  }
+
+  const precision = numeric >= 10 ? 1 : 2;
+  return `${numeric.toFixed(precision).replace(/\.0+$/, '').replace(/(\.\d*?)0+$/, '$1')}s`;
+}
+
 const ThumbnailComponent = ({
   isActive,
   isSelected,
@@ -85,7 +106,7 @@ const ThumbnailComponent = ({
     let fNum = e.FNumber ? String(e.FNumber) : '';
     if (fNum && !fNum.toLowerCase().startsWith('f')) fNum = `f/${fNum}`;
     return {
-      shutter: e.ExposureTime || '',
+      shutter: formatShutterSpeed(e.ExposureTime),
       fNumber: fNum,
       iso: e.PhotographicSensitivity || e.ISOSpeedRatings || '',
       focal: e.FocalLengthIn35mmFilm || e.FocalLength || '',
@@ -159,6 +180,8 @@ const ThumbnailComponent = ({
 
   const isAlways = exifOverlay === ExifOverlay.Always;
   const isHover = exifOverlay === ExifOverlay.Hover;
+  const exifDetailClass = 'text-[10px] font-medium tracking-normal text-text-primary/90';
+  const exifIconClass = 'h-3 w-3 shrink-0 text-text-primary/85';
 
   const hasEditIcon = !!showEditIcon;
   const hasColorLabel = !!colorLabel;
@@ -328,26 +351,26 @@ const ThumbnailComponent = ({
             </div>
             <div className="pt-1.5 pb-0.5 flex flex-wrap items-center gap-x-2.5 shrink-0">
               <div className="flex items-center gap-1">
-                <IconShutter className="w-2.5 h-2.5" />
-                <Text variant={TextVariants.small} className="text-[9px] font-medium tracking-wide">
+                <IconShutter className={exifIconClass} />
+                <Text variant={TextVariants.small} className={exifDetailClass}>
                   {shutter || '-'}
                 </Text>
               </div>
               <div className="flex items-center gap-1">
-                <IconAperture className="w-2.5 h-2.5" />
-                <Text variant={TextVariants.small} className="text-[9px] font-medium tracking-wide">
+                <IconAperture className={exifIconClass} />
+                <Text variant={TextVariants.small} className={exifDetailClass}>
                   {fNumber || '-'}
                 </Text>
               </div>
               <div className="flex items-center gap-1">
-                <IconIso className="w-2.5 h-2.5" />
-                <Text variant={TextVariants.small} className="text-[9px] font-medium tracking-wide">
+                <IconIso className={exifIconClass} />
+                <Text variant={TextVariants.small} className={exifDetailClass}>
                   {iso || '-'}
                 </Text>
               </div>
               <div className="flex items-center gap-1">
-                <IconFocalLength className="w-2.5 h-2.5" />
-                <Text variant={TextVariants.small} className="text-[9px] font-medium tracking-wide">
+                <IconFocalLength className={exifIconClass} />
+                <Text variant={TextVariants.small} className={exifDetailClass}>
                   {focal ? (String(focal).endsWith('mm') ? focal : `${focal}mm`) : '-'}
                 </Text>
               </div>
@@ -414,35 +437,35 @@ const ThumbnailComponent = ({
               )}
             >
               <div
-                className="flex items-center gap-1 text-text-secondary"
+                className="flex items-center gap-1 text-text-primary/85"
                 data-tooltip={t('library.items.tooltipShutterSpeed')}
               >
-                <IconShutter className="w-2.5 h-2.5" />
-                <Text variant={TextVariants.small} className="text-[9px] font-medium tracking-wide">
+                <IconShutter className={exifIconClass} />
+                <Text variant={TextVariants.small} className={exifDetailClass}>
                   {shutter || '-'}
                 </Text>
               </div>
               <div
-                className="flex items-center gap-1 text-text-secondary"
+                className="flex items-center gap-1 text-text-primary/85"
                 data-tooltip={t('library.items.tooltipAperture')}
               >
-                <IconAperture className="w-2.5 h-2.5" />
-                <Text variant={TextVariants.small} className="text-[9px] font-medium tracking-wide">
+                <IconAperture className={exifIconClass} />
+                <Text variant={TextVariants.small} className={exifDetailClass}>
                   {fNumber || '-'}
                 </Text>
               </div>
-              <div className="flex items-center gap-1 text-text-secondary" data-tooltip={t('library.items.tooltipIso')}>
-                <IconIso className="w-2.5 h-2.5" />
-                <Text variant={TextVariants.small} className="text-[9px] font-medium tracking-wide">
+              <div className="flex items-center gap-1 text-text-primary/85" data-tooltip={t('library.items.tooltipIso')}>
+                <IconIso className={exifIconClass} />
+                <Text variant={TextVariants.small} className={exifDetailClass}>
                   {iso || '-'}
                 </Text>
               </div>
               <div
-                className="flex items-center gap-1 text-text-secondary"
+                className="flex items-center gap-1 text-text-primary/85"
                 data-tooltip={t('library.items.tooltipFocalLength')}
               >
-                <IconFocalLength className="w-2.5 h-2.5" />
-                <Text variant={TextVariants.small} className="text-[9px] font-medium tracking-wide">
+                <IconFocalLength className={exifIconClass} />
+                <Text variant={TextVariants.small} className={exifDetailClass}>
                   {focal ? (String(focal).endsWith('mm') ? focal : `${focal}mm`) : '-'}
                 </Text>
               </div>
@@ -516,7 +539,7 @@ const ListItemComponent = ({
     let fNum = e.FNumber ? String(e.FNumber) : '';
     if (fNum && !fNum.toLowerCase().startsWith('f')) fNum = `f/${fNum}`;
     return {
-      shutter: e.ExposureTime || '',
+      shutter: formatShutterSpeed(e.ExposureTime),
       fNumber: fNum,
       iso: e.PhotographicSensitivity || e.ISOSpeedRatings || '',
       focal: e.FocalLengthIn35mmFilm || e.FocalLength || '',
