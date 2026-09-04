@@ -163,6 +163,59 @@ pub(crate) struct BioClipModels {
     labels: Vec<BioClipTaxon>,
 }
 
+/// Number of taxonomy neighbours retained while deciding whether a species
+/// name is distinguishable from visually similar organisms.
+const BIOCLIP_CANDIDATE_COUNT: usize = 5;
+/// Raw cosine similarity is not a probability. These are deliberately
+/// conservative admission gates for a *species suggestion*, not an automatic
+/// acceptance threshold.
+const BIOCLIP_MIN_SPECIES_SIMILARITY: f32 = 0.35;
+const BIOCLIP_MIN_SPECIES_MARGIN: f32 = 0.04;
+
+#[derive(Clone, Debug)]
+pub(crate) struct BioClipCandidate {
+    pub taxon: BioClipTaxon,
+    pub similarity: f32,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct BioClipInference {
+    candidates: Vec<BioClipCandidate>,
+}
+
+impl BioClipInference {
+    fn best(&self) -> Option<&BioClipCandidate> {
+        self.candidates.first()
+    }
+
+    fn runner_up_similarity(&self) -> Option<f32> {
+        let best = self.best()?;
+        self.candidates
+            .iter()
+            .skip(1)
+            .find(|candidate| candidate.taxon.scientific_name != best.taxon.scientific_name)
+            .map(|candidate| candidate.similarity)
+    }
+
+    pub(crate) fn is_confident_species(&self) -> bool {
+        let Some(best) = self.best() else {
+            return false;
+        };
+        let margin = self
+            .runner_up_similarity()
+            .map(|score| best.similarity - score)
+            // A taxonomy with a single label has no competing species, so its
+            // score still has to clear the base threshold.
+            .unwrap_or(BIOCLIP_MIN_SPECIES_MARGIN);
+        best.similarity >= BIOCLIP_MIN_SPECIES_SIMILARITY && margin >= BIOCLIP_MIN_SPECIES_MARGIN
+    }
+
+    pub(crate) fn best_taxon_and_similarity(&self) -> Option<(&BioClipTaxon, f32)> {
+        self.best()
+            .map(|candidate| (&candidate.taxon, candidate.similarity))
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BioClipTaxon {
@@ -190,17 +243,17 @@ pub(crate) fn load_bioclip_models(app_handle: &tauri::AppHandle) -> Result<BioCl
 fn load_bioclip_models_in_dir(visual_models_dir: &Path) -> Result<BioClipModels, String> {
     let model_path = crate::visual_model_registry::installed_visual_model_path_in_dir(
         visual_models_dir,
-        "bioclip-v1",
+        crate::visual_model_registry::BIOCLIP_V1_MODEL_ID,
         "vision_encoder.onnx",
     )?;
     let embeddings_path = crate::visual_model_registry::installed_visual_model_path_in_dir(
         visual_models_dir,
-        "bioclip-v1",
+        crate::visual_model_registry::BIOCLIP_V1_MODEL_ID,
         "species_embeddings.bin",
     )?;
     let labels_path = crate::visual_model_registry::installed_visual_model_path_in_dir(
         visual_models_dir,
-        "bioclip-v1",
+        crate::visual_model_registry::BIOCLIP_V1_MODEL_ID,
         "species_labels.json",
     )?;
 
@@ -267,10 +320,10 @@ fn bioclip_input(image: &image::DynamicImage) -> ndarray::Array<f32, ndarray::Di
 }
 
 /// Runs BioCLIP's vision encoder and returns the raw image embedding, before
-/// any taxonomy lookup. Exposed separately from `run_bioclip_inference` so
+/// any taxonomy lookup. Exposed separately from taxonomy classification so
 /// callers that just want "how visually/taxonomically similar are these two
-/// images" (e.g. vetoing a perceptual-hash duplicate match) don't have to go
-/// through species classification to get there.
+/// images" (e.g. vetoing a perceptual-hash duplicate match) do not need to
+/// evaluate the candidate taxonomy.
 pub(crate) fn bioclip_embedding(
     image: &image::DynamicImage,
     models: &BioClipModels,
@@ -301,27 +354,39 @@ pub(crate) fn bioclip_embedding(
     Ok(img_emb)
 }
 
-pub(crate) fn run_bioclip_inference(
+/// Returns the closest taxonomy candidates in descending similarity.  Callers
+/// must use `is_confident_species` before presenting the top candidate as a
+/// species name; close neighbours are deliberately treated as ambiguous.
+pub(crate) fn run_bioclip_ranked_inference(
     image: &image::DynamicImage,
     models: &BioClipModels,
-) -> Result<(BioClipTaxon, f32), String> {
+) -> Result<BioClipInference, String> {
     let img_emb = bioclip_embedding(image, models)?;
     let norm_img: f32 = img_emb.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
 
-    let mut best_idx = 0;
-    let mut best_score = -1.0;
+    let mut candidates = Vec::with_capacity(BIOCLIP_CANDIDATE_COUNT);
 
     for (i, tax_emb) in models.embeddings.iter().enumerate() {
         let dot: f32 = img_emb.iter().zip(tax_emb).map(|(a, b)| a * b).sum();
         let norm_tax: f32 = tax_emb.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-8);
         let score = dot / (norm_img * norm_tax);
-        if score > best_score {
-            best_score = score;
-            best_idx = i;
+        // Keep a fixed-size leaderboard. Tree-of-Life taxonomies can contain
+        // hundreds of thousands of labels, so cloning every taxon for every
+        // image would make the ambiguity check itself needlessly expensive.
+        let beats_current_cutoff = candidates
+            .last()
+            .map(|candidate: &BioClipCandidate| score > candidate.similarity)
+            .unwrap_or(true);
+        if candidates.len() < BIOCLIP_CANDIDATE_COUNT || beats_current_cutoff {
+            candidates.push(BioClipCandidate {
+                taxon: models.labels[i].clone(),
+                similarity: score,
+            });
+            candidates.sort_by(|left, right| right.similarity.total_cmp(&left.similarity));
+            candidates.truncate(BIOCLIP_CANDIDATE_COUNT);
         }
     }
-
-    Ok((models.labels[best_idx].clone(), best_score))
+    Ok(BioClipInference { candidates })
 }
 
 fn store_bioclip_suggestion(
@@ -339,16 +404,22 @@ fn store_bioclip_suggestion(
         return;
     };
     let permit = tauri::async_runtime::block_on(ai_semaphore.clone().acquire_owned()).ok();
-    let inference_result = run_bioclip_inference(image, bioclip);
+    let inference_result = run_bioclip_ranked_inference(image, bioclip);
     drop(permit);
-    let Ok((taxon, confidence)) = inference_result else {
+    let Ok(inference) = inference_result else {
         return;
     };
-    // Cosine similarity is not calibrated. Species candidates remain suggestions
-    // until a reviewer accepts them.
-    if confidence < 0.25 {
-        return;
-    }
+    store_bioclip_inference(db_path, image_id, &inference, model_revision);
+}
+
+/// Persists only a clearly separated species candidate.  A near tie is more
+/// useful as "needs another look" than as an incorrect name in the catalog.
+fn store_bioclip_inference(
+    db_path: &Path,
+    image_id: i64,
+    inference: &BioClipInference,
+    model_revision: &str,
+) {
     let Ok(conn) = rusqlite::Connection::open(db_path) else {
         return;
     };
@@ -357,18 +428,28 @@ fn store_bioclip_suggestion(
         .unwrap_or_default()
         .as_secs() as i64;
     let _ = conn.execute(
-        "DELETE FROM species_classifications WHERE image_id = ?1 AND model_id = 'bioclip-v1' AND review_state = 'suggested'",
-        [image_id],
+        "DELETE FROM species_classifications WHERE image_id = ?1 AND model_id = ?2 AND review_state = 'suggested'",
+        rusqlite::params![image_id, crate::visual_model_registry::BIOCLIP_V1_MODEL_ID],
     );
+    // Remove a prior unreviewed guess even when this pass is ambiguous.  We do
+    // not leave a stale species name visible merely because the new evidence is
+    // insufficient to replace it. Accepted/rejected reviewer decisions stay.
+    if !inference.is_confident_species() {
+        return;
+    }
+    let Some((taxon, confidence)) = inference.best_taxon_and_similarity() else {
+        return;
+    };
     let _ = conn.execute(
         "INSERT INTO species_classifications(image_id, model_id, model_revision, scientific_name, common_name, taxon_rank, confidence, review_state, created_at, updated_at)
-         VALUES(?1, 'bioclip-v1', ?2, ?3, ?4, ?5, ?6, 'suggested', ?7, ?7)",
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 'suggested', ?8, ?8)",
         rusqlite::params![
             image_id,
+            crate::visual_model_registry::BIOCLIP_V1_MODEL_ID,
             model_revision,
-            taxon.scientific_name,
-            taxon.common_name,
-            taxon.taxon_rank,
+            &taxon.scientific_name,
+            taxon.common_name.as_deref(),
+            &taxon.taxon_rank,
             confidence as f64,
             now,
         ],
@@ -435,7 +516,7 @@ pub fn run_catalog_ram_plus_tagging_headless(
     let bioclip_revision = bioclip_models.as_ref().ok().and_then(|_| {
         crate::visual_model_registry::visual_model_pack_revision_in_dir(
             visual_models_dir,
-            "bioclip-v1",
+            crate::visual_model_registry::BIOCLIP_V1_MODEL_ID,
         )
         .ok()
     });
@@ -703,7 +784,7 @@ pub fn start_catalog_ram_plus_tagging(
         let bioclip_revision = bioclip_models.as_ref().ok().and_then(|_| {
             crate::visual_model_registry::visual_model_pack_revision_in_dir(
                 &visual_models_dir,
-                "bioclip-v1",
+                crate::visual_model_registry::BIOCLIP_V1_MODEL_ID,
             )
             .ok()
         });
@@ -802,39 +883,16 @@ pub fn start_catalog_ram_plus_tagging(
                                         ai_semaphore.clone().acquire_owned(),
                                     )
                                     .ok();
-                                    let inference_result = run_bioclip_inference(&image, bioclip);
+                                    let inference_result =
+                                        run_bioclip_ranked_inference(&image, bioclip);
                                     drop(_permit);
-                                    if let Ok((taxon, confidence)) = inference_result {
-                                        // Cosine similarity is not a calibrated probability. Keep a conservative
-                                        // review threshold and preserve the raw similarity in the catalog.
-                                        if confidence >= 0.25 {
-                                            if let Ok(conn) =
-                                                rusqlite::Connection::open(&worker_db_path)
-                                            {
-                                                let now = std::time::SystemTime::now()
-                                                    .duration_since(std::time::UNIX_EPOCH)
-                                                    .unwrap_or_default()
-                                                    .as_secs()
-                                                    as i64;
-                                                let _ = conn.execute(
-                                                    "DELETE FROM species_classifications WHERE image_id = ?1 AND model_id = 'bioclip-v1' AND review_state = 'suggested'",
-                                                    [image_id],
-                                                );
-                                                let _ = conn.execute(
-                                                    "INSERT INTO species_classifications(image_id, model_id, model_revision, scientific_name, common_name, taxon_rank, confidence, review_state, created_at, updated_at)
-                                                     VALUES(?1, 'bioclip-v1', ?2, ?3, ?4, ?5, ?6, 'suggested', ?7, ?7)",
-                                                    rusqlite::params![
-                                                        image_id,
-                                                        bioclip_revision,
-                                                        taxon.scientific_name,
-                                                        taxon.common_name,
-                                                        taxon.taxon_rank,
-                                                        confidence as f64,
-                                                        now,
-                                                    ],
-                                                );
-                                            }
-                                        }
+                                    if let Ok(inference) = inference_result {
+                                        store_bioclip_inference(
+                                            &worker_db_path,
+                                            image_id,
+                                            &inference,
+                                            bioclip_revision,
+                                        );
                                     }
                                 }
                             }
@@ -1674,5 +1732,41 @@ mod tests {
         .unwrap();
         assert_eq!(valid[0].scientific_name, "Corvus corax");
         assert!(serde_json::from_str::<Vec<BioClipTaxon>>(r#"["Common raven"]"#).is_err());
+    }
+
+    #[test]
+    fn bioclip_rejects_species_when_nearest_taxa_are_ambiguous() {
+        let taxon = |scientific_name: &str| BioClipTaxon {
+            scientific_name: scientific_name.to_string(),
+            common_name: None,
+            taxon_rank: "species".to_string(),
+        };
+        let ambiguous = BioClipInference {
+            candidates: vec![
+                BioClipCandidate {
+                    taxon: taxon("Canis latrans"),
+                    similarity: 0.57,
+                },
+                BioClipCandidate {
+                    taxon: taxon("Vulpes vulpes"),
+                    similarity: 0.55,
+                },
+            ],
+        };
+        let separated = BioClipInference {
+            candidates: vec![
+                BioClipCandidate {
+                    taxon: taxon("Haliaeetus leucocephalus"),
+                    similarity: 0.62,
+                },
+                BioClipCandidate {
+                    taxon: taxon("Buteo jamaicensis"),
+                    similarity: 0.49,
+                },
+            ],
+        };
+
+        assert!(!ambiguous.is_confident_species());
+        assert!(separated.is_confident_species());
     }
 }

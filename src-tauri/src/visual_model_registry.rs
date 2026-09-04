@@ -2,6 +2,11 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+
+/// Stable identifier for the locally packaged BioCLIP runtime.  Keep this in
+/// one place: it is persisted in catalog rows as well as used to locate its
+/// artifacts on disk.
+pub const BIOCLIP_V1_MODEL_ID: &str = "bioclip-v1";
 use std::sync::{Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
@@ -167,7 +172,7 @@ pub fn visual_model_packs() -> Vec<VisualModelPack> {
         //   - species_embeddings.bin: 5c4383ca3cd4cfb33ba3166d935a521a2034ae20f0c2045bdab5561331bf81cd
         //   - species_labels.json: 57fa63a8bf67c0fbcb9329400939d7352da576283684361fece1fde04c8b9eda
         VisualModelPack {
-            id: "bioclip-v1".to_string(),
+            id: BIOCLIP_V1_MODEL_ID.to_string(),
             display_name: "BioCLIP".to_string(),
             description: "Taxonomy-aware organism classification, including birds. Uses an ONNX ViT encoder with Tree-of-Life taxonomy embeddings.".to_string(),
             task: "Wildlife and species classification".to_string(),
@@ -973,7 +978,7 @@ mod tests {
             ids,
             vec![
                 "ram-plus-onnx".to_string(),
-                "bioclip-v1".to_string(),
+                BIOCLIP_V1_MODEL_ID.to_string(),
                 "ocec-eye-state".to_string(),
                 "rawnind-utnet2-bayer".to_string(),
                 "nafnet-sidd-rgb".to_string(),

@@ -374,20 +374,27 @@ async fn collect_profile_subject_factors(
                                 ai_semaphore.clone().acquire_owned(),
                             )
                             .ok();
-                            let species = crate::tagging::run_bioclip_inference(&image, bioclip);
+                            let species = crate::tagging::run_bioclip_ranked_inference(&image, bioclip);
                             drop(permit);
-                            if let Ok((taxon, confidence)) = species {
-                                if confidence >= 0.25 {
-                                    image_factors.push(CullDecisionFactor {
-                                        id: "species_classification".to_string(),
-                                        label: "Bird or wildlife candidate".to_string(),
-                                        detail: format!(
-                                            "BioCLIP: {} ({:.0}% similarity)",
-                                            taxon.common_name.unwrap_or(taxon.scientific_name),
-                                            confidence * 100.0
-                                        ),
-                                        impact: "context".to_string(),
-                                    });
+                            if let Ok(inference) = species {
+                                if inference.is_confident_species() {
+                                    if let Some((taxon, confidence)) =
+                                        inference.best_taxon_and_similarity()
+                                    {
+                                        image_factors.push(CullDecisionFactor {
+                                            id: "species_classification".to_string(),
+                                            label: "Bird or wildlife candidate".to_string(),
+                                            detail: format!(
+                                                "BioCLIP: {} ({:.0}% similarity)",
+                                                taxon
+                                                    .common_name
+                                                    .as_deref()
+                                                    .unwrap_or(&taxon.scientific_name),
+                                                confidence * 100.0
+                                            ),
+                                            impact: "context".to_string(),
+                                        });
+                                    }
                                 }
                             }
                         }
