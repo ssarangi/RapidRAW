@@ -27,7 +27,7 @@ impl Default for RestorationRecipe {
     fn default() -> Self {
         Self {
             operation_kind: "raw_denoise".to_string(),
-            model_id: "rawnind-utnet2-bayer".to_string(),
+            model_id: crate::visual_model_registry::RAWNIND_MODEL_ID.to_string(),
             model_revision: "v1".to_string(),
             denoise_strength: 0.8,
             // These legacy fields remain in stored recipes for compatibility.
@@ -65,14 +65,14 @@ pub fn validate_restoration_recipe(recipe: &RestorationRecipe) -> Result<(), Str
         );
     }
     match recipe.operation_kind.as_str() {
-        "raw_denoise" if recipe.model_id != "rawnind-utnet2-bayer" => {
+        "raw_denoise" if recipe.model_id != crate::visual_model_registry::RAWNIND_MODEL_ID => {
             Err("RAW denoise requires the RawNIND Bayer model".to_string())
         }
         "raw_denoise" if recipe.tile_size != RAWNIND_SOURCE_TILE_SIZE => Err(format!(
             "RawNIND requires a {}px source tile for its fixed {}×{} Bayer input",
             RAWNIND_SOURCE_TILE_SIZE, RAWNIND_BAYER_TILE_SIZE, RAWNIND_BAYER_TILE_SIZE
         )),
-        "rgb_denoise" if recipe.model_id != "nafnet-sidd-rgb" => {
+        "rgb_denoise" if recipe.model_id != crate::visual_model_registry::NAFNET_MODEL_ID => {
             Err("RGB denoise requires the NAFNet SIDD model".to_string())
         }
         "raw_denoise" | "rgb_denoise" => Ok(()),
@@ -440,6 +440,52 @@ pub fn run_rawnind_restoration_tiled(
     Ok(DynamicImage::ImageRgb8(out_buffer))
 }
 
+/// Runs RawNIND as a RAW Develop stage. The returned image is an in-memory
+/// render for the editor/export pipeline; it never creates a derivative file.
+pub fn develop_rawnind_in_memory(
+    file_bytes: &[u8],
+    model_path: &Path,
+) -> Result<DynamicImage, String> {
+    let source = rawler::rawsource::RawSource::new_from_slice(file_bytes);
+    let raw_image = rawler::get_decoder(&source)
+        .and_then(|decoder| {
+            decoder.raw_image(
+                &source,
+                &rawler::decoders::RawDecodeParams::default(),
+                false,
+            )
+        })
+        .map_err(|error| format!("Failed to decode RAW mosaic for RawNIND: {error}"))?;
+    let raw_data = match &raw_image.data {
+        rawler::rawimage::RawImageData::Integer(data) => data,
+        _ => return Err("RawNIND does not support floating-point RAW data".to_string()),
+    };
+    let black_levels = raw_image
+        .blacklevel
+        .as_bayer_array()
+        .map(|level| level.clamp(0.0, u16::MAX as f32) as u16);
+    let white_levels = raw_image
+        .whitelevel
+        .as_bayer_array()
+        .map(|level| level.clamp(0.0, u16::MAX as f32) as u16);
+    let mut session = ort::session::Session::builder()
+        .and_then(|builder| builder.commit_from_file(model_path))
+        .map_err(|error| format!("Failed to load RawNIND model: {error}"))?;
+
+    run_rawnind_restoration_tiled(
+        raw_data,
+        raw_image.width,
+        raw_image.height,
+        raw_image.camera.cfa.name.as_str(),
+        black_levels,
+        white_levels,
+        &mut session,
+        RAWNIND_SOURCE_TILE_SIZE,
+        64,
+        1.0,
+    )
+}
+
 /// Packs single-channel Bayer mosaic CFA raw values into a 4-channel NCHW tensor
 /// format [R, G1, G2, B] normalized by camera black/white level.
 pub fn pack_bayer_cfa(
@@ -750,10 +796,10 @@ pub fn run_restoration_worker(
         match crate::visual_model_registry::installed_visual_model_path_in_dir(
             visual_models_dir,
             &recipe.model_id,
-            if recipe.model_id.contains("rawnind") {
-                "rawnind_bayer.onnx"
-            } else if recipe.model_id.contains("nafnet") {
-                "nafnet_sidd.onnx"
+            if recipe.model_id == crate::visual_model_registry::RAWNIND_MODEL_ID {
+                crate::visual_model_registry::RAWNIND_MODEL_FILE_NAME
+            } else if recipe.model_id == crate::visual_model_registry::NAFNET_MODEL_ID {
+                crate::visual_model_registry::NAFNET_MODEL_FILE_NAME
             } else {
                 "model.onnx"
             },
@@ -1067,7 +1113,10 @@ mod tests {
     fn restoration_recipe_defaults_are_valid() {
         let recipe = RestorationRecipe::default();
         assert_eq!(recipe.operation_kind, "raw_denoise");
-        assert_eq!(recipe.model_id, "rawnind-utnet2-bayer");
+        assert_eq!(
+            recipe.model_id,
+            crate::visual_model_registry::RAWNIND_MODEL_ID
+        );
         assert!(recipe.denoise_strength > 0.0 && recipe.denoise_strength <= 1.0);
         assert_eq!(recipe.microcontrast_strength, 0.0);
         assert_eq!(recipe.detail_recovery, 0.0);
@@ -1125,9 +1174,9 @@ mod tests {
     fn restoration_recipe_rejects_invalid_model_or_tile_settings() {
         let mut recipe = RestorationRecipe::default();
         assert!(validate_restoration_recipe(&recipe).is_ok());
-        recipe.model_id = "nafnet-sidd-rgb".to_string();
+        recipe.model_id = crate::visual_model_registry::NAFNET_MODEL_ID.to_string();
         assert!(validate_restoration_recipe(&recipe).is_err());
-        recipe.model_id = "rawnind-utnet2-bayer".to_string();
+        recipe.model_id = crate::visual_model_registry::RAWNIND_MODEL_ID.to_string();
         recipe.tile_overlap = recipe.tile_size;
         assert!(validate_restoration_recipe(&recipe).is_err());
         recipe.tile_overlap = 64;

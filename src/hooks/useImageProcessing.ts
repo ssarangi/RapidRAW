@@ -567,6 +567,7 @@ export function useImageProcessing(
   );
 
   const rawDevelopFieldsKey = [
+    adjustments.rawAiDenoiseEnabled,
     adjustments.rawDemosaicAlgorithm,
     adjustments.rawDenoiseAmount,
     adjustments.rawSharpenAmount,

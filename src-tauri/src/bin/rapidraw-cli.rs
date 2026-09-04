@@ -1259,8 +1259,12 @@ fn verify_visual_runtime(directory: &std::path::Path, model_id: &str) -> Result<
     let model_name = match model_id {
         "ram-plus-onnx" => "model.onnx",
         rapidraw_lib::visual_model_registry::BIOCLIP_V2_MODEL_ID => "vision_encoder.onnx",
-        "rawnind-utnet2-bayer" => "rawnind_bayer.onnx",
-        "nafnet-sidd-rgb" => "nafnet_sidd.onnx",
+        rapidraw_lib::visual_model_registry::RAWNIND_MODEL_ID => {
+            rapidraw_lib::visual_model_registry::RAWNIND_MODEL_FILE_NAME
+        }
+        rapidraw_lib::visual_model_registry::NAFNET_MODEL_ID => {
+            rapidraw_lib::visual_model_registry::NAFNET_MODEL_FILE_NAME
+        }
         _ => return Err("No runtime adapter is available in this build".to_string()),
     };
     let model_path = directory.join(model_name);
@@ -1477,9 +1481,9 @@ fn run_restore_cli(arguments: &[String]) -> Result<serde_json::Value, String> {
         .map(|pair| pair[1].clone())
         .unwrap_or_else(|| {
             if operation_kind == "rgb_denoise" {
-                "nafnet-sidd-rgb".to_string()
+                rapidraw_lib::visual_model_registry::NAFNET_MODEL_ID.to_string()
             } else {
-                "rawnind-utnet2-bayer".to_string()
+                rapidraw_lib::visual_model_registry::RAWNIND_MODEL_ID.to_string()
             }
         });
     let mut recipe = RestorationRecipe {

@@ -67,7 +67,6 @@ import { useEditorStore } from '../../../store/useEditorStore';
 import { useLibraryStore } from '../../../store/useLibraryStore';
 import { useProcessStore } from '../../../store/useProcessStore';
 import GeminiCritiquePanel from '../editor/GeminiCritiquePanel';
-import RestorePanel from '../../adjustments/Restore';
 import { useUIStore } from '../../../store/useUIStore';
 import { useEditorActions } from '../../../hooks/useEditorActions';
 import { useAiMasking } from '../../../hooks/useAiMasking';
@@ -1129,13 +1128,6 @@ export default function AIPanel() {
                   imageHeight={selectedImage.height}
                   previewUrl={liveThumbnailUrl || selectedImage.thumbnailUrl}
                 />
-              </div>
-
-              <div className="mb-6">
-                <Text variant={TextVariants.heading} className="mb-2">
-                  {t('editor.ai.aiDenoiseTitle')}
-                </Text>
-                <RestorePanel />
               </div>
 
               <AnimatePresence mode="wait">

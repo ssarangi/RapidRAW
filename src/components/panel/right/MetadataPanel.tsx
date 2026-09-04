@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
-import { Camera, Check, ChevronDown, ChevronRight, FolderOpen, Plus, Sparkles, Star, Tag, X, User } from 'lucide-react';
+import { Camera, Check, ChevronDown, ChevronRight, Plus, Star, Tag, X, User } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
@@ -447,19 +447,6 @@ export default function MetadataPanel() {
 
   const hasGps = gpsData.lat !== null && gpsData.lon !== null;
   const fullPath = selectedImage?.path || '';
-  const [derivatives, setDerivatives] = useState<any[]>([]);
-  const [isDerivativesExpanded, setIsDerivativesExpanded] = useState(true);
-
-  useEffect(() => {
-    if (!catalogImageId) {
-      setDerivatives([]);
-      return;
-    }
-    invoke('list_image_derivatives', { imageId: catalogImageId })
-      .then((res: any) => setDerivatives(res || []))
-      .catch((err) => console.error('Failed to load derivatives:', err));
-  }, [catalogImageId]);
-
   const isVirtualCopy = fullPath.includes('?vc=');
   const basePath = fullPath.split('?vc=')[0];
   const fileName = basePath.split(/[\\/]/).pop() || '';
@@ -952,97 +939,6 @@ export default function MetadataPanel() {
                 </AnimatePresence>
               </div>
             </div>
-
-            {derivatives.length > 0 && (
-              <div>
-                <Text variant={TextVariants.heading} className="mb-3">
-                  Restored Derivatives ({derivatives.length})
-                </Text>
-                <div className="bg-surface rounded-xl overflow-hidden">
-                  <button
-                    onClick={() => setIsDerivativesExpanded(!isDerivativesExpanded)}
-                    className="w-full flex items-center justify-between p-3 hover:bg-card-active transition-colors"
-                  >
-                    <Text
-                      as="span"
-                      variant={TextVariants.label}
-                      color={TextColors.primary}
-                      className="flex items-center gap-2"
-                    >
-                      <Sparkles size={16} /> AI Derivatives
-                    </Text>
-                    <Text color={TextColors.secondary}>
-                      {isDerivativesExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-                    </Text>
-                  </button>
-
-                  <AnimatePresence initial={false}>
-                    {isDerivativesExpanded && (
-                      <motion.div
-                        initial={{ height: 0, opacity: 0 }}
-                        animate={{ height: 'auto', opacity: 1 }}
-                        exit={{ height: 0, opacity: 0 }}
-                        transition={{ duration: 0.25, ease: [0.4, 0, 0.2, 1] }}
-                        className="overflow-hidden"
-                      >
-                        <div className="p-3 border-t border-surface/50 space-y-2">
-                          {derivatives.map((deriv) => (
-                            <div
-                              key={deriv.id}
-                              className="p-2.5 bg-bg-primary rounded-lg border border-border-color/30 text-xs"
-                            >
-                              <div className="flex justify-between items-center mb-1">
-                                <span className="font-semibold capitalize text-accent">
-                                  {deriv.operationKind.replace('_', ' ')}
-                                </span>
-                                <span className="text-emerald-400 uppercase font-medium">{deriv.state}</span>
-                              </div>
-                              <div className="text-text-secondary mb-2">
-                                {deriv.outputFormat?.toUpperCase() || 'TIFF'} · {deriv.modelId} · {deriv.width} ×{' '}
-                                {deriv.height}
-                              </div>
-                              {deriv.state === 'completed' && (
-                                <div className="grid grid-cols-2 gap-2">
-                                  <button
-                                    className="py-1.5 bg-surface-hover border border-border-color/40 text-text-primary rounded text-xs hover:bg-card-active transition-colors"
-                                    onClick={() => {
-                                      useEditorStore.getState().setEditor({
-                                        selectedImage: {
-                                          exif: {},
-                                          height: deriv.height || 0,
-                                          isRaw: false,
-                                          isReady: false,
-                                          metadata: null,
-                                          path: deriv.outputPath,
-                                          thumbnailUrl: '',
-                                          width: deriv.width || 0,
-                                        },
-                                        finalPreviewUrl: null,
-                                        uncroppedAdjustedPreviewUrl: null,
-                                        histogram: null,
-                                        waveform: null,
-                                      });
-                                    }}
-                                  >
-                                    Open restored image
-                                  </button>
-                                  <button
-                                    className="inline-flex items-center justify-center gap-1 py-1.5 bg-bg-primary border border-border-color/40 text-text-secondary rounded text-xs hover:bg-card-active hover:text-text-primary transition-colors"
-                                    onClick={() => invoke(Invokes.ShowInFinder, { path: deriv.outputPath })}
-                                  >
-                                    <FolderOpen size={13} /> Show in folder
-                                  </button>
-                                </div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
-                </div>
-              </div>
-            )}
 
             {hasGps && gpsData?.lat && gpsData?.lon && (
               <div>

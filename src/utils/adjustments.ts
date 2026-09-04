@@ -50,6 +50,7 @@ export enum ToneMapper {
 // whether raw-domain preprocessing (hot/dead pixel + CFA line-banding
 // correction) runs before demosaic. No effect on non-RAW files.
 export enum RawDevelopAdjustment {
+  AiDenoiseEnabled = 'rawAiDenoiseEnabled',
   DemosaicAlgorithm = 'rawDemosaicAlgorithm',
   DenoiseAmount = 'rawDenoiseAmount',
   SharpenAmount = 'rawSharpenAmount',
@@ -258,6 +259,7 @@ export interface Adjustments {
   lutIsSceneReferred?: boolean;
   masks: Array<MaskContainer>;
   orientationSteps: number;
+  rawAiDenoiseEnabled: boolean;
   rawDemosaicAlgorithm: DemosaicAlgorithm;
   rawDenoiseAmount: number;
   rawSharpenAmount: number;
@@ -600,6 +602,7 @@ export const INITIAL_ADJUSTMENTS: Adjustments = {
   lutIsSceneReferred: false,
   masks: [],
   orientationSteps: 0,
+  rawAiDenoiseEnabled: false,
   rawDemosaicAlgorithm: DemosaicAlgorithm.Auto,
   rawDenoiseAmount: -1,
   rawSharpenAmount: -1,

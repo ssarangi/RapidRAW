@@ -13,7 +13,6 @@
 use anyhow::{Result, anyhow};
 use image::{DynamicImage, ImageBuffer, Rgba};
 use nalgebra::Matrix3;
-use rayon::prelude::*;
 use rawler::{
     cfa::CFAColor,
     decoders::{Orientation, RawDecodeParams},
@@ -21,6 +20,7 @@ use rawler::{
     rawimage::{RawImage, RawImageData, RawPhotometricInterpretation},
     rawsource::RawSource,
 };
+use rayon::prelude::*;
 
 /// Toggles for the optional pipeline stages that sit around demosaic:
 /// raw-domain preprocessing (before), denoise and sharpening (after).
@@ -262,6 +262,28 @@ pub fn decode_raw_sensor_data(file_bytes: &[u8]) -> Result<RawSensorData> {
         .trim()
         .to_string(),
     })
+}
+
+/// Applies the same active-area/default-crop geometry used by the custom RAW
+/// development pipeline to an RGB image produced directly from the sensor.
+/// RawNIND emits the full mosaic extent, so it must pass through this before
+/// the editor applies EXIF orientation.
+pub fn crop_sensor_develop_image(image: DynamicImage, sensor: &RawSensorData) -> DynamicImage {
+    let (aa_x, aa_y, aa_w, aa_h) = match sensor.active_area {
+        Some([x, y, width, height]) => (x, y, width, height),
+        None => (0, 0, sensor.width, sensor.height),
+    };
+    let (crop_x, crop_y, crop_w, crop_h) = match sensor.crop_area {
+        Some([x, y, width, height]) => {
+            let x = (aa_x + x).min(sensor.width.saturating_sub(1));
+            let y = (aa_y + y).min(sensor.height.saturating_sub(1));
+            let width = width.min(sensor.width.saturating_sub(x));
+            let height = height.min(sensor.height.saturating_sub(y));
+            (x, y, width, height)
+        }
+        None => (aa_x, aa_y, aa_w, aa_h),
+    };
+    image.crop_imm(crop_x as u32, crop_y as u32, crop_w as u32, crop_h as u32)
 }
 
 #[inline]
@@ -556,15 +578,25 @@ pub fn develop_raw_image_custom_with_algorithm(
         crate::raw_preprocess::correct_cfa_line_banding(&mut sensor, 0.5);
         crate::raw_preprocess::equalize_green_channels(&mut sensor);
     }
-    log::debug!("[raw develop timing] preprocess: {:?}", _t_preprocess.elapsed());
+    log::debug!(
+        "[raw develop timing] preprocess: {:?}",
+        _t_preprocess.elapsed()
+    );
 
     let _t_demosaic = std::time::Instant::now();
     let mut rgb = crate::demosaic_algorithms::demosaic(&sensor, algo);
-    log::debug!("[raw develop timing] demosaic ({:?}): {:?}", algo, _t_demosaic.elapsed());
+    log::debug!(
+        "[raw develop timing] demosaic ({:?}): {:?}",
+        algo,
+        _t_demosaic.elapsed()
+    );
     let _t_wbcm = std::time::Instant::now();
     apply_white_balance(&mut rgb, &sensor);
     apply_color_matrix(&mut rgb, &sensor.xyz_to_cam);
-    log::debug!("[raw develop timing] wb+colormatrix: {:?}", _t_wbcm.elapsed());
+    log::debug!(
+        "[raw develop timing] wb+colormatrix: {:?}",
+        _t_wbcm.elapsed()
+    );
 
     // Auto-exposure boost for severely underexposed captures (see
     // `estimate_exposure_gain`) - applied here, before highlight
@@ -980,7 +1012,12 @@ mod tests {
             .expect("raw_image");
         println!("color_matrix entries: {}", raw_image.color_matrix.len());
         for (illuminant, matrix) in raw_image.color_matrix.iter() {
-            println!("  {:?}: len={} values={:?}", illuminant, matrix.len(), matrix);
+            println!(
+                "  {:?}: len={} values={:?}",
+                illuminant,
+                matrix.len(),
+                matrix
+            );
         }
         println!("deprecated xyz_to_cam: {:?}", raw_image.xyz_to_cam);
         println!("wb_coeffs: {:?}", raw_image.wb_coeffs);

@@ -20,7 +20,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::fs;
 use std::panic;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::{
     Arc,
@@ -28,6 +28,35 @@ use std::sync::{
 };
 use std::time::Instant;
 use tauri::{Emitter, Manager};
+
+static RAW_DEVELOP_VISUAL_MODELS_DIR: OnceLock<PathBuf> = OnceLock::new();
+static RAWNIND_MODEL_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+fn configure_raw_develop_visual_models(app_handle: &tauri::AppHandle) {
+    let Ok(app_data_dir) = app_handle.path().app_data_dir() else {
+        return;
+    };
+    let _ = RAW_DEVELOP_VISUAL_MODELS_DIR.set(app_data_dir.join("models").join("visual"));
+}
+
+/// Resolves the verified RawNIND model once for the editor render pipeline.
+/// Caching avoids hashing a large ONNX file for every slider adjustment.
+pub fn raw_nind_model_path() -> Result<PathBuf> {
+    if let Some(path) = RAWNIND_MODEL_PATH.get() {
+        return Ok(path.clone());
+    }
+    let visual_models_dir = RAW_DEVELOP_VISUAL_MODELS_DIR
+        .get()
+        .ok_or_else(|| anyhow!("RawNIND is not available until the editor is initialized"))?;
+    let path = crate::visual_model_registry::installed_visual_model_path_in_dir(
+        visual_models_dir,
+        crate::visual_model_registry::RAWNIND_MODEL_ID,
+        crate::visual_model_registry::RAWNIND_MODEL_FILE_NAME,
+    )
+    .map_err(|error| anyhow!(error))?;
+    let _ = RAWNIND_MODEL_PATH.set(path.clone());
+    Ok(path)
+}
 
 #[derive(serde::Serialize)]
 pub struct LoadImageResult {
@@ -922,7 +951,10 @@ pub fn spawn_raw_develop_upgrade(
         let arc_img = Arc::new(upgraded);
 
         {
-            let mut guard = state.original_image.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = state
+                .original_image
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(loaded) = guard.as_ref()
                 && loaded.path == upgrade_path
             {
@@ -938,13 +970,37 @@ pub fn spawn_raw_develop_upgrade(
 
         // Clear the same downstream caches load_image itself clears on a
         // fresh load, since original_image just changed under them.
-        *state.cached_preview.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *state.gpu_image_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *state.full_warped_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        *state.full_transformed_cache.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        state.mask_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        state.patch_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        state.geometry_cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        *state
+            .cached_preview
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *state
+            .gpu_image_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *state
+            .full_warped_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *state
+            .full_transformed_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        state
+            .mask_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        state
+            .patch_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        state
+            .geometry_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
 
         let exif = {
             let mut cache = state.decoded_image_cache.lock().unwrap();
@@ -953,11 +1009,11 @@ pub fn spawn_raw_develop_upgrade(
                 .map(|(_, exif)| exif)
                 .unwrap_or_default()
         };
-        state
-            .decoded_image_cache
-            .lock()
-            .unwrap()
-            .insert(upgrade_source_path_str.clone(), arc_img, exif);
+        state.decoded_image_cache.lock().unwrap().insert(
+            upgrade_source_path_str.clone(),
+            arc_img,
+            exif,
+        );
 
         let _ = app_handle.emit(
             "raw-develop-upgraded",
@@ -982,8 +1038,12 @@ pub fn reprocess_raw_develop(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<(), String> {
+    configure_raw_develop_visual_models(&app_handle);
     let (path, is_raw) = {
-        let guard = state.original_image.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = state
+            .original_image
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let loaded = guard.as_ref().ok_or("No original image loaded")?;
         (loaded.path.clone(), loaded.is_raw)
     };
@@ -1029,6 +1089,7 @@ pub async fn load_image(
     state: tauri::State<'_, AppState>,
     app_handle: tauri::AppHandle,
 ) -> Result<LoadImageResult, String> {
+    configure_raw_develop_visual_models(&app_handle);
     let my_generation = state.load_image_generation.fetch_add(1, Ordering::SeqCst) + 1;
     let generation_tracker = state.load_image_generation.clone();
     let cancel_token = Some((generation_tracker.clone(), my_generation));

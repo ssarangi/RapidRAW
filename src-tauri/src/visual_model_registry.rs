@@ -7,6 +7,12 @@ use std::path::{Path, PathBuf};
 /// one place: it is persisted in catalog rows as well as used to locate its
 /// artifacts on disk.
 pub const BIOCLIP_V2_MODEL_ID: &str = "bioclip-v2";
+/// Stable identifier and artifact name for the RAW Develop sensor denoiser.
+pub const RAWNIND_MODEL_ID: &str = "rawnind-utnet2-bayer";
+pub const RAWNIND_MODEL_FILE_NAME: &str = "rawnind_bayer.onnx";
+/// Stable identifier and artifact name for the developed-image denoiser.
+pub const NAFNET_MODEL_ID: &str = "nafnet-sidd-rgb";
+pub const NAFNET_MODEL_FILE_NAME: &str = "nafnet_sidd.onnx";
 /// BioCLIP 2 is the only supported species classifier. Keeping this list
 /// allows an explicit accuracy order without retaining a lower-quality fallback.
 pub const BIOCLIP_MODEL_IDS_BY_ACCURACY: [&str; 1] = [BIOCLIP_V2_MODEL_ID];
@@ -246,14 +252,14 @@ pub fn visual_model_packs() -> Vec<VisualModelPack> {
             // Date Verified: 2026-08-30
             // Verified SHA-256 (extracted model_bayer.onnx):
             //   da27509dab6a2915da67e988acd86cf71f9d5bbc8d1aa0ed32933578a887b901
-            id: "rawnind-utnet2-bayer".to_string(),
+            id: RAWNIND_MODEL_ID.to_string(),
             display_name: "RawNIND Bayer RAW Denoise".to_string(),
             description: "Deep sensor Bayer joint denoising and demosaicing directly into linear Rec.2020.".to_string(),
             task: "RAW sensor denoising".to_string(),
             availability: VisualModelAvailability::DirectDownload,
             artifacts: vec![
                 zip_artifact(
-                    "rawnind_bayer.onnx",
+                    RAWNIND_MODEL_FILE_NAME,
                     "https://github.com/darktable-org/darktable-ai/releases/download/release-5.6.0/rawdenoise-nind.dtmodel",
                     "rawdenoise-nind/model_bayer.onnx",
                     "da27509dab6a2915da67e988acd86cf71f9d5bbc8d1aa0ed32933578a887b901",
@@ -269,14 +275,14 @@ pub fn visual_model_packs() -> Vec<VisualModelPack> {
             // Date Verified: 2026-08-30
             // Verified SHA-256 (extracted model.onnx):
             //   8b437280db2f9f0ef5c733fa0fec70fc10012a62d19dac24a25b80ec8c529230
-            id: "nafnet-sidd-rgb".to_string(),
+            id: NAFNET_MODEL_ID.to_string(),
             display_name: "NAFNet SIDD RGB Denoise".to_string(),
             description: "Fast high-fidelity nonlinear activation-free network for developed linear RGB images.".to_string(),
             task: "RGB image denoising".to_string(),
             availability: VisualModelAvailability::DirectDownload,
             artifacts: vec![
                 zip_artifact(
-                    "nafnet_sidd.onnx",
+                    NAFNET_MODEL_FILE_NAME,
                     "https://github.com/darktable-org/darktable-ai/releases/download/release-5.6.0/denoise-nafnet.dtmodel",
                     "denoise-nafnet/model.onnx",
                     "8b437280db2f9f0ef5c733fa0fec70fc10012a62d19dac24a25b80ec8c529230",
@@ -1014,8 +1020,8 @@ mod tests {
                 "ram-plus-onnx".to_string(),
                 BIOCLIP_V2_MODEL_ID.to_string(),
                 "ocec-eye-state".to_string(),
-                "rawnind-utnet2-bayer".to_string(),
-                "nafnet-sidd-rgb".to_string(),
+                RAWNIND_MODEL_ID.to_string(),
+                NAFNET_MODEL_ID.to_string(),
             ]
         );
     }

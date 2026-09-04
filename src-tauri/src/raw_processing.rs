@@ -84,6 +84,28 @@ pub fn develop_raw_image_for_editor(
     allow_custom_pipeline: bool,
     cancel_token: Option<(Arc<AtomicUsize>, usize)>,
 ) -> Result<DynamicImage> {
+    let raw_nind_enabled = raw_develop_adjustments
+        .and_then(|adjustments| adjustments.get("rawAiDenoiseEnabled"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+
+    // RawNIND replaces demosaic for this development pass: it denoises the
+    // Bayer mosaic and emits RGB directly. This remains entirely in memory,
+    // so toggling it is a normal non-destructive RAW Develop adjustment.
+    if raw_nind_enabled && !fast_demosaic && allow_custom_pipeline {
+        let sensor = crate::custom_raw_pipeline::decode_raw_sensor_data(file_bytes)?;
+        if !sensor.is_standard_bayer {
+            return Err(anyhow!(
+                "AI sensor denoise requires a standard Bayer RAW sensor"
+            ));
+        }
+        let model_path = crate::image_loader::raw_nind_model_path()?;
+        let image = crate::image_restoration::develop_rawnind_in_memory(file_bytes, &model_path)
+            .map_err(|error| anyhow!(error))?;
+        let image = crate::custom_raw_pipeline::crop_sensor_develop_image(image, &sensor);
+        return Ok(apply_orientation(image, sensor.orientation));
+    }
+
     let demosaic_override = raw_develop_adjustments
         .and_then(|a| a.get("rawDemosaicAlgorithm"))
         .and_then(|v| v.as_str());
@@ -392,9 +414,10 @@ pub fn get_fast_raw_dimensions(file_bytes: &[u8]) -> Option<(u32, u32)> {
         .unwrap_or(Orientation::Normal);
 
     match orientation {
-        Orientation::Rotate90 | Orientation::Rotate270 | Orientation::Transpose | Orientation::Transverse => {
-            Some((height, width))
-        }
+        Orientation::Rotate90
+        | Orientation::Rotate270
+        | Orientation::Transpose
+        | Orientation::Transverse => Some((height, width)),
         _ => Some((width, height)),
     }
 }
