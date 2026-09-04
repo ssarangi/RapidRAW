@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { GLOBAL_KEYS } from './AppProperties';
 
@@ -46,7 +46,6 @@ const Slider = ({
   step = 1,
   value,
   trackClassName,
-  fillOrigin = 'default',
   suffix = '',
 }: SliderProps) => {
   const { t } = useTranslation();
@@ -79,14 +78,6 @@ const Slider = ({
       }
     };
   }, []);
-
-  const fillPercentage = max !== min ? ((displayValue - min) / (max - min)) * 100 : 0;
-  const originPercentage = useMemo(() => {
-    if (fillOrigin === 'min') {
-      return 0;
-    }
-    return max !== min ? ((defaultValue - min) / (max - min)) * 100 : 0;
-  }, [fillOrigin, defaultValue, min, max]);
 
   const stepStr = String(step);
   const decimalPlaces = stepStr.includes('.') ? stepStr.split('.')[1].length : 0;
@@ -583,13 +574,6 @@ const Slider = ({
       <div className="relative w-full h-5">
         <div
           className={`absolute top-1/2 left-0 w-full h-1.5 -translate-y-1/2 rounded-full pointer-events-none ${effectiveTrackClass}`}
-        />
-        <div
-          className="absolute top-1/2 h-1.5 -translate-y-1/2 rounded-full pointer-events-none bg-accent/25"
-          style={{
-            left: `${Math.min(fillPercentage, originPercentage)}%`,
-            width: `${Math.abs(fillPercentage - originPercentage)}%`,
-          }}
         />
         <input
           ref={rangeInputRef}

@@ -757,54 +757,55 @@ export default function BottomBar({
             </div>
           </div>
 
-          {(catalogScan.isActive || catalogScan.isPaused || catalogScan.error || activeBackgroundJobs.length > 0) && (
-            <>
-              <div className="h-5 w-px bg-surface"></div>
-              <button
-                className="flex shrink-0 items-center gap-2 rounded-md px-2 py-1 text-text-secondary hover:bg-surface hover:text-text-primary transition-colors max-w-[440px]"
-                onClick={() => setIsCatalogScanModalOpen(true)}
-                data-tooltip={
-                  catalogScan.isActive
-                    ? 'Catalog indexing details'
-                    : activeBackgroundJob
-                      ? `${activeBackgroundJobLabel}: ${activeBackgroundJob.message || 'Running'}`
-                      : 'Background jobs'
-                }
-              >
-                {catalogScanThumbnail && catalogScan.isActive ? (
-                  <img
-                    src={catalogScanThumbnail}
-                    className="h-6 w-6 rounded object-cover border border-border-color shrink-0"
-                    alt=""
-                  />
-                ) : catalogScan.isActive || activeBackgroundJobs.length > 0 ? (
-                  <Loader2 size={16} className="animate-spin text-accent shrink-0" />
-                ) : (
-                  <Database size={16} className="text-red-500 shrink-0" />
-                )}
-                <Text as="span" variant={TextVariants.small} className="truncate">
-                  {catalogScan.error
-                    ? 'Indexing failed'
-                    : catalogScan.isPaused
-                      ? `Indexing paused ${catalogScan.current}/${catalogScan.total || '?'}`
-                      : catalogScan.isActive && catalogScan.total > 0
-                        ? `Indexing collection ${catalogScan.current}/${catalogScan.total}${catalogScanFileName ? ` · ${catalogScanFileName}` : ''}`
-                        : activeBackgroundJobs.length > 0
-                          ? activeBackgroundJobs.length === 1
-                            ? `${activeBackgroundJobLabel}: ${activeBackgroundJob?.message || 'Running'}${
-                                activeBackgroundJob && activeBackgroundJob.total > 0
-                                  ? ` ${activeBackgroundJob.current}/${activeBackgroundJob.total}`
-                                  : ''
-                              }`
-                            : `${activeBackgroundJobs.length} active background jobs`
-                          : 'Background jobs'}
-                </Text>
-                {catalogScanPercent !== null && (
-                  <span className="text-[11px] text-text-secondary tabular-nums shrink-0">{catalogScanPercent}%</span>
-                )}
-              </button>
-            </>
-          )}
+          <>
+            <div className="h-5 w-px bg-surface"></div>
+            <button
+              className="flex shrink-0 items-center gap-2 rounded-md px-2 py-1 text-text-secondary hover:bg-surface hover:text-text-primary transition-colors max-w-[440px]"
+              onClick={() => setIsCatalogScanModalOpen(true)}
+              data-tooltip={
+                catalogScan.isActive
+                  ? 'Catalog indexing details'
+                  : activeBackgroundJob
+                    ? `${activeBackgroundJobLabel}: ${activeBackgroundJob.message || 'Running'}`
+                    : 'Background jobs'
+              }
+            >
+              {catalogScanThumbnail && catalogScan.isActive ? (
+                <img
+                  src={catalogScanThumbnail}
+                  className="h-6 w-6 rounded object-cover border border-border-color shrink-0"
+                  alt=""
+                />
+              ) : catalogScan.isActive || activeBackgroundJobs.length > 0 ? (
+                <Loader2 size={16} className="animate-spin text-accent shrink-0" />
+              ) : (
+                <Database
+                  size={16}
+                  className={clsx('shrink-0', catalogScan.error ? 'text-red-500' : 'text-text-secondary')}
+                />
+              )}
+              <Text as="span" variant={TextVariants.small} className="truncate">
+                {catalogScan.error
+                  ? 'Indexing failed'
+                  : catalogScan.isPaused
+                    ? `Indexing paused ${catalogScan.current}/${catalogScan.total || '?'}`
+                    : catalogScan.isActive && catalogScan.total > 0
+                      ? `Indexing collection ${catalogScan.current}/${catalogScan.total}${catalogScanFileName ? ` · ${catalogScanFileName}` : ''}`
+                      : activeBackgroundJobs.length > 0
+                        ? activeBackgroundJobs.length === 1
+                          ? `${activeBackgroundJobLabel}: ${activeBackgroundJob?.message || 'Running'}${
+                              activeBackgroundJob && activeBackgroundJob.total > 0
+                                ? ` ${activeBackgroundJob.current}/${activeBackgroundJob.total}`
+                                : ''
+                            }`
+                          : `${activeBackgroundJobs.length} active background jobs`
+                        : 'Background jobs'}
+              </Text>
+              {catalogScanPercent !== null && (
+                <span className="text-[11px] text-text-secondary tabular-nums shrink-0">{catalogScanPercent}%</span>
+              )}
+            </button>
+          </>
 
           <div
             className={clsx(

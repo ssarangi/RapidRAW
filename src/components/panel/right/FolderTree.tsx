@@ -36,8 +36,10 @@ import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { invoke } from '@tauri-apps/api/core';
 import { useDroppable } from '@dnd-kit/core';
+import { createPortal } from 'react-dom';
 import { toast } from 'react-toastify';
 import Text from '../../ui/Text';
+import Button from '../../ui/Button';
 import Checkbox from '../../ui/Checkbox';
 import { TEXT_COLOR_KEYS, TextColors, TextVariants, TextWeights } from '../../../types/typography';
 import { useShallow } from 'zustand/react/shallow';
@@ -74,6 +76,8 @@ export interface FolderTree {
   created?: number | null;
   faceCoverage?: CatalogAnalysisCoverage;
   ramPlusCoverage?: CatalogAnalysisCoverage;
+  rootId?: number;
+  relativePath?: string;
 }
 
 interface CatalogAnalysisJobs {
@@ -110,6 +114,7 @@ interface TreeNodeProps {
   isRescanning?: boolean;
   onRescan?(event: React.MouseEvent, node: FolderTree): void;
   analysisJobs?: CatalogAnalysisJobs;
+  onAnalysisClick?(node: FolderTree): void;
 }
 
 const ACTIVE_JOB_STATES = new Set<BackgroundJob['state']>(['queued', 'running', 'paused', 'cancelling']);
@@ -119,14 +124,123 @@ function coverageLabel(label: string, coverage?: CatalogAnalysisCoverage, job?: 
   const active = job && ACTIVE_JOB_STATES.has(job.state);
   const title = `${label}: ${coverage.completed}/${coverage.total} complete`;
   if (active) return { title: `${title} · ${job.message}`, className: 'text-sky-400', spinning: true };
-  if ((job?.state === 'failed' && coverage.completed < coverage.total) || (coverage.failed > 0 && coverage.completed === 0)) {
+  if (
+    (job?.state === 'failed' && coverage.completed < coverage.total) ||
+    (coverage.failed > 0 && coverage.completed === 0)
+  ) {
     return { title: `${title} · ${coverage.failed} failed`, className: 'text-rose-400', spinning: false };
   }
   if (coverage.completed === coverage.total) return { title, className: 'text-emerald-400', spinning: false };
   if (coverage.completed > 0 || coverage.processing > 0) {
-    return { title: `${title} · ${coverage.pending + coverage.failed} remaining`, className: 'text-amber-400', spinning: false };
+    return {
+      title: `${title} · ${coverage.pending + coverage.failed} remaining`,
+      className: 'text-amber-400',
+      spinning: false,
+    };
   }
   return { title: `${label}: not started`, className: 'text-slate-400', spinning: false };
+}
+
+function CatalogAnalysisModal({ node, onClose }: { node: FolderTree; onClose(): void }) {
+  const [starting, setStarting] = useState<string | null>(null);
+  const face = node.faceCoverage;
+  const ramPlus = node.ramPlusCoverage;
+  const scope = { rootId: node.rootId, relativePath: node.relativePath ?? '.' };
+  const run = async (kind: 'face' | 'ramPlus', force: boolean) => {
+    if (node.rootId == null) return;
+    const key = `${kind}-${force ? 'all' : 'missing'}`;
+    setStarting(key);
+    try {
+      if (kind === 'face') {
+        await invoke(Invokes.StartFaceDetection, { ...scope, onlyPending: !force });
+      } else {
+        await invoke(Invokes.StartCatalogRamPlusTagging, { ...scope, force });
+      }
+      toast.success(`${kind === 'face' ? 'Face scan' : 'RAM++ tagging'} queued for ${node.name}.`);
+      onClose();
+    } catch (error) {
+      toast.error(`Could not start analysis: ${error}`);
+    } finally {
+      setStarting(null);
+    }
+  };
+  const coverage = (label: string, value?: CatalogAnalysisCoverage) => (
+    <div className="rounded-md border border-border-color bg-bg-primary px-3 py-2.5">
+      <div className="flex items-center justify-between gap-3 text-sm">
+        <span>{label}</span>
+        <span className="tabular-nums text-emerald-400">
+          {value?.completed ?? 0}/{value?.total ?? 0}
+        </span>
+      </div>
+      <div className="mt-1 text-xs text-text-secondary">
+        {value?.processing ?? 0} running · {value?.pending ?? 0} not started · {value?.failed ?? 0} failed
+      </div>
+    </div>
+  );
+  const action = (kind: 'face' | 'ramPlus', force: boolean, label: string) => {
+    const key = `${kind}-${force ? 'all' : 'missing'}`;
+    return (
+      <Button
+        className="flex-1 bg-bg-secondary text-text-primary border border-border-color shadow-none hover:bg-card-active"
+        disabled={starting !== null}
+        onClick={() => void run(kind, force)}
+      >
+        {starting === key ? <Loader2 size={15} className="animate-spin" /> : null}
+        {label}
+      </Button>
+    );
+  };
+  const content = (
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/45 p-4 backdrop-blur-xs"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Analysis status for ${node.name}`}
+    >
+      <div
+        className="w-full max-w-lg rounded-lg border border-border-color bg-surface p-5 shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="mb-4">
+          <Text variant={TextVariants.title}>Analysis status</Text>
+          <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="mt-1 truncate">
+            {node.name} and its subfolders
+          </Text>
+        </div>
+        <div className="space-y-2">
+          {coverage('Face scan', face)}
+          {coverage('RAM++ broad tags', ramPlus)}
+        </div>
+        <div className="mt-5 space-y-3">
+          <div>
+            <Text variant={TextVariants.small} weight={TextWeights.semibold}>
+              Face scan
+            </Text>
+            <div className="mt-1.5 flex gap-2">
+              {action('face', false, 'Scan missing')}
+              {action('face', true, 'Re-scan all')}
+            </div>
+          </div>
+          <div>
+            <Text variant={TextVariants.small} weight={TextWeights.semibold}>
+              RAM++ broad tags
+            </Text>
+            <div className="mt-1.5 flex gap-2">
+              {action('ramPlus', false, 'Tag missing')}
+              {action('ramPlus', true, 'Re-tag all')}
+            </div>
+          </div>
+        </div>
+        <div className="mt-5 flex justify-end">
+          <Button className="bg-transparent text-text-secondary shadow-none" onClick={onClose}>
+            Close
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+  return typeof document === 'undefined' ? content : createPortal(content, document.body);
 }
 
 interface VisibleProps {
@@ -547,6 +661,7 @@ function TreeNode({
   isRescanning = false,
   onRescan,
   analysisJobs,
+  onAnalysisClick,
 }: TreeNodeProps) {
   const hasChildren = node.hasSubdirs || (node.children && node.children.length > 0);
   const isSelected = node.path === selectedPath;
@@ -656,14 +771,30 @@ function TreeNode({
         {(faceStatus || ramPlusStatus) && (
           <span className="flex shrink-0 items-center gap-1" aria-label="Catalog analysis coverage">
             {faceStatus && (
-              <span className={faceStatus.className} data-tooltip={faceStatus.title}>
-                <ScanFace size={14} className={faceStatus.spinning ? 'animate-spin' : ''} />
-              </span>
+              <button
+                className={clsx('rounded-sm p-0.5 hover:bg-surface', faceStatus.className)}
+                data-tooltip={`${faceStatus.title} · Open analysis status`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onAnalysisClick?.(node);
+                }}
+                type="button"
+              >
+                <ScanFace size={17} className={faceStatus.spinning ? 'animate-spin' : ''} />
+              </button>
             )}
             {ramPlusStatus && (
-              <span className={ramPlusStatus.className} data-tooltip={ramPlusStatus.title}>
-                <Tags size={13} className={ramPlusStatus.spinning ? 'animate-spin' : ''} />
-              </span>
+              <button
+                className={clsx('rounded-sm p-0.5 hover:bg-surface', ramPlusStatus.className)}
+                data-tooltip={`${ramPlusStatus.title} · Open analysis status`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onAnalysisClick?.(node);
+                }}
+                type="button"
+              >
+                <Tags size={16} className={ramPlusStatus.spinning ? 'animate-spin' : ''} />
+              </button>
             )}
           </span>
         )}
@@ -748,6 +879,7 @@ function TreeNode({
                       folderIcons={folderIcons}
                       isLayoutDragging={isLayoutDragging}
                       analysisJobs={analysisJobs}
+                      onAnalysisClick={onAnalysisClick}
                     />
                   </motion.div>
                 ))}
@@ -819,6 +951,7 @@ export default function FolderTree({
   const [catalogFolderTrees, setCatalogFolderTrees] = useState<Record<number, CatalogFolderNode>>({});
   const [loadingCatalogTreeIds, setLoadingCatalogTreeIds] = useState<Set<number>>(new Set());
   const [catalogAnalysisJobs, setCatalogAnalysisJobs] = useState<Record<number, CatalogAnalysisJobs>>({});
+  const [analysisNode, setAnalysisNode] = useState<FolderTree | null>(null);
   const [rescanningFolders, setRescanningFolders] = useState<Set<string>>(new Set());
   const [smartCollections, setSmartCollections] = useState<SmartCollection[]>([]);
   const [isLoadingSmartCollections, setIsLoadingSmartCollections] = useState(false);
@@ -1049,10 +1182,15 @@ export default function FolderTree({
         for (const root of catalogRoots) {
           const relevant = jobs.filter(
             (job) =>
-              (job.kind === 'face_detection' || job.kind === 'face_recognition' || job.kind === 'face_reindex' || job.kind === 'ram_plus_tagging') &&
+              (job.kind === 'face_detection' ||
+                job.kind === 'face_recognition' ||
+                job.kind === 'face_reindex' ||
+                job.kind === 'ram_plus_tagging') &&
               (job.rootId == null || job.rootId === root.id),
           );
-          const face = relevant.find((job) => job.kind === 'face_detection' || job.kind === 'face_recognition' || job.kind === 'face_reindex');
+          const face = relevant.find(
+            (job) => job.kind === 'face_detection' || job.kind === 'face_recognition' || job.kind === 'face_reindex',
+          );
           const ramPlus = relevant.find((job) => job.kind === 'ram_plus_tagging');
           if (face || ramPlus) next[root.id] = { face, ramPlus };
         }
@@ -1515,6 +1653,7 @@ export default function FolderTree({
                               isRescanning={rescanningFolders.has(`catalog:${root.id}`)}
                               onRescan={(event) => handleRescanCatalogRoot(event, root)}
                               analysisJobs={catalogAnalysisJobs[root.id]}
+                              onAnalysisClick={setAnalysisNode}
                             />
                           );
                         })}
@@ -1760,6 +1899,7 @@ export default function FolderTree({
           </div>
         </LayoutGroup>
       </div>
+      {analysisNode && <CatalogAnalysisModal node={analysisNode} onClose={() => setAnalysisNode(null)} />}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -1061,6 +1061,8 @@ pub fn load_image_for_face_ai(path: &Path, app_handle: &AppHandle) -> Result<Dyn
 #[tauri::command]
 pub fn start_face_detection(
     root_id: Option<i64>,
+    relative_path: Option<String>,
+    only_pending: Option<bool>,
     app_handle: AppHandle,
     state: tauri::State<'_, crate::AppState>,
 ) -> Result<String, String> {
@@ -1072,8 +1074,9 @@ pub fn start_face_detection(
     let job_id = create_background_job(
         &db_path,
         "face_detection",
-        serde_json::json!({ "rootId": root_id, "modelPackId": runtime.pack_id.as_str() }),
+        serde_json::json!({ "rootId": root_id, "relativePath": relative_path, "onlyPending": only_pending.unwrap_or(false), "modelPackId": runtime.pack_id.as_str() }),
     )?;
+    crate::library_db::set_background_job_root_id(&db_path, &job_id, root_id)?;
     let job_control = crate::app_state::BackgroundJobControl::new();
     state
         .background_job_controls
@@ -1089,6 +1092,8 @@ pub fn start_face_detection(
             &app,
             &db_path,
             root_id,
+            relative_path.as_deref(),
+            only_pending.unwrap_or(false),
             runtime.pack_id.as_str(),
             &runtime.detector,
             &worker_job_id,
@@ -1226,6 +1231,8 @@ pub fn reprocess_face_index(
             &app,
             &db_path,
             None,
+            None,
+            false,
             runtime.pack_id.as_str(),
             &runtime.detector,
             &worker_job_id,
@@ -1583,6 +1590,8 @@ fn run_face_detection(
     app_handle: &AppHandle,
     db_path: &Path,
     root_id: Option<i64>,
+    relative_path: Option<&str>,
+    only_pending: bool,
     model_pack_id: &str,
     model_path: &Path,
     job_id: &str,
@@ -1592,6 +1601,8 @@ fn run_face_detection(
     run_face_detection_with_loader(
         db_path,
         root_id,
+        relative_path,
+        only_pending,
         model_pack_id,
         model_path,
         job_id,
@@ -1638,6 +1649,8 @@ pub fn run_face_detection_headless_for_pack(
     run_face_detection_with_loader(
         db_path,
         root_id,
+        None,
+        false,
         model_pack_id,
         model_path,
         job_id,
@@ -1651,6 +1664,8 @@ pub fn run_face_detection_headless_for_pack(
 fn run_face_detection_with_loader<F, S>(
     db_path: &Path,
     root_id: Option<i64>,
+    relative_path: Option<&str>,
+    only_pending: bool,
     model_pack_id: &str,
     model_path: &Path,
     job_id: &str,
@@ -1672,7 +1687,7 @@ where
         sql.push_str(" AND i.root_id = ?1");
     }
     let mut statement = conn.prepare(&sql).map_err(|error| error.to_string())?;
-    let raw_images: Vec<ScannedImageRecord> = if let Some(root_id) = root_id {
+    let mut raw_images: Vec<ScannedImageRecord> = if let Some(root_id) = root_id {
         statement
             .query_map([root_id], |row| {
                 Ok(ScannedImageRecord {
@@ -1703,6 +1718,21 @@ where
             .collect::<Result<_, _>>()
             .map_err(|error| error.to_string())?
     };
+    if let Some(relative_path) = relative_path.filter(|path| *path != ".") {
+        let prefix = format!("{relative_path}/");
+        raw_images.retain(|image| image.relative.starts_with(&prefix));
+    }
+    if only_pending {
+        let mut state = conn
+            .prepare("SELECT image_id FROM face_scan_state WHERE model_pack_id = ?1 AND status = 'complete'")
+            .map_err(|error| error.to_string())?;
+        let completed_ids = state
+            .query_map([model_pack_id], |row| row.get::<_, i64>(0))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<HashSet<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        raw_images.retain(|image| !completed_ids.contains(&image.id));
+    }
 
     // Group images by (folder_id, lower(file_stem)) to identify RAW+JPG pairs
     let mut paired_groups: std::collections::BTreeMap<(i64, String), Vec<ScannedImageRecord>> =

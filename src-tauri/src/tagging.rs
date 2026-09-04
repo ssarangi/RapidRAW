@@ -542,6 +542,9 @@ pub fn run_catalog_ram_plus_tagging_headless(
 
 #[tauri::command]
 pub fn start_catalog_ram_plus_tagging(
+    root_id: Option<i64>,
+    relative_path: Option<String>,
+    force: Option<bool>,
     app_handle: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
@@ -549,8 +552,9 @@ pub fn start_catalog_ram_plus_tagging(
     let job_id = crate::library_db::create_background_job(
         &db_path,
         "ram_plus_tagging",
-        serde_json::json!({ "modelId": RAM_PLUS_MODEL_ID }),
+        serde_json::json!({ "modelId": RAM_PLUS_MODEL_ID, "rootId": root_id, "relativePath": relative_path, "force": force.unwrap_or(false) }),
     )?;
+    crate::library_db::set_background_job_root_id(&db_path, &job_id, root_id)?;
     crate::library_db::update_job(
         &db_path,
         &job_id,
@@ -623,10 +627,13 @@ pub fn start_catalog_ram_plus_tagging(
                 return;
             }
         };
-        let candidates = match crate::library_db::list_ai_tag_candidates_for_model(
+        let candidates = match crate::library_db::list_ai_tag_candidates_for_model_in_scope(
             &worker_db_path,
             RAM_PLUS_MODEL_ID,
             &model_revision,
+            root_id,
+            relative_path.as_deref(),
+            force.unwrap_or(false),
         ) {
             Ok(candidates) => candidates,
             Err(error) => {

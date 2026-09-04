@@ -86,6 +86,7 @@ export default function LibraryView({
     imageRatings,
     isViewLoading,
     isTreeLoading,
+    librarySource,
   } = useLibraryStore(
     useShallow((state) => ({
       rootPaths: state.rootPaths,
@@ -96,6 +97,7 @@ export default function LibraryView({
       imageRatings: state.imageRatings,
       isViewLoading: state.isViewLoading,
       isTreeLoading: state.isTreeLoading,
+      librarySource: state.librarySource,
     })),
   );
 
@@ -124,7 +126,11 @@ export default function LibraryView({
   return (
     <div className="flex flex-row grow h-full min-h-0">
       <div className="flex-1 flex flex-col min-w-0 gap-2">
-        {activeView === 'people' ? <PeopleView /> : activeView === 'insights' ? <InsightsView /> : activeView === 'community' ? (
+        {activeView === 'people' ? (
+          <PeopleView />
+        ) : activeView === 'insights' ? (
+          <InsightsView />
+        ) : activeView === 'community' ? (
           <CommunityPage
             onBackToLibrary={() => setUI({ activeView: 'library' })}
             supportedTypes={supportedTypes}
@@ -171,7 +177,7 @@ export default function LibraryView({
             onNavigateToCommunity={() => setUI({ activeView: 'community' })}
           />
         )}
-        {rootPaths && rootPaths.length > 0 && (
+        {(rootPaths.length > 0 || librarySource.type === 'catalog') && (
           <BottomBar
             isCopied={isCopied}
             isCopyDisabled={multiSelectedPaths.length !== 1}

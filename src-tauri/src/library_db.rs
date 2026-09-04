@@ -531,15 +531,56 @@ pub(crate) fn list_ai_tag_candidates_for_model(
     model_id: &str,
     model_revision: &str,
 ) -> Result<Vec<(i64, String, i64)>, String> {
+    list_ai_tag_candidates_for_model_in_scope(db_path, model_id, model_revision, None, None, false)
+}
+
+pub(crate) fn list_ai_tag_candidates_for_model_in_scope(
+    db_path: &Path,
+    model_id: &str,
+    model_revision: &str,
+    root_id: Option<i64>,
+    relative_path: Option<&str>,
+    force: bool,
+) -> Result<Vec<(i64, String, i64)>, String> {
     let conn = open_connection(db_path)?;
-    let mut statement = conn.prepare("SELECT i.id, r.absolute_path || '/' || i.relative_path, i.modified_at FROM images i JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present' AND NOT EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = ?1 AND s.model_revision = ?2 AND s.image_modified_at = i.modified_at AND s.state = 'completed') ORDER BY i.id").map_err(|error| error.to_string())?;
+    let mut values = Vec::new();
+    let mut sql = "SELECT i.id, r.absolute_path || '/' || i.relative_path, i.modified_at FROM images i JOIN collection_roots r ON r.id = i.root_id WHERE i.status = 'present'".to_string();
+    if !force {
+        values.push(SqlValue::Text(model_id.to_string()));
+        values.push(SqlValue::Text(model_revision.to_string()));
+        sql.push_str(" AND NOT EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = ?1 AND s.model_revision = ?2 AND s.image_modified_at = i.modified_at AND s.state = 'completed')");
+    }
+    if let Some(root_id) = root_id {
+        values.push(SqlValue::Integer(root_id));
+        sql.push_str(&format!(" AND i.root_id = ?{}", values.len()));
+    }
+    if let Some(relative_path) = relative_path.filter(|path| *path != ".") {
+        values.push(SqlValue::Text(format!("{relative_path}/%")));
+        sql.push_str(&format!(" AND i.relative_path LIKE ?{}", values.len()));
+    }
+    sql.push_str(" ORDER BY i.id");
+    let mut statement = conn.prepare(&sql).map_err(|error| error.to_string())?;
     statement
-        .query_map(params![model_id, model_revision], |row| {
+        .query_map(params_from_iter(values.iter()), |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+pub(crate) fn set_background_job_root_id(
+    db_path: &Path,
+    job_id: &str,
+    root_id: Option<i64>,
+) -> Result<(), String> {
+    open_connection(db_path)?
+        .execute(
+            "UPDATE background_jobs SET root_id = ?1, updated_at = ?2 WHERE id = ?3",
+            params![root_id, now_secs(), job_id],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 pub(crate) fn mark_ai_tag_analysis_state(
@@ -2919,7 +2960,7 @@ pub fn list_catalog_folder_tree(
             .prepare(
                 "
                 SELECT f.relative_path, COUNT(i.id),
-                  COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM face_scan_state s WHERE s.image_id = i.id AND s.status = 'complete') THEN 1 ELSE 0 END), 0),
+                  COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM face_scan_state s WHERE s.image_id = i.id AND s.status = 'complete') OR EXISTS (SELECT 1 FROM faces detected WHERE detected.image_id = i.id AND detected.review_state <> 'rejected') THEN 1 ELSE 0 END), 0),
                   COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM face_scan_state s WHERE s.image_id = i.id AND s.status = 'processing') THEN 1 ELSE 0 END), 0),
                   COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM face_scan_state s WHERE s.image_id = i.id AND s.status = 'failed') THEN 1 ELSE 0 END), 0),
                   COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM image_ai_analysis_state s WHERE s.image_id = i.id AND s.analysis_kind = 'tagging' AND s.model_id = 'ram-plus' AND s.image_modified_at = i.modified_at AND s.state = 'completed') THEN 1 ELSE 0 END), 0),
@@ -3819,6 +3860,9 @@ pub fn start_catalog_scan(
                     let tagging_app_handle = app_for_task.clone();
                     let tagging_state = tagging_app_handle.state::<crate::AppState>();
                     if let Err(error) = crate::tagging::start_catalog_ram_plus_tagging(
+                        Some(root_id),
+                        None,
+                        None,
                         tagging_app_handle.clone(),
                         tagging_state,
                     ) {
@@ -3832,6 +3876,8 @@ pub fn start_catalog_scan(
                     let face_state = face_app_handle.state::<crate::AppState>();
                     if let Err(error) = crate::face_detection::start_face_detection(
                         Some(root_id),
+                        None,
+                        None,
                         face_app_handle.clone(),
                         face_state,
                     ) {
@@ -5028,15 +5074,28 @@ pub fn retry_background_job(
                 .unwrap_or(true);
             start_catalog_scan(root_id, recursive, app_handle, state)
         }
-        "ram_plus_tagging" => {
-            crate::tagging::start_catalog_ram_plus_tagging(app_handle, state).map(|_| ())
-        }
+        "ram_plus_tagging" => crate::tagging::start_catalog_ram_plus_tagging(
+            root_id,
+            payload
+                .get("relativePath")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            payload.get("force").and_then(|value| value.as_bool()),
+            app_handle,
+            state,
+        )
+        .map(|_| ()),
         "ai_tagging" => tauri::async_runtime::block_on(crate::tagging::start_catalog_ai_tagging(
             app_handle, state,
         ))
         .map(|_| ()),
         "face_detection" => crate::face_detection::start_face_detection(
             payload.get("rootId").and_then(|value| value.as_i64()),
+            payload
+                .get("relativePath")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
+            payload.get("onlyPending").and_then(|value| value.as_bool()),
             app_handle,
             state,
         )
