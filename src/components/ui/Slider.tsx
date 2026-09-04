@@ -519,6 +519,8 @@ const Slider = ({
   };
 
   const numericValue = isNaN(Number(value)) ? 0 : Number(value);
+  const hasSemanticTrack = /(?:gradient|hue|sat|lum)/.test(trackClassName ?? '');
+  const effectiveTrackClass = hasSemanticTrack ? trackClassName : 'slider-warm-track';
 
   return (
     <div className={`mb-2 group ${disabled ? 'opacity-50 cursor-not-allowed' : ''}`} ref={containerRef}>
@@ -580,9 +582,7 @@ const Slider = ({
 
       <div className="relative w-full h-5">
         <div
-          className={`absolute top-1/2 left-0 w-full h-1.5 -translate-y-1/2 rounded-full pointer-events-none ${
-            trackClassName || 'bg-card-active'
-          }`}
+          className={`absolute top-1/2 left-0 w-full h-1.5 -translate-y-1/2 rounded-full pointer-events-none ${effectiveTrackClass}`}
         />
         <div
           className="absolute top-1/2 h-1.5 -translate-y-1/2 rounded-full pointer-events-none bg-accent/25"

@@ -96,6 +96,8 @@ interface TreeNodeProps {
   isInstantTransition: boolean;
   folderIcons: Record<string, string>;
   isLayoutDragging: boolean;
+  isRescanning?: boolean;
+  onRescan?(event: React.MouseEvent, node: FolderTree): void;
 }
 
 interface VisibleProps {
@@ -513,6 +515,8 @@ function TreeNode({
   isInstantTransition,
   folderIcons,
   isLayoutDragging,
+  isRescanning = false,
+  onRescan,
 }: TreeNodeProps) {
   const hasChildren = node.hasSubdirs || (node.children && node.children.length > 0);
   const isSelected = node.path === selectedPath;
@@ -629,6 +633,22 @@ function TreeNode({
           >
             {node.imageCount}
           </Text>
+        )}
+
+        {onRescan && (
+          <button
+            aria-label={`Rescan ${node.name}`}
+            className="shrink-0 rounded-sm p-1 text-text-secondary opacity-0 transition-opacity hover:bg-surface hover:text-text-primary group-hover:opacity-100 focus:opacity-100"
+            data-tooltip="Rescan folder"
+            disabled={isRescanning}
+            onClick={(event) => {
+              event.stopPropagation();
+              onRescan(event, node);
+            }}
+            type="button"
+          >
+            {isRescanning ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+          </button>
         )}
 
         {hasChildren && (
@@ -750,6 +770,7 @@ export default function FolderTree({
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
   const [catalogFolderTrees, setCatalogFolderTrees] = useState<Record<number, CatalogFolderNode>>({});
   const [loadingCatalogTreeIds, setLoadingCatalogTreeIds] = useState<Set<number>>(new Set());
+  const [rescanningFolders, setRescanningFolders] = useState<Set<string>>(new Set());
   const [smartCollections, setSmartCollections] = useState<SmartCollection[]>([]);
   const [isLoadingSmartCollections, setIsLoadingSmartCollections] = useState(false);
   const pinnedFolders = appSettings?.pinnedFolders || [];
@@ -898,7 +919,8 @@ export default function FolderTree({
   const isCatalogOpen = openSections.includes('catalog');
 
   const hasVisiblePinnedTrees = filteredPinnedTrees && filteredPinnedTrees.length > 0;
-  const showPinnedSection = hasVisiblePinnedTrees || (!isSearching && (pinnedFolders.length > 0 || isPinnedFoldersLoading));
+  const showPinnedSection =
+    hasVisiblePinnedTrees || (!isSearching && (pinnedFolders.length > 0 || isPinnedFoldersLoading));
   const hasVisibleAlbums = filteredAlbumTree && filteredAlbumTree.length > 0;
   const hasVisibleCatalogRoots = librarySource.type === 'catalog' && catalogRoots.length > 0 && !isSearching;
   // Shown whenever a catalog library is open, even with zero collections yet,
@@ -916,7 +938,10 @@ export default function FolderTree({
     if (selectedPath.startsWith('LibraryFolder:') || selectedPath.startsWith('Library: ')) return null;
     const knownRootPaths = [...folderTrees, ...pinnedFolderTrees].map((tree: any) => tree.path as string);
     const alreadyVisible = knownRootPaths.some(
-      (rootPath) => selectedPath === rootPath || selectedPath.startsWith(`${rootPath}/`) || selectedPath.startsWith(`${rootPath}\\`),
+      (rootPath) =>
+        selectedPath === rootPath ||
+        selectedPath.startsWith(`${rootPath}/`) ||
+        selectedPath.startsWith(`${rootPath}\\`),
     );
     if (alreadyVisible) return null;
     const separator = selectedPath.includes('/') ? '/' : '\\';
@@ -977,7 +1002,9 @@ export default function FolderTree({
 
   useEffect(() => {
     void loadSmartCollections();
-    const refresh = () => { void loadSmartCollections(); };
+    const refresh = () => {
+      void loadSmartCollections();
+    };
     window.addEventListener('smart-collections-changed', refresh);
     return () => window.removeEventListener('smart-collections-changed', refresh);
   }, [librarySource.type]);
@@ -1019,7 +1046,9 @@ export default function FolderTree({
     try {
       const files = await invoke<ImageFile[]>(Invokes.SearchCatalogImages, { query });
       const imageRatings: Record<string, number> = {};
-      files.forEach((file) => { imageRatings[file.path] = file.rating || 0; });
+      files.forEach((file) => {
+        imageRatings[file.path] = file.rating || 0;
+      });
       const root = catalogRoots.find((candidate) => candidate.id === query.rootId) || catalogRoots[0] || null;
       useLibraryStore.getState().setLibrary({
         rootPaths: root ? [root.absolutePath] : useLibraryStore.getState().rootPaths,
@@ -1058,11 +1087,48 @@ export default function FolderTree({
 
   const handleRescanCatalogRoot = async (event: React.MouseEvent, root: CatalogRoot) => {
     event.stopPropagation();
+    const rescanKey = `catalog:${root.id}`;
+    if (rescanningFolders.has(rescanKey)) return;
+    setRescanningFolders((current) => new Set(current).add(rescanKey));
     useLibraryStore.getState().setLibrary({ isTreeLoading: true });
     try {
       await invoke(Invokes.StartCatalogScan, { rootId: root.id, recursive: true });
+      toast.success(`Scanning ${root.label || root.absolutePath} for new files.`);
     } finally {
       useLibraryStore.getState().setLibrary({ isTreeLoading: false });
+      setRescanningFolders((current) => {
+        const next = new Set(current);
+        next.delete(rescanKey);
+        return next;
+      });
+    }
+  };
+
+  const handleRescanSourceFolder = async (event: React.MouseEvent, node: FolderTree) => {
+    event.stopPropagation();
+    const rescanKey = `source:${node.path}`;
+    if (rescanningFolders.has(rescanKey)) return;
+    setRescanningFolders((current) => new Set(current).add(rescanKey));
+    try {
+      await Promise.resolve(onFolderSelect(node.path));
+      const refreshedTree = await invoke<FolderTree>(Invokes.GetFolderTree, {
+        path: node.path,
+        expandedFolders: Array.from(useLibraryStore.getState().expandedFolders),
+        showImageCounts,
+      });
+      useLibraryStore.getState().setLibrary((state) => ({
+        folderTrees: state.folderTrees.map((tree) => (tree.path === node.path ? refreshedTree : tree)),
+        pinnedFolderTrees: state.pinnedFolderTrees.map((tree) => (tree.path === node.path ? refreshedTree : tree)),
+      }));
+      toast.success(`Rescanned ${node.name}.`);
+    } catch (error) {
+      toast.error(`Failed to rescan ${node.name}: ${error}`);
+    } finally {
+      setRescanningFolders((current) => {
+        const next = new Set(current);
+        next.delete(rescanKey);
+        return next;
+      });
     }
   };
 
@@ -1100,15 +1166,27 @@ export default function FolderTree({
           <div className="flex items-center">
             <CatalogAiAnalysisMenu compact />
             <CatalogReviewQueueButton compact />
-            <button className="p-2 rounded-md text-text-secondary hover:bg-surface hover:text-text-primary" onClick={() => useUIStore.getState().setUI({ activeView: 'people' })} data-tooltip="People"><Users size={17} /></button>
-            <button className="p-2 rounded-md text-text-secondary hover:bg-surface hover:text-text-primary" onClick={() => useUIStore.getState().setUI({ activeView: 'insights' })} data-tooltip="Insights"><BarChart3 size={17} /></button>
+            <button
+              className="p-2 rounded-md text-text-secondary hover:bg-surface hover:text-text-primary"
+              onClick={() => useUIStore.getState().setUI({ activeView: 'people' })}
+              data-tooltip="People"
+            >
+              <Users size={17} />
+            </button>
+            <button
+              className="p-2 rounded-md text-text-secondary hover:bg-surface hover:text-text-primary"
+              onClick={() => useUIStore.getState().setUI({ activeView: 'insights' })}
+              data-tooltip="Insights"
+            >
+              <BarChart3 size={17} />
+            </button>
           </div>
         )}
       </div>
 
       <div className="p-2 flex flex-col flex-1 min-h-0">
-	        <div className="pt-1 pb-2">
-	          <div className="flex items-center">
+        <div className="pt-1 pb-2">
+          <div className="flex items-center">
             <div className="relative flex-1 min-w-0">
               <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-secondary" />
               <input
@@ -1151,22 +1229,26 @@ export default function FolderTree({
                   />
                 </motion.div>
               )}
-	            </AnimatePresence>
-	          </div>
-	          <div className="mt-2 px-2 py-1.5">
-	            <Checkbox
-	              label="Show images inside subfolders"
-	              checked={includeSubfolderImages}
-	              onChange={(checked) => handleIncludeSubfoldersChange(checked)}
-	            />
-	          </div>
-	        </div>
+            </AnimatePresence>
+          </div>
+          <div className="mt-2 px-2 py-1.5">
+            <Checkbox
+              label="Show images inside subfolders"
+              checked={includeSubfolderImages}
+              onChange={(checked) => handleIncludeSubfoldersChange(checked)}
+            />
+          </div>
+        </div>
 
         <LayoutGroup id="folder-tree">
           <div className="flex-1 overflow-y-auto" onContextMenu={handleEmptyAreaContextMenu}>
             {adHocCurrentFolder && (
               <div>
-                <SectionHeader title={t('library.folders.sections.currentFolder', 'Current Folder')} isOpen={true} onToggle={() => {}} />
+                <SectionHeader
+                  title={t('library.folders.sections.currentFolder', 'Current Folder')}
+                  isOpen={true}
+                  onToggle={() => {}}
+                />
                 <div className="pt-1 pb-2">
                   <div
                     onClick={() => onFolderSelect(adHocCurrentFolder.path)}
@@ -1184,12 +1266,12 @@ export default function FolderTree({
             {showPinnedSection && (
               <>
                 <div>
-	                  <SectionHeader
-	                    title={t('library.folders.sections.pinned')}
-	                    isOpen={isPinnedOpen}
-	                    isLoading={isPinnedFoldersLoading}
-	                    onToggle={() => toggleSection('pinned')}
-	                  />
+                  <SectionHeader
+                    title={t('library.folders.sections.pinned')}
+                    isOpen={isPinnedOpen}
+                    isLoading={isPinnedFoldersLoading}
+                    onToggle={() => toggleSection('pinned')}
+                  />
                 </div>
                 <AnimatePresence initial={false}>
                   {isPinnedOpen && (
@@ -1200,18 +1282,18 @@ export default function FolderTree({
                       transition={{ duration: 0.2, ease: 'easeInOut' }}
                       className="overflow-hidden"
                     >
-	                      <div className="pt-1 pb-2">
-	                        {isPinnedFoldersLoading && !isSearching && (
-	                          <Text
-	                            as="div"
-	                            variant={TextVariants.small}
-	                            className="flex items-center gap-2 p-2 text-text-secondary"
-	                          >
-	                            <Loader2 size={14} className="animate-spin" />
-	                            <span>{t('library.folders.loadingPinned', 'Loading pinned folders')}</span>
-	                          </Text>
-	                        )}
-	                        <AnimatePresence>
+                      <div className="pt-1 pb-2">
+                        {isPinnedFoldersLoading && !isSearching && (
+                          <Text
+                            as="div"
+                            variant={TextVariants.small}
+                            className="flex items-center gap-2 p-2 text-text-secondary"
+                          >
+                            <Loader2 size={14} className="animate-spin" />
+                            <span>{t('library.folders.loadingPinned', 'Loading pinned folders')}</span>
+                          </Text>
+                        )}
+                        <AnimatePresence>
                           {filteredPinnedTrees.map((pinnedTree, index) => (
                             <motion.div
                               key={`pinned-${pinnedTree.path}`}
@@ -1244,6 +1326,8 @@ export default function FolderTree({
                                 isInstantTransition={isInstantTransition}
                                 folderIcons={folderIcons}
                                 isLayoutDragging={isLayoutDragging}
+                                isRescanning={rescanningFolders.has(`source:${pinnedTree.path}`)}
+                                onRescan={handleRescanSourceFolder}
                               />
                             </motion.div>
                           ))}
@@ -1283,64 +1367,71 @@ export default function FolderTree({
                       transition={{ duration: 0.2, ease: 'easeInOut' }}
                       className="overflow-hidden"
                     >
-	                      <div className="pt-1 pb-2">
-	                        {catalogRoots.length === 0 && (
-	                          <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="px-2 py-1.5">
-	                            No collections yet - click + above to add one.
-	                          </Text>
-	                        )}
-	                        {catalogRoots.map((root) => {
-	                          const tree = catalogFolderTrees[root.id];
-	                          const isLoadingTree = loadingCatalogTreeIds.has(root.id);
-	                          if (!tree) {
-	                            return (
-	                              <Text
-	                                as="div"
-	                                key={`catalog-${root.id}`}
-	                                className={clsx(
-	                                  'group flex items-center gap-2 p-2 rounded-md transition-colors',
-	                                  activeCatalogRootId === root.id ? 'bg-card-active text-text-primary' : '',
-	                                )}
-	                              >
-	                                {isLoadingTree ? (
-	                                  <Loader2 size={16} className="ml-1 shrink-0 text-text-secondary animate-spin" />
-	                                ) : (
-	                                  <Database size={16} className="ml-1 shrink-0 text-text-secondary" />
-	                                )}
-	                                <span className="truncate min-w-0 flex-1">{root.label || root.absolutePath}</span>
-	                                {showImageCounts && (
-	                                  <span className="text-xs text-text-secondary tabular-nums">{root.imageCount}</span>
-	                                )}
-	                                <button
-	                                  className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-sm hover:bg-surface"
-	                                  data-tooltip="Rescan"
-	                                  onClick={(event) => handleRescanCatalogRoot(event, root)}
-	                                >
-	                                  <RefreshCw size={14} />
-	                                </button>
-	                              </Text>
-	                            );
-	                          }
-	                          return (
-	                            <TreeNode
-	                              key={`catalog-${root.id}`}
-	                              sectionId="catalog"
-	                              expandedFolders={effectiveExpandedFolders}
-	                              isExpanded={effectiveExpandedFolders.has(tree.path)}
-	                              node={tree}
-	                              onContextMenu={handleCatalogContextMenu}
-	                              onFolderSelect={handleCatalogFolderSelect}
-	                              onToggle={onToggleFolder}
-	                              selectedPath={selectedPath}
-	                              pinnedFolders={[]}
-	                              showImageCounts={showImageCounts && isHovering}
-	                              isInstantTransition={isInstantTransition}
-	                              folderIcons={folderIcons}
-	                              isLayoutDragging={isLayoutDragging}
-	                            />
-	                          );
-	                        })}
-	                      </div>
+                      <div className="pt-1 pb-2">
+                        {catalogRoots.length === 0 && (
+                          <Text
+                            as="div"
+                            variant={TextVariants.small}
+                            color={TextColors.secondary}
+                            className="px-2 py-1.5"
+                          >
+                            No collections yet - click + above to add one.
+                          </Text>
+                        )}
+                        {catalogRoots.map((root) => {
+                          const tree = catalogFolderTrees[root.id];
+                          const isLoadingTree = loadingCatalogTreeIds.has(root.id);
+                          if (!tree) {
+                            return (
+                              <Text
+                                as="div"
+                                key={`catalog-${root.id}`}
+                                className={clsx(
+                                  'group flex items-center gap-2 p-2 rounded-md transition-colors',
+                                  activeCatalogRootId === root.id ? 'bg-card-active text-text-primary' : '',
+                                )}
+                              >
+                                {isLoadingTree ? (
+                                  <Loader2 size={16} className="ml-1 shrink-0 text-text-secondary animate-spin" />
+                                ) : (
+                                  <Database size={16} className="ml-1 shrink-0 text-text-secondary" />
+                                )}
+                                <span className="truncate min-w-0 flex-1">{root.label || root.absolutePath}</span>
+                                {showImageCounts && (
+                                  <span className="text-xs text-text-secondary tabular-nums">{root.imageCount}</span>
+                                )}
+                                <button
+                                  className="opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded-sm hover:bg-surface"
+                                  data-tooltip="Rescan"
+                                  onClick={(event) => handleRescanCatalogRoot(event, root)}
+                                >
+                                  <RefreshCw size={14} />
+                                </button>
+                              </Text>
+                            );
+                          }
+                          return (
+                            <TreeNode
+                              key={`catalog-${root.id}`}
+                              sectionId="catalog"
+                              expandedFolders={effectiveExpandedFolders}
+                              isExpanded={effectiveExpandedFolders.has(tree.path)}
+                              node={tree}
+                              onContextMenu={handleCatalogContextMenu}
+                              onFolderSelect={handleCatalogFolderSelect}
+                              onToggle={onToggleFolder}
+                              selectedPath={selectedPath}
+                              pinnedFolders={[]}
+                              showImageCounts={showImageCounts && isHovering}
+                              isInstantTransition={isInstantTransition}
+                              folderIcons={folderIcons}
+                              isLayoutDragging={isLayoutDragging}
+                              isRescanning={rescanningFolders.has(`catalog:${root.id}`)}
+                              onRescan={(event) => handleRescanCatalogRoot(event, root)}
+                            />
+                          );
+                        })}
+                      </div>
                     </motion.div>
                   )}
                 </AnimatePresence>
@@ -1349,17 +1440,35 @@ export default function FolderTree({
 
             {librarySource.type === 'catalog' && (
               <>
-                <div><SectionHeader title="Smart Collections" isOpen={true} onToggle={() => {}} /></div>
+                <div>
+                  <SectionHeader title="Smart Collections" isOpen={true} onToggle={() => {}} />
+                </div>
                 <div className="pt-1 pb-2">
                   {isLoadingSmartCollections ? (
-                    <Text as="div" variant={TextVariants.small} className="flex items-center gap-2 p-2 text-text-secondary"><Loader2 size={14} className="animate-spin" />Loading collections</Text>
+                    <Text
+                      as="div"
+                      variant={TextVariants.small}
+                      className="flex items-center gap-2 p-2 text-text-secondary"
+                    >
+                      <Loader2 size={14} className="animate-spin" />
+                      Loading collections
+                    </Text>
                   ) : smartCollections.length === 0 ? (
-                    <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="p-2">No saved searches</Text>
-                  ) : smartCollections.map((collection) => (
-                    <button key={collection.id} className="w-full flex items-center gap-2 p-2 rounded-md text-left text-text-secondary hover:bg-surface hover:text-text-primary" onClick={() => void handleSmartCollectionSelect(collection)}>
-                      <Star size={15} className="shrink-0" /><span className="truncate">{collection.name}</span>
-                    </button>
-                  ))}
+                    <Text as="div" variant={TextVariants.small} color={TextColors.secondary} className="p-2">
+                      No saved searches
+                    </Text>
+                  ) : (
+                    smartCollections.map((collection) => (
+                      <button
+                        key={collection.id}
+                        className="w-full flex items-center gap-2 p-2 rounded-md text-left text-text-secondary hover:bg-surface hover:text-text-primary"
+                        onClick={() => void handleSmartCollectionSelect(collection)}
+                      >
+                        <Star size={15} className="shrink-0" />
+                        <span className="truncate">{collection.name}</span>
+                      </button>
+                    ))
+                  )}
                 </div>
               </>
             )}
@@ -1428,12 +1537,12 @@ export default function FolderTree({
             {filteredTrees && filteredTrees.length > 0 && (
               <>
                 <div>
-	                  <SectionHeader
-	                    title={t('library.folders.sections.folders')}
-	                    isOpen={isCurrentOpen}
-	                    isLoading={isRootFoldersLoading}
-	                    onToggle={() => toggleSection('current')}
-	                  />
+                  <SectionHeader
+                    title={t('library.folders.sections.folders')}
+                    isOpen={isCurrentOpen}
+                    isLoading={isRootFoldersLoading}
+                    onToggle={() => toggleSection('current')}
+                  />
                 </div>
                 <AnimatePresence initial={false}>
                   {isCurrentOpen && (
@@ -1478,6 +1587,8 @@ export default function FolderTree({
                                 isInstantTransition={isInstantTransition}
                                 folderIcons={folderIcons}
                                 isLayoutDragging={isLayoutDragging}
+                                isRescanning={rescanningFolders.has(`source:${tree.path}`)}
+                                onRescan={handleRescanSourceFolder}
                               />
                             </motion.div>
                           ))}
@@ -1516,38 +1627,49 @@ export default function FolderTree({
               </>
             )}
 
-            {!filteredTrees?.length && !hasVisiblePinnedTrees && !hasVisibleAlbums && !hasVisibleCatalogRoots && isSearching && (
-              <Text className="p-2 text-center">{t('library.folders.noFoldersFound')}</Text>
-            )}
+            {!filteredTrees?.length &&
+              !hasVisiblePinnedTrees &&
+              !hasVisibleAlbums &&
+              !hasVisibleCatalogRoots &&
+              isSearching && <Text className="p-2 text-center">{t('library.folders.noFoldersFound')}</Text>}
 
             {isRootFoldersLoading && folderTrees.length === 0 && !isSearching && (
               <>
                 <div>
-	                  <SectionHeader
-	                    title={t('library.folders.sections.folders')}
-	                    isOpen={isCurrentOpen}
-	                    isLoading={isRootFoldersLoading}
-	                    onToggle={() => toggleSection('current')}
-	                  />
-	                </div>
-	                {isCurrentOpen && (
-	                  <Text as="div" variant={TextVariants.small} className="flex items-center gap-2 p-2 text-text-secondary">
-	                    <Loader2 size={14} className="animate-spin" />
-	                    <span>{t('library.folders.loadingFolders', 'Loading folders')}</span>
-	                  </Text>
-	                )}
+                  <SectionHeader
+                    title={t('library.folders.sections.folders')}
+                    isOpen={isCurrentOpen}
+                    isLoading={isRootFoldersLoading}
+                    onToggle={() => toggleSection('current')}
+                  />
+                </div>
+                {isCurrentOpen && (
+                  <Text
+                    as="div"
+                    variant={TextVariants.small}
+                    className="flex items-center gap-2 p-2 text-text-secondary"
+                  >
+                    <Loader2 size={14} className="animate-spin" />
+                    <span>{t('library.folders.loadingFolders', 'Loading folders')}</span>
+                  </Text>
+                )}
               </>
             )}
 
-            {folderTrees.length === 0 && pinnedFolderTrees.length === 0 && !hasVisibleCatalogRoots && !isSearching && !isRootFoldersLoading && !isPinnedFoldersLoading && (
-              <div className="pt-1">
-                {isLoading ? (
-                  <Text className="animate-pulse p-2">{t('library.folders.loading')}</Text>
-                ) : (
-                  <Text className="p-2">{t('library.folders.openFolderInstruction')}</Text>
-                )}
-              </div>
-            )}
+            {folderTrees.length === 0 &&
+              pinnedFolderTrees.length === 0 &&
+              !hasVisibleCatalogRoots &&
+              !isSearching &&
+              !isRootFoldersLoading &&
+              !isPinnedFoldersLoading && (
+                <div className="pt-1">
+                  {isLoading ? (
+                    <Text className="animate-pulse p-2">{t('library.folders.loading')}</Text>
+                  ) : (
+                    <Text className="p-2">{t('library.folders.openFolderInstruction')}</Text>
+                  )}
+                </div>
+              )}
           </div>
         </LayoutGroup>
       </div>
