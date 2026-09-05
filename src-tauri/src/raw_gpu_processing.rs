@@ -206,6 +206,114 @@ fn amaze_green_kernel(
 }
 
 #[cube(launch_unchecked)]
+fn igv_green_pass1_kernel(
+    input: &Array<f32>,
+    output: &mut Array<f32>,
+    width: usize,
+    height: usize,
+    c00: u32,
+    c01: u32,
+    c10: u32,
+    c11: u32,
+) {
+    let index = ABSOLUTE_POS;
+    if index >= input.len() {
+        return;
+    }
+    let row = index / width;
+    let col = index % width;
+    if bayer_color(row, col, c00, c01, c10, c11) == 1 {
+        output[index] = input[index];
+        return;
+    }
+
+    let center = input[index];
+    let up1 = if row >= 1 { row - 1 } else { 0 };
+    let up2 = if row >= 2 { row - 2 } else { 0 };
+    let up3 = if row >= 3 { row - 3 } else { 0 };
+    let up4 = if row >= 4 { row - 4 } else { 0 };
+    let up5 = if row >= 5 { row - 5 } else { 0 };
+    let down1 = row + 1;
+    let down2 = row + 2;
+    let down3 = row + 3;
+    let down4 = row + 4;
+    let down5 = row + 5;
+    let left1 = if col >= 1 { col - 1 } else { 0 };
+    let left2 = if col >= 2 { col - 2 } else { 0 };
+    let left3 = if col >= 3 { col - 3 } else { 0 };
+    let left4 = if col >= 4 { col - 4 } else { 0 };
+    let left5 = if col >= 5 { col - 5 } else { 0 };
+    let right1 = col + 1;
+    let right2 = col + 2;
+    let right3 = col + 3;
+    let right4 = col + 4;
+    let right5 = col + 5;
+    let n = (23.0 * raw_sample(input, up1, col, width, height) + 23.0 * raw_sample(input, up3, col, width, height)
+        + raw_sample(input, up5, col, width, height) + raw_sample(input, down1, col, width, height) + 40.0 * center
+        - 32.0 * raw_sample(input, up2, col, width, height) - 8.0 * raw_sample(input, up4, col, width, height)) / 48.0;
+    let s = (23.0 * raw_sample(input, down1, col, width, height) + 23.0 * raw_sample(input, down3, col, width, height)
+        + raw_sample(input, down5, col, width, height) + raw_sample(input, up1, col, width, height) + 40.0 * center
+        - 32.0 * raw_sample(input, down2, col, width, height) - 8.0 * raw_sample(input, down4, col, width, height)) / 48.0;
+    let e = (23.0 * raw_sample(input, row, right1, width, height) + 23.0 * raw_sample(input, row, right3, width, height)
+        + raw_sample(input, row, right5, width, height) + raw_sample(input, row, left1, width, height) + 40.0 * center
+        - 32.0 * raw_sample(input, row, right2, width, height) - 8.0 * raw_sample(input, row, right4, width, height)) / 48.0;
+    let w = (23.0 * raw_sample(input, row, left1, width, height) + 23.0 * raw_sample(input, row, left3, width, height)
+        + raw_sample(input, row, left5, width, height) + raw_sample(input, row, right1, width, height) + 40.0 * center
+        - 32.0 * raw_sample(input, row, left2, width, height) - 8.0 * raw_sample(input, row, left4, width, height)) / 48.0;
+    let grad_n = 0.00001 + (raw_sample(input, up1, col, width, height) - raw_sample(input, up3, col, width, height)).abs()
+        + (center - raw_sample(input, up2, col, width, height)).abs();
+    let grad_s = 0.00001 + (raw_sample(input, down1, col, width, height) - raw_sample(input, down3, col, width, height)).abs()
+        + (center - raw_sample(input, down2, col, width, height)).abs();
+    let grad_e = 0.00001 + (raw_sample(input, row, right1, width, height) - raw_sample(input, row, right3, width, height)).abs()
+        + (center - raw_sample(input, row, right2, width, height)).abs();
+    let grad_w = 0.00001 + (raw_sample(input, row, left1, width, height) - raw_sample(input, row, left3, width, height)).abs()
+        + (center - raw_sample(input, row, left2, width, height)).abs();
+    let v = (grad_s * n + grad_n * s) / (grad_n + grad_s);
+    let hh = (grad_w * e + grad_e * w) / (grad_e + grad_w);
+    let gv = 1.0 / (grad_n + grad_s);
+    let gh = 1.0 / (grad_e + grad_w);
+    output[index] = (gh * v + gv * hh) / (gh + gv);
+}
+
+#[cube(launch_unchecked)]
+fn igv_green_refine_kernel(
+    input: &Array<f32>,
+    pass1: &Array<f32>,
+    output: &mut Array<f32>,
+    width: usize,
+    height: usize,
+    c00: u32,
+    c01: u32,
+    c10: u32,
+    c11: u32,
+) {
+    let index = ABSOLUTE_POS;
+    if index >= input.len() {
+        return;
+    }
+    let row = index / width;
+    let col = index % width;
+    if bayer_color(row, col, c00, c01, c10, c11) == 1 {
+        output[index] = pass1[index];
+        return;
+    }
+    let up = if row > 0 { row - 1 } else { 0 };
+    let down = if row + 1 < height { row + 1 } else { height - 1 };
+    let left = if col > 0 { col - 1 } else { 0 };
+    let right = if col + 1 < width { col + 1 } else { width - 1 };
+    let up_green = if bayer_color(up, col, c00, c01, c10, c11) == 1 { 1.0 } else { 0.0 };
+    let down_green = if bayer_color(down, col, c00, c01, c10, c11) == 1 { 1.0 } else { 0.0 };
+    let left_green = if bayer_color(row, left, c00, c01, c10, c11) == 1 { 1.0 } else { 0.0 };
+    let right_green = if bayer_color(row, right, c00, c01, c10, c11) == 1 { 1.0 } else { 0.0 };
+    let sum = pass1[index]
+        + input[up * width + col] * up_green
+        + input[down * width + col] * down_green
+        + input[row * width + left] * left_green
+        + input[row * width + right] * right_green;
+    output[index] = sum / (1.0 + up_green + down_green + left_green + right_green);
+}
+
+#[cube(launch_unchecked)]
 fn initialize_color_diff_kernel(
     sensor: &Array<f32>,
     green: &Array<f32>,
@@ -851,6 +959,76 @@ pub fn amaze_demosaic(
                 .map(|pixel| [pixel[0], pixel[1], pixel[2]])
                 .collect(),
         )
+    }))
+    .ok()
+    .flatten()
+}
+
+/// GPU implementation of the IGV green interpolation and refinement path.
+pub fn igv_demosaic(
+    sensor: &crate::custom_raw_pipeline::RawSensorData,
+) -> Option<Vec<[f32; 3]>> {
+    const MIN_GPU_PIXELS: usize = 1_048_576;
+    if sensor.data.len() < MIN_GPU_PIXELS
+        || sensor.data.len() != sensor.width.saturating_mul(sensor.height)
+    {
+        return None;
+    }
+    let device = SHARED_WGPU_DEVICE.get()?;
+    let [c00, c01, c10, c11] = sensor_cfa_pattern(sensor);
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let client = cubecl::wgpu::WgpuRuntime::client(device);
+        let len = sensor.data.len();
+        let (cube_count, cube_dim) = launch_1d(&client, len);
+        let input = client.create_from_slice(bytemuck::cast_slice(&sensor.data));
+        let pass1 = client.empty(len * std::mem::size_of::<f32>());
+        let green = client.empty(len * std::mem::size_of::<f32>());
+        let red_known = client.empty(len * std::mem::size_of::<f32>());
+        let blue_known = client.empty(len * std::mem::size_of::<f32>());
+        let red_diff = client.empty(len * std::mem::size_of::<f32>());
+        let blue_diff = client.empty(len * std::mem::size_of::<f32>());
+        let output = client.empty(len * 3 * std::mem::size_of::<f32>());
+        unsafe {
+            igv_green_pass1_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client, cube_count.clone(), cube_dim.clone(),
+                ArrayArg::from_raw_parts(input.clone(), len), ArrayArg::from_raw_parts(pass1.clone(), len),
+                sensor.width, sensor.height, c00, c01, c10, c11,
+            );
+            igv_green_refine_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client, cube_count.clone(), cube_dim.clone(),
+                ArrayArg::from_raw_parts(input.clone(), len), ArrayArg::from_raw_parts(pass1, len),
+                ArrayArg::from_raw_parts(green.clone(), len), sensor.width, sensor.height, c00, c01, c10, c11,
+            );
+            initialize_color_diff_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client, cube_count.clone(), cube_dim.clone(),
+                ArrayArg::from_raw_parts(input.clone(), len), ArrayArg::from_raw_parts(green.clone(), len),
+                ArrayArg::from_raw_parts(red_known.clone(), len), sensor.width, c00, c01, c10, c11, 0,
+            );
+            initialize_color_diff_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client, cube_count.clone(), cube_dim.clone(),
+                ArrayArg::from_raw_parts(input, len), ArrayArg::from_raw_parts(green.clone(), len),
+                ArrayArg::from_raw_parts(blue_known.clone(), len), sensor.width, c00, c01, c10, c11, 2,
+            );
+            interpolate_color_diff_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client, cube_count.clone(), cube_dim.clone(),
+                ArrayArg::from_raw_parts(red_known, len), ArrayArg::from_raw_parts(red_diff.clone(), len),
+                sensor.width, sensor.height, c00, c01, c10, c11, 0,
+            );
+            interpolate_color_diff_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client, cube_count.clone(), cube_dim.clone(),
+                ArrayArg::from_raw_parts(blue_known, len), ArrayArg::from_raw_parts(blue_diff.clone(), len),
+                sensor.width, sensor.height, c00, c01, c10, c11, 2,
+            );
+            reconstruct_color_diff_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client, cube_count, cube_dim,
+                ArrayArg::from_raw_parts(green, len), ArrayArg::from_raw_parts(red_diff, len),
+                ArrayArg::from_raw_parts(blue_diff, len), ArrayArg::from_raw_parts(output.clone(), len * 3),
+            );
+        }
+        let bytes = client.read_one(output).ok()?;
+        let demosaiced = f32::from_bytes(&bytes);
+        if demosaiced.len() != len * 3 { return None; }
+        Some(demosaiced.chunks_exact(3).map(|pixel| [pixel[0], pixel[1], pixel[2]]).collect())
     }))
     .ok()
     .flatten()

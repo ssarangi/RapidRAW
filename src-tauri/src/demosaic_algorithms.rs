@@ -97,6 +97,11 @@ pub fn demosaic(sensor: &RawSensorData, algo: DemosaicAlgorithm) -> Vec<[f32; 3]
             return rgb;
         }
     }
+    if algo == DemosaicAlgorithm::IGV {
+        if let Some(rgb) = crate::raw_gpu_processing::igv_demosaic(sensor) {
+            return rgb;
+        }
+    }
 
     let green = match algo {
         DemosaicAlgorithm::Bilinear => {
