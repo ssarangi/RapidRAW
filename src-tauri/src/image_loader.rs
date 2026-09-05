@@ -195,7 +195,14 @@ pub fn load_base_image_from_bytes(
             )
         }) {
             Ok(Ok(mut image)) => {
-                if !uses_custom_raw_develop
+                // The phase-one RAW frame intentionally skips the legacy
+                // CPU enhancement pass. It is only a responsive preview and
+                // will be replaced by the complete custom pipeline shortly;
+                // spending another full-image CPU pass here defeats that
+                // purpose. Explicit full PPG development still keeps the
+                // legacy behavior below.
+                if allow_custom_pipeline
+                    && !uses_custom_raw_develop
                     && !use_fast_raw_dev
                     && (color_nr_amount > 0.0 || sharpening_amount > 0.0)
                 {
@@ -1194,9 +1201,14 @@ pub async fn load_image(
     let metadata: ImageMetadata = crate::exif_processing::load_sidecar(&sidecar_path);
 
     let settings_for_decode = load_settings(app_handle.clone()).unwrap_or_default();
+    // The first editor frame uses the established rawler development path;
+    // retain the full settings/adjustments for the quality upgrade that runs
+    // after the editor is already responsive.
+    let settings_for_raw_upgrade = settings_for_decode.clone();
 
     let path_clone = source_path_str.clone();
     let metadata_adjustments = metadata.adjustments.clone();
+    let adjustments_for_raw_upgrade = metadata.adjustments.clone();
 
     let cached_data = state
         .decoded_image_cache
@@ -1227,20 +1239,12 @@ pub async fn load_image(
                             return Err("Load cancelled".to_string());
                         }
 
-                        // Decode directly with our own custom pipeline
-                        // (allow_custom_pipeline: true) - not a fast
-                        // rawler-PPG pass followed by a background upgrade.
-                        // That two-phase approach used to make sense when
-                        // the fast pass was the only thing on screen while
-                        // the slower pipeline ran, but now that the
-                        // embedded-preview thumbnail covers "something
-                        // visible immediately" on its own, decoding twice
-                        // was pure wasted work: the PPG pass was never
-                        // shown, just thrown away the moment this (slower)
-                        // decode finished. `reprocess_raw_develop` still
-                        // reuses the same background-upgrade path for
-                        // re-decoding on demand when the user changes RAW
-                        // Develop settings after this initial load.
+                        // Return the editor's first usable frame from the
+                        // fast rawler path. The full custom RAW pipeline is
+                        // scheduled after this command returns, so AMaZE/
+                        // IGV/LMMSE and RAW-domain denoise can never block
+                        // the WebView while the user is opening or changing
+                        // images.
                         let img = run_on_raw_develop_pool(|| {
                             load_base_image_from_bytes(
                                 &mmap,
@@ -1248,7 +1252,7 @@ pub async fn load_image(
                                 false,
                                 &settings,
                                 Some(&metadata_adjustments),
-                                true,
+                                false,
                                 cancel_token.clone(),
                             )
                         })
@@ -1278,7 +1282,7 @@ pub async fn load_image(
                                 false,
                                 &settings,
                                 Some(&metadata_adjustments),
-                                true,
+                                false,
                                 cancel_token.clone(),
                             )
                         })
@@ -1320,6 +1324,22 @@ pub async fn load_image(
         image: pristine_arc,
         is_raw,
     });
+
+    // Full-quality RAW development is intentionally a background upgrade.
+    // The generation guard inside this task means selecting another image
+    // or changing the RAW Develop controls makes the obsolete work vanish
+    // before it can replace the active editor image.
+    if is_raw {
+        spawn_raw_develop_upgrade(
+            app_handle.clone(),
+            path.clone(),
+            source_path_str.clone(),
+            adjustments_for_raw_upgrade,
+            settings_for_raw_upgrade,
+            generation_tracker,
+            my_generation,
+        );
+    }
 
     Ok(LoadImageResult {
         width: orig_width,
