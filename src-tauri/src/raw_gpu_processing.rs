@@ -289,6 +289,123 @@ fn ycbcr_to_rgb_kernel(
     output[offset + 2] = if b > 0.0 { b } else { 0.0 };
 }
 
+#[cube(launch_unchecked)]
+fn gaussian_horizontal_7_kernel(
+    input: &Array<f32>,
+    output: &mut Array<f32>,
+    width: usize,
+    w0: f32,
+    w1: f32,
+    w2: f32,
+    w3: f32,
+) {
+    let index = ABSOLUTE_POS;
+    if index >= input.len() {
+        return;
+    }
+    let row = index / width;
+    let col = index % width;
+    let x0 = if col >= 3 { col - 3 } else { 0 };
+    let x1 = if col >= 2 { col - 2 } else { 0 };
+    let x2 = if col >= 1 { col - 1 } else { 0 };
+    let x4 = if col + 1 < width { col + 1 } else { width - 1 };
+    let x5 = if col + 2 < width { col + 2 } else { width - 1 };
+    let x6 = if col + 3 < width { col + 3 } else { width - 1 };
+    output[index] = w3 * input[row * width + x0]
+        + w2 * input[row * width + x1]
+        + w1 * input[row * width + x2]
+        + w0 * input[index]
+        + w1 * input[row * width + x4]
+        + w2 * input[row * width + x5]
+        + w3 * input[row * width + x6];
+}
+
+#[cube(launch_unchecked)]
+fn gaussian_vertical_7_kernel(
+    input: &Array<f32>,
+    output: &mut Array<f32>,
+    width: usize,
+    height: usize,
+    w0: f32,
+    w1: f32,
+    w2: f32,
+    w3: f32,
+) {
+    let index = ABSOLUTE_POS;
+    if index >= input.len() {
+        return;
+    }
+    let row = index / width;
+    let col = index % width;
+    let y0 = if row >= 3 { row - 3 } else { 0 };
+    let y1 = if row >= 2 { row - 2 } else { 0 };
+    let y2 = if row >= 1 { row - 1 } else { 0 };
+    let y4 = if row + 1 < height { row + 1 } else { height - 1 };
+    let y5 = if row + 2 < height { row + 2 } else { height - 1 };
+    let y6 = if row + 3 < height { row + 3 } else { height - 1 };
+    output[index] = w3 * input[y0 * width + col]
+        + w2 * input[y1 * width + col]
+        + w1 * input[y2 * width + col]
+        + w0 * input[index]
+        + w1 * input[y4 * width + col]
+        + w2 * input[y5 * width + col]
+        + w3 * input[y6 * width + col];
+}
+
+#[cube(launch_unchecked)]
+fn sharpen_blend_mask_kernel(input: &Array<f32>, output: &mut Array<f32>, width: usize, height: usize) {
+    let index = ABSOLUTE_POS;
+    if index >= input.len() {
+        return;
+    }
+    let row = index / width;
+    let col = index % width;
+    let left = if col > 0 { col - 1 } else { 0 };
+    let right = if col + 1 < width { col + 1 } else { width - 1 };
+    let up = if row > 0 { row - 1 } else { 0 };
+    let down = if row + 1 < height { row + 1 } else { height - 1 };
+    let gx = input[row * width + right] - input[row * width + left];
+    let gy = input[down * width + col] - input[up * width + col];
+    let gradient = (gx * gx + gy * gy).sqrt();
+    let raw = gradient / 0.04;
+    let t = if raw < 0.0 { 0.0 } else if raw > 1.0 { 1.0 } else { raw };
+    output[index] = t * t * (3.0 - 2.0 * t);
+}
+
+#[cube(launch_unchecked)]
+fn unsharp_combine_kernel(
+    source: &Array<f32>,
+    blurred: &Array<f32>,
+    blend: &Array<f32>,
+    output: &mut Array<f32>,
+    amount: f32,
+) {
+    let index = ABSOLUTE_POS;
+    if index < source.len() {
+        output[index] = source[index] + (source[index] - blurred[index]) * amount * 2.0 * blend[index];
+    }
+}
+
+#[cube(launch_unchecked)]
+fn ycbcr_planes_to_rgb_kernel(
+    y: &Array<f32>,
+    cb: &Array<f32>,
+    cr: &Array<f32>,
+    output: &mut Array<f32>,
+) {
+    let index = ABSOLUTE_POS;
+    if index >= y.len() {
+        return;
+    }
+    let r = y[index] + 1.402 * cr[index];
+    let g = y[index] - 0.344136 * cb[index] - 0.714136 * cr[index];
+    let b = y[index] + 1.772 * cb[index];
+    let offset = index * 3;
+    output[offset] = if r > 0.0 { r } else { 0.0 };
+    output[offset + 1] = if g > 0.0 { g } else { 0.0 };
+    output[offset + 2] = if b > 0.0 { b } else { 0.0 };
+}
+
 /// Performs CFA-periodic hot/dead pixel correction on the shared GPU.
 ///
 /// The transfer overhead outweighs a GPU dispatch on tiny RAW previews, so
@@ -623,6 +740,134 @@ pub fn wavelet_denoise(
         }
         for (pixel, denoised) in rgb.iter_mut().zip(denoised.chunks_exact(3)) {
             *pixel = [denoised[0], denoised[1], denoised[2]];
+        }
+        Some(())
+    }))
+    .ok()
+    .flatten()
+    .is_some()
+}
+
+/// GPU implementation of the default radius-1 luminance unsharp mask.
+/// Other radii and Richardson-Lucy deconvolution intentionally use their
+/// existing CPU paths until their dynamic/iterative kernels are ported.
+pub fn unsharp_mask(
+    rgb: &mut [[f32; 3]],
+    width: usize,
+    height: usize,
+    amount: f32,
+    radius: f32,
+) -> bool {
+    const MIN_GPU_PIXELS: usize = 1_048_576;
+
+    if amount <= 0.0
+        || rgb.len() < MIN_GPU_PIXELS
+        || rgb.len() != width.saturating_mul(height)
+        || (radius - 1.0).abs() > 1e-6
+    {
+        return false;
+    }
+    let Some(device) = SHARED_WGPU_DEVICE.get() else {
+        return false;
+    };
+
+    // These are precisely the CPU path's normalized Gaussian weights for
+    // sigma=1 and radius=ceil(3*sigma)=3, passed as scalar uniforms.
+    let mut weights = [0.0f32; 4];
+    let mut sum = 0.0f32;
+    for offset in -3i32..=3 {
+        sum += (-((offset * offset) as f32) / 2.0).exp();
+    }
+    for offset in 0..=3usize {
+        weights[offset] = (-((offset * offset) as f32) / 2.0).exp() / sum;
+    }
+
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let client = cubecl::wgpu::WgpuRuntime::client(device);
+        let len = rgb.len();
+        let (cube_count, cube_dim) = launch_1d(&client, len);
+        let input = client.create_from_slice(bytemuck::cast_slice(rgb));
+        let y = client.empty(len * std::mem::size_of::<f32>());
+        let cb = client.empty(len * std::mem::size_of::<f32>());
+        let cr = client.empty(len * std::mem::size_of::<f32>());
+        let horizontal = client.empty(len * std::mem::size_of::<f32>());
+        let blurred = client.empty(len * std::mem::size_of::<f32>());
+        let blend = client.empty(len * std::mem::size_of::<f32>());
+        let sharpened = client.empty(len * std::mem::size_of::<f32>());
+        let output = client.empty(len * 3 * std::mem::size_of::<f32>());
+
+        unsafe {
+            rgb_to_ycbcr_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client,
+                cube_count.clone(),
+                cube_dim.clone(),
+                ArrayArg::from_raw_parts(input, len * 3),
+                ArrayArg::from_raw_parts(y.clone(), len),
+                ArrayArg::from_raw_parts(cb.clone(), len),
+                ArrayArg::from_raw_parts(cr.clone(), len),
+            );
+            gaussian_horizontal_7_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client,
+                cube_count.clone(),
+                cube_dim.clone(),
+                ArrayArg::from_raw_parts(y.clone(), len),
+                ArrayArg::from_raw_parts(horizontal.clone(), len),
+                width,
+                weights[0],
+                weights[1],
+                weights[2],
+                weights[3],
+            );
+            gaussian_vertical_7_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client,
+                cube_count.clone(),
+                cube_dim.clone(),
+                ArrayArg::from_raw_parts(horizontal, len),
+                ArrayArg::from_raw_parts(blurred.clone(), len),
+                width,
+                height,
+                weights[0],
+                weights[1],
+                weights[2],
+                weights[3],
+            );
+            sharpen_blend_mask_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client,
+                cube_count.clone(),
+                cube_dim.clone(),
+                ArrayArg::from_raw_parts(y.clone(), len),
+                ArrayArg::from_raw_parts(blend.clone(), len),
+                width,
+                height,
+            );
+            unsharp_combine_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client,
+                cube_count.clone(),
+                cube_dim.clone(),
+                ArrayArg::from_raw_parts(y, len),
+                ArrayArg::from_raw_parts(blurred, len),
+                ArrayArg::from_raw_parts(blend, len),
+                ArrayArg::from_raw_parts(sharpened.clone(), len),
+                amount,
+            );
+            ycbcr_planes_to_rgb_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client,
+                cube_count,
+                cube_dim,
+                ArrayArg::from_raw_parts(sharpened, len),
+                ArrayArg::from_raw_parts(cb, len),
+                ArrayArg::from_raw_parts(cr, len),
+                ArrayArg::from_raw_parts(output.clone(), len * 3),
+            );
+        }
+
+        let bytes = client.read_one(output).ok()?;
+        let sharpened = f32::from_bytes(&bytes);
+        if sharpened.len() != len * 3 {
+            return None;
+        }
+        for (pixel, sharpened) in rgb.iter_mut().zip(sharpened.chunks_exact(3)) {
+            *pixel = [sharpened[0], sharpened[1], sharpened[2]];
         }
         Some(())
     }))

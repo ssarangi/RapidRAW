@@ -165,6 +165,10 @@ pub fn unsharp_mask(rgb: &mut [[f32; 3]], width: usize, height: usize, amount: f
         return;
     }
 
+    if crate::raw_gpu_processing::unsharp_mask(rgb, width, height, amount, radius) {
+        return;
+    }
+
     let (mut y_plane, cb_plane, cr_plane) = split_yc(rgb);
 
     let blurred = gaussian_blur(&y_plane, width, height, radius.max(0.1));
