@@ -2107,9 +2107,45 @@ pub fn run() {
                         #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
                         { "libonnxruntime.so" }
                     };
-                    let ort_library_path = resource_path.join(ort_library_name);
+                    // A CUDA runtime is an optional acceleration pack. Keep
+                    // the small CPU runtime bundled for every machine, but
+                    // prefer a complete GPU pack from app data (downloaded
+                    // after the user opts in) or from a GPU-specific build.
+                    // The CUDA provider itself is loaded by ONNX Runtime from
+                    // the same directory as this library.
+                    let gpu_runtime_name = {
+                        #[cfg(target_os = "windows")]
+                        { "onnxruntime_providers_cuda.dll" }
+                        #[cfg(target_os = "linux")]
+                        { "libonnxruntime_providers_cuda.so" }
+                        #[cfg(target_os = "macos")]
+                        { "libonnxruntime_providers_cuda.dylib" }
+                        #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+                        { "libonnxruntime_providers_cuda.so" }
+                    };
+                    let bundled_gpu_dir = resource_path.join("onnxruntime-gpu");
+                    let app_data_gpu_dir = app_handle
+                        .path()
+                        .app_data_dir()
+                        .ok()
+                        .map(|path| path.join("runtimes").join("onnxruntime-gpu"));
+                    let gpu_runtime_dir = app_data_gpu_dir
+                        .filter(|path| path.join(ort_library_name).is_file() && path.join(gpu_runtime_name).is_file())
+                        .or_else(|| {
+                            (bundled_gpu_dir.join(ort_library_name).is_file()
+                                && bundled_gpu_dir.join(gpu_runtime_name).is_file())
+                                .then_some(bundled_gpu_dir)
+                        });
+                    let ort_library_path = gpu_runtime_dir
+                        .as_ref()
+                        .map(|path| path.join(ort_library_name))
+                        .unwrap_or_else(|| resource_path.join(ort_library_name));
                     std::env::set_var("ORT_DYLIB_PATH", &ort_library_path);
-                    println!("Set ORT_DYLIB_PATH to: {}", ort_library_path.display());
+                    log::info!(
+                        "ONNX Runtime: {} ({})",
+                        if gpu_runtime_dir.is_some() { "CUDA pack selected" } else { "CPU pack selected" },
+                        ort_library_path.display()
+                    );
                 }
             }
 

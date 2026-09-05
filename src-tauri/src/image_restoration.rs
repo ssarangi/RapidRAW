@@ -1,4 +1,5 @@
 use image::{DynamicImage, GenericImageView, ImageBuffer, Rgb};
+use ort::execution_providers::{CUDAExecutionProvider, ExecutionProvider};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -24,6 +25,44 @@ const RAWNIND_SOURCE_TILE_SIZE: u32 = RAWNIND_BAYER_TILE_SIZE * 2;
 static RAWNIND_EDITOR_SESSION: OnceLock<Mutex<Option<(PathBuf, ort::session::Session)>>> =
     OnceLock::new();
 
+fn build_rawnind_cpu_session(model_path: &Path) -> Result<ort::session::Session, String> {
+    ort::session::Session::builder()
+        .and_then(|builder| builder.with_intra_threads(1))
+        .and_then(|builder| builder.with_inter_threads(1))
+        .and_then(|builder| builder.with_parallel_execution(false))
+        .and_then(|builder| builder.commit_from_file(model_path))
+        .map_err(|error| format!("Failed to load RawNIND model: {error}"))
+}
+
+fn build_rawnind_editor_session(model_path: &Path) -> Result<ort::session::Session, String> {
+    // CUDA is deliberately probed at runtime. A CPU-only package, a machine
+    // without an NVIDIA driver, or a GPU package whose CUDA/cuDNN dependencies
+    // are unavailable must still open the image through the CPU fallback.
+    let cuda = CUDAExecutionProvider::default();
+    if cuda.is_available().unwrap_or(false) {
+        let provider = cuda.build().error_on_failure();
+        match ort::session::Session::builder()
+            .and_then(|builder| builder.with_execution_providers([provider]))
+            .and_then(|builder| builder.with_intra_threads(1))
+            .and_then(|builder| builder.with_inter_threads(1))
+            .and_then(|builder| builder.with_parallel_execution(false))
+            .and_then(|builder| builder.commit_from_file(model_path))
+        {
+            Ok(session) => {
+                log::info!("RawNIND editor session is using CUDAExecutionProvider");
+                return Ok(session);
+            }
+            Err(error) => {
+                log::warn!(
+                    "RawNIND CUDA provider could not start ({error}); falling back to CPU inference"
+                );
+            }
+        }
+    }
+
+    build_rawnind_cpu_session(model_path)
+}
+
 fn rawnind_editor_session(
     model_path: &Path,
 ) -> Result<std::sync::MutexGuard<'static, Option<(PathBuf, ort::session::Session)>>, String> {
@@ -42,15 +81,8 @@ fn rawnind_editor_session(
         // machine for the whole render. Sequential, one-thread inference is
         // slower in isolation but keeps the application interactive; reuse
         // of the session removes the expensive model-load cost on later edits.
-        let loaded = ort::session::Session::builder()
-            .and_then(|builder| builder.with_intra_threads(1))
-            .and_then(|builder| builder.with_inter_threads(1))
-            .and_then(|builder| builder.with_parallel_execution(false))
-            .and_then(|builder| builder.commit_from_file(model_path))
-            .map_err(|error| format!("Failed to load RawNIND model: {error}"))?;
-        log::info!(
-            "RawNIND editor session ready with one CPU inference thread; subsequent renders reuse it"
-        );
+        let loaded = build_rawnind_editor_session(model_path)?;
+        log::info!("RawNIND editor session ready; subsequent renders reuse it");
         *session = Some((model_path.to_path_buf(), loaded));
     }
 

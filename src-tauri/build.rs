@@ -68,6 +68,58 @@ fn download_and_verify(
     }
 }
 
+/// Fetches the official ONNX Runtime CUDA package into a separate resource
+/// directory. The CPU runtime remains the default resource; this pack is
+/// selected at app startup only when all CUDA provider files are present.
+fn download_cuda_runtime_pack(dest_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    const PACKAGE_URL: &str = "https://api.nuget.org/v3-flatcontainer/microsoft.ml.onnxruntime.gpu.linux/1.22.0/microsoft.ml.onnxruntime.gpu.linux.1.22.0.nupkg";
+    const PACKAGE_SHA256: &str = "d3dabd8235b7a04a67838a3b93437420f1a709528a8d8611e08bedbb08206d1d";
+    const CORE_SHA256: &str = "5ede9537894434c221de73323aa1f644967afeed6569fd570ea356a366e98ecd";
+    const CUDA_PROVIDER_SHA256: &str =
+        "937e28f8d3fca43c77be9afa6795b6b600fe5bc6c97ba4e513fe05f0ee22a546";
+    const NATIVE_ROOT: &str = "runtimes/linux-x64/native/";
+    const FILES: &[&str] = &[
+        "libonnxruntime.so",
+        "libonnxruntime_providers_cuda.so",
+        "libonnxruntime_providers_shared.so",
+        "LICENSE",
+        "ThirdPartyNotices.txt",
+    ];
+
+    let core = dest_dir.join("libonnxruntime.so");
+    let provider = dest_dir.join("libonnxruntime_providers_cuda.so");
+    if core.is_file()
+        && provider.is_file()
+        && verify_sha256(&core, CORE_SHA256)?
+        && verify_sha256(&provider, CUDA_PROVIDER_SHA256)?
+    {
+        println!("cargo:warning=ONNX Runtime CUDA pack already exists and is valid.");
+        return Ok(());
+    }
+
+    fs::create_dir_all(dest_dir)?;
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
+    let package_path = out_dir.join("onnxruntime-gpu-linux-x64-1.22.0.nupkg");
+    download_and_verify(PACKAGE_URL, &package_path, PACKAGE_SHA256)?;
+
+    let package = fs::File::open(&package_path)?;
+    let mut archive = zip::ZipArchive::new(package)?;
+    for file_name in FILES {
+        let archive_name = if matches!(*file_name, "LICENSE" | "ThirdPartyNotices.txt") {
+            (*file_name).to_string()
+        } else {
+            format!("{NATIVE_ROOT}{file_name}")
+        };
+        let mut entry = archive.by_name(&archive_name)?;
+        let destination = dest_dir.join(file_name);
+        let mut output = fs::File::create(destination)?;
+        io::copy(&mut entry, &mut output)?;
+    }
+    fs::remove_file(package_path)?;
+    println!("cargo:warning=Installed ONNX Runtime CUDA acceleration pack.");
+    Ok(())
+}
+
 fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
@@ -160,6 +212,18 @@ fn main() {
 
         if let Err(e) = download_and_verify(&download_url, &dest_path, expected_hash) {
             panic!("Failed to download and verify ONNX Runtime library: {}", e);
+        }
+    }
+
+    if env::var("RAPIDRAW_ONNX_RUNTIME").as_deref() == Ok("cuda") {
+        if target_os != "linux" || target_arch != "x86_64" {
+            panic!(
+                "The CUDA ONNX Runtime pack is currently supported only for linux-x86_64 builds"
+            );
+        }
+        let cuda_dir = manifest_dir.join("resources").join("onnxruntime-gpu");
+        if let Err(error) = download_cuda_runtime_pack(&cuda_dir) {
+            panic!("Failed to download ONNX Runtime CUDA pack: {error}");
         }
     }
 
