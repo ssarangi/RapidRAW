@@ -311,6 +311,7 @@ pub fn run_rawnind_restoration_tiled(
     tile_overlap: u32,
     _denoise_strength: f32,
     camera_sensor: Option<&crate::custom_raw_pipeline::RawSensorData>,
+    highlight_compression: f32,
 ) -> Result<DynamicImage, String> {
     let packed_bayer = pack_bayer_cfa_with_pattern(
         raw_mosaic,
@@ -443,6 +444,57 @@ pub fn run_rawnind_restoration_tiled(
     let camera_transform = camera_sensor
         .map(crate::custom_raw_pipeline::normalized_camera_rgb_to_linear_srgb_transform);
 
+    // The editor's RAW base stays linear float data. Returning an already
+    // gamma-encoded 8-bit RawNIND render here makes the rest of the editor
+    // apply its RAW/display stages a second time, inflating exposure.
+    if let Some((camera_to_srgb, wb)) = camera_transform {
+        let sensor = camera_sensor.expect("camera transform requires a sensor");
+        let exposure_gain = crate::custom_raw_pipeline::estimate_exposure_gain(sensor);
+        let clamp_limit = highlight_compression.max(1.01);
+        let buffer = ImageBuffer::<image::Rgba<f32>, Vec<f32>>::from_fn(
+            width as u32,
+            height as u32,
+            |x, y| {
+                let idx = (y * width as u32 + x) as usize;
+                let weight = weight_accum[idx].max(f32::EPSILON);
+                let input = nalgebra::Vector3::new(
+                    output_accum[idx * 3] / weight * gain_match * wb[0] * exposure_gain,
+                    output_accum[idx * 3 + 1] / weight * gain_match * wb[1] * exposure_gain,
+                    output_accum[idx * 3 + 2] / weight * gain_match * wb[2] * exposure_gain,
+                );
+                let output = camera_to_srgb * input;
+                let (mut r, mut g, mut b) =
+                    (output[0].max(0.0), output[1].max(0.0), output[2].max(0.0));
+                let max_c = r.max(g).max(b);
+                if max_c > 1.0 {
+                    let min_c = r.min(g).min(b);
+                    let factor = (1.0 - (max_c - 1.0) / (clamp_limit - 1.0)).clamp(0.0, 1.0);
+                    let compressed_r = min_c + (r - min_c) * factor;
+                    let compressed_g = min_c + (g - min_c) * factor;
+                    let compressed_b = min_c + (b - min_c) * factor;
+                    let compressed_max = compressed_r.max(compressed_g).max(compressed_b);
+                    if compressed_max > 1e-6 {
+                        let rescale = max_c / compressed_max;
+                        r = compressed_r * rescale;
+                        g = compressed_g * rescale;
+                        b = compressed_b * rescale;
+                    } else {
+                        r = max_c;
+                        g = max_c;
+                        b = max_c;
+                    }
+                }
+                image::Rgba([
+                    r.clamp(0.0, clamp_limit),
+                    g.clamp(0.0, clamp_limit),
+                    b.clamp(0.0, clamp_limit),
+                    1.0,
+                ])
+            },
+        );
+        return Ok(DynamicImage::ImageRgba32F(buffer));
+    }
+
     let mut out_buffer = ImageBuffer::<Rgb<u8>, Vec<u8>>::new(width as u32, height as u32);
     for y in 0..height as u32 {
         for x in 0..width as u32 {
@@ -453,25 +505,11 @@ pub fn run_rawnind_restoration_tiled(
                 output_accum[idx * 3 + 1] / w * gain_match,
                 output_accum[idx * 3 + 2] / w * gain_match,
             ];
-            let (r_lin, g_lin, b_lin) = if let Some((camera_to_srgb, wb)) = &camera_transform {
-                let input = nalgebra::Vector3::new(
-                    camera_rgb[0] * wb[0],
-                    camera_rgb[1] * wb[1],
-                    camera_rgb[2] * wb[2],
-                );
-                let output = camera_to_srgb * input;
-                (
-                    output[0].clamp(0.0, 1.0),
-                    output[1].clamp(0.0, 1.0),
-                    output[2].clamp(0.0, 1.0),
-                )
-            } else {
-                (
-                    camera_rgb[0].clamp(0.0, 1.0),
-                    camera_rgb[1].clamp(0.0, 1.0),
-                    camera_rgb[2].clamp(0.0, 1.0),
-                )
-            };
+            let (r_lin, g_lin, b_lin) = (
+                camera_rgb[0].clamp(0.0, 1.0),
+                camera_rgb[1].clamp(0.0, 1.0),
+                camera_rgb[2].clamp(0.0, 1.0),
+            );
             let to_srgb = |value: f32| {
                 if value <= 0.0031308 {
                     value * 12.92
@@ -497,6 +535,7 @@ pub fn develop_rawnind_in_memory(
     file_bytes: &[u8],
     model_path: &Path,
     camera_sensor: &crate::custom_raw_pipeline::RawSensorData,
+    highlight_compression: f32,
 ) -> Result<DynamicImage, String> {
     let source = rawler::rawsource::RawSource::new_from_slice(file_bytes);
     let raw_image = rawler::get_decoder(&source)
@@ -536,6 +575,7 @@ pub fn develop_rawnind_in_memory(
         64,
         1.0,
         Some(camera_sensor),
+        highlight_compression,
     )
 }
 
@@ -915,6 +955,7 @@ pub fn run_restoration_worker(
                                 recipe.tile_overlap,
                                 recipe.denoise_strength,
                                 None,
+                                2.5,
                             );
                             drop(_permit);
                             match result {
