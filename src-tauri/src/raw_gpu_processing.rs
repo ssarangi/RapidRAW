@@ -189,6 +189,106 @@ fn bilinear_demosaic_kernel(
     output[offset + 2] = if blue_count > 0.0 { blue_sum / blue_count } else { center };
 }
 
+#[cube(launch_unchecked)]
+fn rgb_to_ycbcr_kernel(input: &Array<f32>, y: &mut Array<f32>, cb: &mut Array<f32>, cr: &mut Array<f32>) {
+    let index = ABSOLUTE_POS;
+    if index >= y.len() {
+        return;
+    }
+    let offset = index * 3;
+    let r = input[offset];
+    let g = input[offset + 1];
+    let b = input[offset + 2];
+    y[index] = 0.299 * r + 0.587 * g + 0.114 * b;
+    cb[index] = -0.168736 * r - 0.331264 * g + 0.5 * b;
+    cr[index] = 0.5 * r - 0.418688 * g - 0.081312 * b;
+}
+
+#[cube(launch_unchecked)]
+fn atrous_horizontal_kernel(input: &Array<f32>, output: &mut Array<f32>, width: usize, gap: usize) {
+    let index = ABSOLUTE_POS;
+    if index >= input.len() {
+        return;
+    }
+    let row = index / width;
+    let col = index % width;
+    let x0 = if col >= gap * 2 { col - gap * 2 } else { 0 };
+    let x1 = if col >= gap { col - gap } else { 0 };
+    let x3 = if col + gap < width { col + gap } else { width - 1 };
+    let x4 = if col + gap * 2 < width { col + gap * 2 } else { width - 1 };
+    output[index] = (input[row * width + x0]
+        + 4.0 * input[row * width + x1]
+        + 6.0 * input[index]
+        + 4.0 * input[row * width + x3]
+        + input[row * width + x4]) / 16.0;
+}
+
+#[cube(launch_unchecked)]
+fn atrous_vertical_kernel(input: &Array<f32>, output: &mut Array<f32>, width: usize, height: usize, gap: usize) {
+    let index = ABSOLUTE_POS;
+    if index >= input.len() {
+        return;
+    }
+    let row = index / width;
+    let col = index % width;
+    let y0 = if row >= gap * 2 { row - gap * 2 } else { 0 };
+    let y1 = if row >= gap { row - gap } else { 0 };
+    let y3 = if row + gap < height { row + gap } else { height - 1 };
+    let y4 = if row + gap * 2 < height { row + gap * 2 } else { height - 1 };
+    output[index] = (input[y0 * width + col]
+        + 4.0 * input[y1 * width + col]
+        + 6.0 * input[index]
+        + 4.0 * input[y3 * width + col]
+        + input[y4 * width + col]) / 16.0;
+}
+
+#[cube(launch_unchecked)]
+fn clear_kernel(output: &mut Array<f32>) {
+    let index = ABSOLUTE_POS;
+    if index < output.len() {
+        output[index] = 0.0;
+    }
+}
+
+#[cube(launch_unchecked)]
+fn accumulate_detail_kernel(
+    current: &Array<f32>,
+    smoothed: &Array<f32>,
+    result: &mut Array<f32>,
+    attenuation: f32,
+) {
+    let index = ABSOLUTE_POS;
+    if index < current.len() {
+        result[index] = result[index] + (current[index] - smoothed[index]) * attenuation;
+    }
+}
+
+#[cube(launch_unchecked)]
+fn ycbcr_to_rgb_kernel(
+    y_current: &Array<f32>,
+    y_detail: &Array<f32>,
+    cb_current: &Array<f32>,
+    cb_detail: &Array<f32>,
+    cr_current: &Array<f32>,
+    cr_detail: &Array<f32>,
+    output: &mut Array<f32>,
+) {
+    let index = ABSOLUTE_POS;
+    if index >= y_current.len() {
+        return;
+    }
+    let y = y_current[index] + y_detail[index];
+    let cb = cb_current[index] + cb_detail[index];
+    let cr = cr_current[index] + cr_detail[index];
+    let r = y + 1.402 * cr;
+    let g = y - 0.344136 * cb - 0.714136 * cr;
+    let b = y + 1.772 * cb;
+    let offset = index * 3;
+    output[offset] = if r > 0.0 { r } else { 0.0 };
+    output[offset + 1] = if g > 0.0 { g } else { 0.0 };
+    output[offset + 2] = if b > 0.0 { b } else { 0.0 };
+}
+
 /// Performs CFA-periodic hot/dead pixel correction on the shared GPU.
 ///
 /// The transfer overhead outweighs a GPU dispatch on tiny RAW previews, so
@@ -377,4 +477,156 @@ pub fn bilinear_demosaic(
     }))
     .ok()
     .flatten()
+}
+
+fn launch_1d<R: Runtime>(client: &ComputeClient<R>, len: usize) -> (CubeCount, CubeDim) {
+    let cube_dim = CubeDim::new_1d(256);
+    let cube_count = CubeCount::Static(
+        len.div_ceil(cube_dim.num_elems() as usize) as u32,
+        1,
+        1,
+    );
+    (cube_count, cube_dim)
+}
+
+fn denoise_plane(
+    client: &ComputeClient<cubecl::wgpu::WgpuRuntime>,
+    initial: cubecl::server::Handle,
+    width: usize,
+    height: usize,
+    strength: f32,
+    level_weights: [f32; 4],
+) -> (cubecl::server::Handle, cubecl::server::Handle) {
+    let len = width * height;
+    let (cube_count, cube_dim) = launch_1d(client, len);
+    let horizontal = client.empty(len * std::mem::size_of::<f32>());
+    let mut current = initial;
+    let mut next = client.empty(len * std::mem::size_of::<f32>());
+    let result = client.empty(len * std::mem::size_of::<f32>());
+
+    unsafe {
+        clear_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+            client,
+            cube_count.clone(),
+            cube_dim.clone(),
+            ArrayArg::from_raw_parts(result.clone(), len),
+        );
+    }
+
+    for (level, weight) in level_weights.into_iter().enumerate() {
+        let gap = 1usize << level;
+        let attenuation = 1.0 - (strength * weight).clamp(0.0, 1.0);
+        unsafe {
+            atrous_horizontal_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                client,
+                cube_count.clone(),
+                cube_dim.clone(),
+                ArrayArg::from_raw_parts(current.clone(), len),
+                ArrayArg::from_raw_parts(horizontal.clone(), len),
+                width,
+                gap,
+            );
+            atrous_vertical_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                client,
+                cube_count.clone(),
+                cube_dim.clone(),
+                ArrayArg::from_raw_parts(horizontal.clone(), len),
+                ArrayArg::from_raw_parts(next.clone(), len),
+                width,
+                height,
+                gap,
+            );
+            accumulate_detail_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                client,
+                cube_count.clone(),
+                cube_dim.clone(),
+                ArrayArg::from_raw_parts(current.clone(), len),
+                ArrayArg::from_raw_parts(next.clone(), len),
+                ArrayArg::from_raw_parts(result.clone(), len),
+                attenuation,
+            );
+        }
+        std::mem::swap(&mut current, &mut next);
+    }
+
+    (current, result)
+}
+
+/// Four-level à-trous RAW denoise on the shared GPU. This is structurally
+/// identical to `raw_denoise::wavelet_denoise`: identical YCbCr coefficients,
+/// taps, boundary clamping, detail attenuation and final non-negative clamp.
+pub fn wavelet_denoise(
+    rgb: &mut [[f32; 3]],
+    width: usize,
+    height: usize,
+    strength: f32,
+) -> bool {
+    const MIN_GPU_PIXELS: usize = 1_048_576;
+    const LUMA_WEIGHTS: [f32; 4] = [0.25, 0.45, 0.35, 0.15];
+    const CHROMA_WEIGHTS: [f32; 4] = [1.0, 0.9, 0.6, 0.3];
+
+    if strength <= 0.0
+        || rgb.len() < MIN_GPU_PIXELS
+        || rgb.len() != width.saturating_mul(height)
+    {
+        return false;
+    }
+    let Some(device) = SHARED_WGPU_DEVICE.get() else {
+        return false;
+    };
+
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let client = cubecl::wgpu::WgpuRuntime::client(device);
+        let len = rgb.len();
+        let (cube_count, cube_dim) = launch_1d(&client, len);
+        let input = client.create_from_slice(bytemuck::cast_slice(rgb));
+        let y = client.empty(len * std::mem::size_of::<f32>());
+        let cb = client.empty(len * std::mem::size_of::<f32>());
+        let cr = client.empty(len * std::mem::size_of::<f32>());
+
+        unsafe {
+            rgb_to_ycbcr_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client,
+                cube_count.clone(),
+                cube_dim.clone(),
+                ArrayArg::from_raw_parts(input, len * 3),
+                ArrayArg::from_raw_parts(y.clone(), len),
+                ArrayArg::from_raw_parts(cb.clone(), len),
+                ArrayArg::from_raw_parts(cr.clone(), len),
+            );
+        }
+
+        let (y_current, y_detail) = denoise_plane(&client, y, width, height, strength, LUMA_WEIGHTS);
+        let (cb_current, cb_detail) = denoise_plane(&client, cb, width, height, strength, CHROMA_WEIGHTS);
+        let (cr_current, cr_detail) = denoise_plane(&client, cr, width, height, strength, CHROMA_WEIGHTS);
+        let output = client.empty(len * 3 * std::mem::size_of::<f32>());
+
+        unsafe {
+            ycbcr_to_rgb_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client,
+                cube_count,
+                cube_dim,
+                ArrayArg::from_raw_parts(y_current, len),
+                ArrayArg::from_raw_parts(y_detail, len),
+                ArrayArg::from_raw_parts(cb_current, len),
+                ArrayArg::from_raw_parts(cb_detail, len),
+                ArrayArg::from_raw_parts(cr_current, len),
+                ArrayArg::from_raw_parts(cr_detail, len),
+                ArrayArg::from_raw_parts(output.clone(), len * 3),
+            );
+        }
+
+        let bytes = client.read_one(output).ok()?;
+        let denoised = f32::from_bytes(&bytes);
+        if denoised.len() != len * 3 {
+            return None;
+        }
+        for (pixel, denoised) in rgb.iter_mut().zip(denoised.chunks_exact(3)) {
+            *pixel = [denoised[0], denoised[1], denoised[2]];
+        }
+        Some(())
+    }))
+    .ok()
+    .flatten()
+    .is_some()
 }

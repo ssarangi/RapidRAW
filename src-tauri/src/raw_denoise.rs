@@ -115,6 +115,10 @@ pub fn wavelet_denoise(rgb: &mut [[f32; 3]], width: usize, height: usize, streng
         return;
     }
 
+    if crate::raw_gpu_processing::wavelet_denoise(rgb, width, height, strength) {
+        return;
+    }
+
     let planes: Vec<(f32, f32, f32)> = rgb
         .par_iter()
         .map(|px| crate::image_processing::rgb_to_yc_only(px[0], px[1], px[2]))
