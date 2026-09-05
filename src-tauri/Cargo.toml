@@ -25,6 +25,9 @@ tauri-plugin-fs = "2.5.1"
 rayon = "1.12.0"
 blake3 = "1.8.7"
 wgpu = "29.0" # Downgraded to prevent P3 color shifts on Apple devices
+# Shared compute kernels for the RAW/edit pipeline. `wgpu` targets the
+# available GPU; `cpu` is the SIMD fallback for the exact same kernels.
+cubecl = { version = "0.10.0", default-features = false, features = ["wgpu", "cpu", "stdlib"] }
 pollster = "1.0"
 bytemuck = { version = "1.25", features = ["derive"] }
 anyhow = "1.0.104"
