@@ -494,6 +494,38 @@ fn apply_color_matrix(rgb: &mut [[f32; 3]], xyz_to_cam: &Matrix3<f32>) {
     });
 }
 
+/// Uses the shared CubeCL/WGPU context for the two independent per-pixel
+/// stages when it is available. The original Rayon implementations remain
+/// the exact CPU fallback for machines without GPU compute.
+fn apply_white_balance_and_color_matrix(rgb: &mut [[f32; 3]], sensor: &RawSensorData) {
+    let cam_to_srgb = camera_to_linear_srgb_matrix(&sensor.xyz_to_cam);
+    let black = [
+        sensor.black_level[0],
+        sensor.black_level[1],
+        sensor.black_level[2],
+    ];
+    let white_balance = [sensor.wb_coeffs[0], sensor.wb_coeffs[1], sensor.wb_coeffs[2]];
+    let denominator = (sensor.white_level - sensor.black_level[0]).max(1.0);
+    let matrix = [
+        cam_to_srgb[(0, 0)], cam_to_srgb[(0, 1)], cam_to_srgb[(0, 2)],
+        cam_to_srgb[(1, 0)], cam_to_srgb[(1, 1)], cam_to_srgb[(1, 2)],
+        cam_to_srgb[(2, 0)], cam_to_srgb[(2, 1)], cam_to_srgb[(2, 2)],
+    ];
+
+    if crate::raw_gpu_processing::apply_white_balance_and_color_matrix(
+        rgb,
+        black,
+        white_balance,
+        denominator,
+        matrix,
+    ) {
+        return;
+    }
+
+    apply_white_balance(rgb, sensor);
+    apply_color_matrix(rgb, &sensor.xyz_to_cam);
+}
+
 /// Production entry point: develops a RAW file into the same LINEAR,
 /// pre-tonemap `Rgba32F` intermediate that `raw_processing::develop_raw_image`
 /// produces (values scaled so ~1.0 is the white point, up to
@@ -608,8 +640,7 @@ pub fn develop_raw_image_custom_with_algorithm(
         _t_demosaic.elapsed()
     );
     let _t_wbcm = std::time::Instant::now();
-    apply_white_balance(&mut rgb, &sensor);
-    apply_color_matrix(&mut rgb, &sensor.xyz_to_cam);
+    apply_white_balance_and_color_matrix(&mut rgb, &sensor);
     log::debug!(
         "[raw develop timing] wb+colormatrix: {:?}",
         _t_wbcm.elapsed()
@@ -759,8 +790,7 @@ pub fn develop_raw_custom_with_options(
     }
 
     let mut rgb = crate::demosaic_algorithms::demosaic(&sensor, algo);
-    apply_white_balance(&mut rgb, &sensor);
-    apply_color_matrix(&mut rgb, &sensor.xyz_to_cam);
+    apply_white_balance_and_color_matrix(&mut rgb, &sensor);
     // Exposure gain must land here - after the (linear) color matrix, before
     // gamma - not via `apply_color_matrix_and_gamma`, which would apply
     // gamma first and make a linear multiply afterward meaningless.
