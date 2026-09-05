@@ -952,6 +952,14 @@ pub fn spawn_raw_develop_upgrade(
         }
 
         let upgraded = match run_on_raw_develop_pool(|| {
+            // A previous request may have been waiting behind an active RAW
+            // decode. Check again *inside* the bounded worker before doing
+            // any expensive decoding, rather than burning CPU on a result
+            // that can no longer be displayed.
+            if generation_tracker.load(Ordering::SeqCst) != generation {
+                return Err(anyhow!("raw-develop request superseded"));
+            }
+
             load_base_image_from_bytes(
                 &bytes,
                 &upgrade_source_path_str,
@@ -964,6 +972,9 @@ pub fn spawn_raw_develop_upgrade(
         }) {
             Ok(img) => img,
             Err(e) => {
+                if generation_tracker.load(Ordering::SeqCst) != generation {
+                    return;
+                }
                 log::info!(
                     "raw-develop background upgrade failed for '{}', keeping prior decode: {}",
                     upgrade_source_path_str,

@@ -39,7 +39,6 @@ export function useImageProcessing(
   const multiSelectedPaths = useLibraryStore((state) => state.multiSelectedPaths);
 
   const inFlightCountRef = useRef(0);
-  const lastAnalyticsTimeRef = useRef<number>(0);
   const pendingApplyRef = useRef<{ adjustments: Adjustments; targetRes?: number } | null>(null);
   const dragIdleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeWaveformChannelRef = useRef(activeWaveformChannel);
@@ -123,17 +122,12 @@ export function useImageProcessing(
       const currentPath = selectedImage?.path;
       if (!currentPath) return;
 
-      let shouldRequestAnalytics = false;
-      if (dragging) {
-        const now = performance.now();
-        if (now - lastAnalyticsTimeRef.current > 33.33) {
-          shouldRequestAnalytics = true;
-          lastAnalyticsTimeRef.current = now;
-        }
-      } else {
-        shouldRequestAnalytics = true;
-        lastAnalyticsTimeRef.current = 0;
-      }
+      // The GPU preview itself is fast, but histogram/waveform generation
+      // requires a GPU-to-CPU readback and then CPU analysis.  Doing that on
+      // every slider frame competes with the next render and makes the editor
+      // feel stuck.  Render live while dragging, then refresh analytics once
+      // the adjustment settles.
+      const shouldRequestAnalytics = !dragging;
 
       const payload = structuredClone(currentAdjustments);
       const { patchesSentToBackend } = useEditorStore.getState();
@@ -284,7 +278,11 @@ export function useImageProcessing(
   );
 
   const flushPipeline = useCallback(() => {
-    if (inFlightCountRef.current >= 3) return;
+    // Latest-wins is crucial here: the GPU processor is intentionally
+    // serialized, so allowing several bridge requests to queue only makes a
+    // slider lag behind the pointer.  Keep one active render and replace the
+    // pending request with the most recent adjustment state.
+    if (inFlightCountRef.current >= 1) return;
     if (!pendingApplyRef.current) return;
 
     const { adjustments, targetRes } = pendingApplyRef.current;
