@@ -98,6 +98,97 @@ fn white_balance_and_color_matrix_kernel(
     output[offset + 2] = m20 * r + m21 * g + m22 * b;
 }
 
+#[cube]
+fn bayer_color(row: usize, col: usize, c00: u32, c01: u32, c10: u32, c11: u32) -> u32 {
+    if row % 2 == 0 {
+        if col % 2 == 0 { c00 } else { c01 }
+    } else if col % 2 == 0 {
+        c10
+    } else {
+        c11
+    }
+}
+
+#[cube(launch_unchecked)]
+fn bilinear_demosaic_kernel(
+    input: &Array<f32>,
+    output: &mut Array<f32>,
+    width: usize,
+    height: usize,
+    c00: u32,
+    c01: u32,
+    c10: u32,
+    c11: u32,
+) {
+    let index = ABSOLUTE_POS;
+    if index >= input.len() {
+        return;
+    }
+
+    let row = index / width;
+    let col = index % width;
+    let up = if row > 0 { row - 1 } else { 0 };
+    let down = if row + 1 < height { row + 1 } else { height - 1 };
+    let left = if col > 0 { col - 1 } else { 0 };
+    let right = if col + 1 < width { col + 1 } else { width - 1 };
+    let center = input[index];
+    let cross = (
+        input[up * width + col]
+            + input[down * width + col]
+            + input[row * width + left]
+            + input[row * width + right]
+    ) * 0.25;
+    let diagonal = (
+        input[up * width + left]
+            + input[up * width + right]
+            + input[down * width + left]
+            + input[down * width + right]
+    ) * 0.25;
+    let color = bayer_color(row, col, c00, c01, c10, c11);
+    let offset = index * 3;
+
+    if color == 0 {
+        output[offset] = center;
+        output[offset + 1] = cross;
+        output[offset + 2] = diagonal;
+        return;
+    }
+    if color == 2 {
+        output[offset] = diagonal;
+        output[offset + 1] = cross;
+        output[offset + 2] = center;
+        return;
+    }
+
+    let nw_color = bayer_color(up, left, c00, c01, c10, c11);
+    let ne_color = bayer_color(up, right, c00, c01, c10, c11);
+    let sw_color = bayer_color(down, left, c00, c01, c10, c11);
+    let se_color = bayer_color(down, right, c00, c01, c10, c11);
+    let nw = input[up * width + left];
+    let ne = input[up * width + right];
+    let sw = input[down * width + left];
+    let se = input[down * width + right];
+    let red_sum = if nw_color == 0 { nw } else { 0.0 }
+        + if ne_color == 0 { ne } else { 0.0 }
+        + if sw_color == 0 { sw } else { 0.0 }
+        + if se_color == 0 { se } else { 0.0 };
+    let red_count = if nw_color == 0 { 1.0 } else { 0.0 }
+        + if ne_color == 0 { 1.0 } else { 0.0 }
+        + if sw_color == 0 { 1.0 } else { 0.0 }
+        + if se_color == 0 { 1.0 } else { 0.0 };
+    let blue_sum = if nw_color == 2 { nw } else { 0.0 }
+        + if ne_color == 2 { ne } else { 0.0 }
+        + if sw_color == 2 { sw } else { 0.0 }
+        + if se_color == 2 { se } else { 0.0 };
+    let blue_count = if nw_color == 2 { 1.0 } else { 0.0 }
+        + if ne_color == 2 { 1.0 } else { 0.0 }
+        + if sw_color == 2 { 1.0 } else { 0.0 }
+        + if se_color == 2 { 1.0 } else { 0.0 };
+    output[offset] = if red_count > 0.0 { red_sum / red_count } else { center };
+    output[offset + 1] = center;
+    output[offset + 2] = if blue_count > 0.0 { blue_sum / blue_count } else { center };
+}
+
 /// Performs CFA-periodic hot/dead pixel correction on the shared GPU.
 ///
 /// The transfer overhead outweighs a GPU dispatch on tiny RAW previews, so
@@ -218,4 +309,72 @@ pub fn apply_white_balance_and_color_matrix(
     .ok()
     .flatten()
     .is_some()
+}
+
+fn cfa_color_code(color: rawler::cfa::CFAColor) -> u32 {
+    match color {
+        rawler::cfa::CFAColor::RED => 0,
+        rawler::cfa::CFAColor::BLUE => 2,
+        _ => 1,
+    }
+}
+
+/// GPU implementation of the explicit Bilinear RAW Develop choice.
+pub fn bilinear_demosaic(
+    sensor: &crate::custom_raw_pipeline::RawSensorData,
+) -> Option<Vec<[f32; 3]>> {
+    const MIN_GPU_PIXELS: usize = 1_048_576;
+
+    if sensor.data.len() < MIN_GPU_PIXELS
+        || sensor.data.len() != sensor.width.saturating_mul(sensor.height)
+    {
+        return None;
+    }
+    let device = SHARED_WGPU_DEVICE.get()?;
+    let c00 = cfa_color_code((sensor.cfa_at)(0, 0));
+    let c01 = cfa_color_code((sensor.cfa_at)(0, 1));
+    let c10 = cfa_color_code((sensor.cfa_at)(1, 0));
+    let c11 = cfa_color_code((sensor.cfa_at)(1, 1));
+
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let client = cubecl::wgpu::WgpuRuntime::client(device);
+        let input = client.create_from_slice(bytemuck::cast_slice(&sensor.data));
+        let output = client.empty(sensor.data.len() * 3 * std::mem::size_of::<f32>());
+        let cube_dim = CubeDim::new_1d(256);
+        let cube_count = CubeCount::Static(
+            sensor.data.len().div_ceil(cube_dim.num_elems() as usize) as u32,
+            1,
+            1,
+        );
+
+        unsafe {
+            bilinear_demosaic_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client,
+                cube_count,
+                cube_dim,
+                ArrayArg::from_raw_parts(input, sensor.data.len()),
+                ArrayArg::from_raw_parts(output.clone(), sensor.data.len() * 3),
+                sensor.width,
+                sensor.height,
+                c00,
+                c01,
+                c10,
+                c11,
+            );
+        }
+
+        let bytes = client.read_one(output).ok()?;
+        let demosaiced = f32::from_bytes(&bytes);
+        if demosaiced.len() != sensor.data.len() * 3 {
+            return None;
+        }
+        Some(
+            demosaiced
+                .chunks_exact(3)
+                .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+                .collect(),
+        )
+    }))
+    .ok()
+    .flatten()
 }
