@@ -935,6 +935,13 @@ pub fn spawn_raw_develop_upgrade(
     generation: usize,
 ) {
     std::thread::spawn(move || {
+        // Avoid even reading a potentially multi-gigabyte RAW file when a
+        // newer image selection or Raw Develop change has already replaced
+        // this queued upgrade.
+        if generation_tracker.load(Ordering::SeqCst) != generation {
+            return;
+        }
+
         let bytes = match read_file_mapped(Path::new(&upgrade_source_path_str)) {
             Ok(mmap) => mmap.to_vec(),
             Err(_) => match fs::read(&upgrade_source_path_str) {
@@ -955,7 +962,7 @@ pub fn spawn_raw_develop_upgrade(
         };
 
         if generation_tracker.load(Ordering::SeqCst) != generation {
-            return; // user navigated away / changed settings again before this even started
+            return; // user navigated away / changed settings while the file was read
         }
 
         let upgraded = match run_on_raw_develop_pool(|| {
