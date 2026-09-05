@@ -206,17 +206,45 @@ pub fn get_or_init_gpu_context(
     #[cfg(any(target_os = "android", target_os = "linux"))]
     let surface_opt: Option<wgpu::Surface> = None;
 
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+    // Prefer a real high-performance adapter for all interactive image work.
+    // If the machine has no usable GPU (remote desktop, VM, old driver, etc.)
+    // retry explicitly with WGPU's software adapter. That preserves a working
+    // editor without silently making the CPU path the normal choice.
+    let adapter = match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
         compatible_surface: surface_opt.as_ref(),
-        ..Default::default()
-    }))
-    .map_err(|e| {
-        if let Some(p) = &flag_path {
-            let _ = std::fs::remove_file(p);
+        force_fallback_adapter: false,
+    })) {
+        Ok(adapter) => adapter,
+        Err(hardware_error) => {
+            log::warn!(
+                "No hardware WGPU adapter available ({}); falling back to the software adapter",
+                hardware_error
+            );
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::LowPower,
+                compatible_surface: surface_opt.as_ref(),
+                force_fallback_adapter: true,
+            }))
+            .map_err(|fallback_error| {
+                if let Some(p) = &flag_path {
+                    let _ = std::fs::remove_file(p);
+                }
+                format!(
+                    "Failed to find a WGPU adapter (hardware: {}; software fallback: {})",
+                    hardware_error, fallback_error
+                )
+            })?
         }
-        format!("Failed to find a wgpu adapter: {}", e)
-    })?;
+    };
+
+    let adapter_info = adapter.get_info();
+    log::info!(
+        "WGPU processing adapter: {} ({:?}, {:?})",
+        adapter_info.name,
+        adapter_info.backend,
+        adapter_info.device_type,
+    );
 
     let mut required_features = wgpu::Features::empty();
     if adapter
