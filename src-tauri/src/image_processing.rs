@@ -2577,6 +2577,10 @@ pub struct GpuContext {
     pub queue: Arc<wgpu::Queue>,
     pub limits: wgpu::Limits,
     pub display: Arc<std::sync::Mutex<Option<WgpuDisplay>>>,
+    /// CubeCL is initialized over this exact WGPU device/queue. RAW compute
+    /// kernels can therefore join the same hardware-first execution path as
+    /// the editor shaders without a second adapter or an inter-GPU copy.
+    pub cubecl_device: Option<cubecl::wgpu::WgpuDevice>,
 }
 
 #[inline(always)]

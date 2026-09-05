@@ -275,6 +275,28 @@ pub fn get_or_init_gpu_context(
         log::error!("[wgpu-error] {}", err);
     }));
 
+    // CubeCL's WGPU backend uses the same WGPU 29 API as the editor. Register
+    // this exact instance/adapter/device/queue once so RAW kernels can run on
+    // the selected hardware without allocating a competing context. Treat a
+    // CubeCL initialization failure as non-fatal: the existing WGPU renderer
+    // remains fully usable and the RAW path keeps its CPU fallback.
+    let cubecl_device = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cubecl::wgpu::init_device(
+            cubecl::wgpu::WgpuSetup {
+                instance: instance.clone(),
+                adapter: adapter.clone(),
+                device: device.clone(),
+                queue: queue.clone(),
+                backend: adapter_info.backend,
+            },
+            cubecl::wgpu::RuntimeOptions::default(),
+        )
+    }))
+    .map_err(|_| {
+        log::warn!("CubeCL could not initialize on the selected WGPU device; RAW compute will use CPU fallback");
+    })
+    .ok();
+
     if let Some(p) = &flag_path {
         let _ = std::fs::remove_file(p);
     }
@@ -448,6 +470,7 @@ pub fn get_or_init_gpu_context(
         queue: Arc::new(queue),
         limits,
         display: Arc::new(std::sync::Mutex::new(display_opt)),
+        cubecl_device,
     };
     *context_lock = Some(new_context.clone());
     Ok(new_context)
