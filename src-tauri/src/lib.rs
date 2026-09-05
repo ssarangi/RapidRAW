@@ -59,6 +59,7 @@ mod panorama_stitching;
 mod panorama_utils;
 mod preset_converter;
 pub mod raw_denoise;
+mod raw_gpu_processing;
 pub mod raw_pdaf_data;
 pub mod raw_preprocess;
 pub mod raw_processing;

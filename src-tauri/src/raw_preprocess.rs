@@ -33,6 +33,10 @@ pub fn correct_hot_dead_pixels(sensor: &mut RawSensorData, threshold: f32) {
         return;
     }
     let abs_threshold = threshold * sensor.white_level;
+
+    if crate::raw_gpu_processing::correct_hot_dead_pixels(&mut sensor.data, w, h, abs_threshold) {
+        return;
+    }
     let original = sensor.data.clone();
 
     let get = |row: isize, col: isize| -> f32 {

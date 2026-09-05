@@ -296,6 +296,9 @@ pub fn get_or_init_gpu_context(
         log::warn!("CubeCL could not initialize on the selected WGPU device; RAW compute will use CPU fallback");
     })
     .ok();
+    if let Some(cubecl_device) = cubecl_device.as_ref() {
+        crate::raw_gpu_processing::register_shared_wgpu_device(cubecl_device.clone());
+    }
 
     if let Some(p) = &flag_path {
         let _ = std::fs::remove_file(p);
