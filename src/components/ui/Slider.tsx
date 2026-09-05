@@ -24,6 +24,8 @@ interface SliderProps {
   trackClassName?: string;
   fillOrigin?: 'min' | 'default';
   suffix?: string;
+  /** Human-readable replacement for the numeric value, for example Auto. */
+  valueText?: React.ReactNode;
 }
 
 const DOUBLE_CLICK_THRESHOLD_MS = 150;
@@ -47,6 +49,7 @@ const Slider = ({
   value,
   trackClassName,
   suffix = '',
+  valueText,
 }: SliderProps) => {
   const { t } = useTranslation();
   const [displayValue, setDisplayValue] = useState<number>(value);
@@ -570,8 +573,8 @@ const Slider = ({
               onDoubleClick={disabled ? undefined : handleReset}
               data-tooltip={disabled ? undefined : t('ui.slider.clickToEdit')}
             >
-              {decimalPlaces > 0 && numericValue === 0 ? '0' : numericValue.toFixed(decimalPlaces)}
-              {suffix && <span className="text-[10px] align-top inline-block mt-0.5 ml-0.5">{suffix}</span>}
+              {valueText ?? (decimalPlaces > 0 && numericValue === 0 ? '0' : numericValue.toFixed(decimalPlaces))}
+              {!valueText && suffix && <span className="text-[10px] align-top inline-block mt-0.5 ml-0.5">{suffix}</span>}
             </span>
           )}
         </div>

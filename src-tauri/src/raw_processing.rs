@@ -12,6 +12,29 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+/// A manual RAW Develop detail setting must not replace an otherwise visible
+/// image with an empty render. This is deliberately a very strict guard: a
+/// genuinely dark scene still has a signal above this floor, while the broken
+/// output reported from the manual denoise/sharpen path is uniformly zero.
+fn is_effectively_black(image: &DynamicImage) -> bool {
+    let pixels = match image {
+        DynamicImage::ImageRgba32F(buffer) => buffer.as_raw(),
+        DynamicImage::ImageRgb32F(buffer) => buffer.as_raw(),
+        _ => return false,
+    };
+    if pixels.is_empty() {
+        return true;
+    }
+
+    let stride = (pixels.len() / 24_000).max(1);
+    let brightest = pixels
+        .iter()
+        .step_by(stride)
+        .filter(|value| value.is_finite())
+        .fold(0.0f32, |max, value| max.max(*value));
+    brightest <= 0.002
+}
+
 pub fn develop_raw_image(
     file_bytes: &[u8],
     fast_demosaic: bool,
@@ -152,7 +175,17 @@ pub fn develop_raw_image_for_editor(
             sharpen_method_override,
             preprocess,
         ) {
-            Ok(image) => return Ok(image),
+            Ok(image)
+                if !(denoise_override.is_some() || sharpen_override.is_some())
+                    || !is_effectively_black(&image) =>
+            {
+                return Ok(image);
+            }
+            Ok(_) => {
+                log::warn!(
+                    "manual RAW denoise/sharpen produced a black render; falling back to rawler development"
+                );
+            }
             Err(e) => {
                 log::info!(
                     "custom raw develop pipeline unavailable ({e}), falling back to rawler PPG"

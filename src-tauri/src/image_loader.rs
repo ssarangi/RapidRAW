@@ -31,6 +31,24 @@ use tauri::{Emitter, Manager};
 
 static RAW_DEVELOP_VISUAL_MODELS_DIR: OnceLock<PathBuf> = OnceLock::new();
 static RAWNIND_MODEL_PATH: OnceLock<PathBuf> = OnceLock::new();
+/// RAW Develop is deliberately isolated from Rayon’s global pool. The global
+/// pool is also used by preview generation and UI-adjacent image work; a
+/// full-resolution RAW decode using every worker makes the app appear frozen.
+/// One queued worker keeps the current image visible and lets the WebView,
+/// thumbnails, and normal preview updates continue to make progress.
+static RAW_DEVELOP_THREAD_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+
+fn run_on_raw_develop_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    RAW_DEVELOP_THREAD_POOL
+        .get_or_init(|| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .thread_name(|index| format!("rapidraw-raw-develop-{index}"))
+                .build()
+                .expect("create single-thread RAW Develop pool")
+        })
+        .install(work)
+}
 
 fn configure_raw_develop_visual_models(app_handle: &tauri::AppHandle) {
     let Ok(app_data_dir) = app_handle.path().app_data_dir() else {
@@ -154,6 +172,17 @@ pub fn load_base_image_from_bytes(
     );
 
     if is_raw_file(path_for_ext_check) {
+        // The custom RAW Develop pipeline already owns denoise and sharpening
+        // (including its ISO-auto defaults). Applying the legacy global
+        // preprocessing pass afterward duplicates expensive full-image work
+        // and mixes two different detail algorithms. Keep that legacy pass
+        // only for an explicit PPG/rawler development path.
+        let uses_custom_raw_develop = allow_custom_pipeline
+            && !use_fast_raw_dev
+            && raw_develop_adjustments
+                .and_then(|adjustments| adjustments.get("rawDemosaicAlgorithm"))
+                .and_then(|value| value.as_str())
+                != Some("ppg");
         match panic::catch_unwind(move || {
             crate::raw_processing::develop_raw_image_for_editor(
                 bytes,
@@ -166,7 +195,10 @@ pub fn load_base_image_from_bytes(
             )
         }) {
             Ok(Ok(mut image)) => {
-                if !use_fast_raw_dev && (color_nr_amount > 0.0 || sharpening_amount > 0.0) {
+                if !uses_custom_raw_develop
+                    && !use_fast_raw_dev
+                    && (color_nr_amount > 0.0 || sharpening_amount > 0.0)
+                {
                     let start = Instant::now();
                     remove_raw_artifacts_and_enhance(
                         &mut image,
@@ -919,15 +951,17 @@ pub fn spawn_raw_develop_upgrade(
             return; // user navigated away / changed settings again before this even started
         }
 
-        let upgraded = match load_base_image_from_bytes(
-            &bytes,
-            &upgrade_source_path_str,
-            false,
-            &upgrade_settings,
-            Some(&upgrade_adjustments),
-            true,
-            None,
-        ) {
+        let upgraded = match run_on_raw_develop_pool(|| {
+            load_base_image_from_bytes(
+                &bytes,
+                &upgrade_source_path_str,
+                false,
+                &upgrade_settings,
+                Some(&upgrade_adjustments),
+                true,
+                None,
+            )
+        }) {
             Ok(img) => img,
             Err(e) => {
                 log::info!(
@@ -1196,15 +1230,17 @@ pub async fn load_image(
                         // reuses the same background-upgrade path for
                         // re-decoding on demand when the user changes RAW
                         // Develop settings after this initial load.
-                        let img = load_base_image_from_bytes(
-                            &mmap,
-                            &path_clone,
-                            false,
-                            &settings,
-                            Some(&metadata_adjustments),
-                            true,
-                            cancel_token.clone(),
-                        )
+                        let img = run_on_raw_develop_pool(|| {
+                            load_base_image_from_bytes(
+                                &mmap,
+                                &path_clone,
+                                false,
+                                &settings,
+                                Some(&metadata_adjustments),
+                                true,
+                                cancel_token.clone(),
+                            )
+                        })
                         .map_err(|e| e.to_string())?;
                         let exif = exif_processing::read_exif_data(&path_clone, &mmap);
                         Ok((img, exif))
@@ -1224,15 +1260,17 @@ pub async fn load_image(
                         }
 
                         // See the comment on the mmap branch above.
-                        let img = load_base_image_from_bytes(
-                            &bytes,
-                            &path_clone,
-                            false,
-                            &settings,
-                            Some(&metadata_adjustments),
-                            true,
-                            cancel_token.clone(),
-                        )
+                        let img = run_on_raw_develop_pool(|| {
+                            load_base_image_from_bytes(
+                                &bytes,
+                                &path_clone,
+                                false,
+                                &settings,
+                                Some(&metadata_adjustments),
+                                true,
+                                cancel_token.clone(),
+                            )
+                        })
                         .map_err(|e| e.to_string())?;
                         let exif = exif_processing::read_exif_data(&path_clone, &bytes);
                         Ok((img, exif))

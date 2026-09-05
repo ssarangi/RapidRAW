@@ -3,11 +3,59 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use tauri::{Emitter, Manager};
 
 /// RawNIND's exported ONNX graph has a fixed 4×512×512 Bayer input.
 const RAWNIND_BAYER_TILE_SIZE: u32 = 512;
 const RAWNIND_SOURCE_TILE_SIZE: u32 = RAWNIND_BAYER_TILE_SIZE * 2;
+
+/// RawNIND is an interactive-editor task, not a batch worker. Keep exactly
+/// one session alive and serialize access to it: `Session::run` needs `&mut
+/// self` anyway, and creating several sessions lets ONNX Runtime create a
+/// full CPU pool for every pending slider update. The resulting contention
+/// starves the WebView even though the develop request itself runs off the UI
+/// thread.
+///
+/// A GPU-capable ONNX Runtime can replace the CPU provider in this one place
+/// without changing the RAW pipeline. Until such a runtime is packaged, the
+/// CPU fallback is intentionally capped at one inference thread to preserve
+/// editor responsiveness.
+static RAWNIND_EDITOR_SESSION: OnceLock<Mutex<Option<(PathBuf, ort::session::Session)>>> =
+    OnceLock::new();
+
+fn rawnind_editor_session(
+    model_path: &Path,
+) -> Result<std::sync::MutexGuard<'static, Option<(PathBuf, ort::session::Session)>>, String> {
+    let session_cache = RAWNIND_EDITOR_SESSION.get_or_init(|| Mutex::new(None));
+    let mut session = session_cache
+        .lock()
+        .map_err(|_| "RawNIND session lock was poisoned".to_string())?;
+
+    let needs_reload = match session.as_ref() {
+        Some((loaded_path, _)) => loaded_path != model_path,
+        None => true,
+    };
+    if needs_reload {
+        // The runtime defaults to a pool sized to all logical CPUs. RawNIND
+        // operates on many 512px tiles, so that default can otherwise pin the
+        // machine for the whole render. Sequential, one-thread inference is
+        // slower in isolation but keeps the application interactive; reuse
+        // of the session removes the expensive model-load cost on later edits.
+        let loaded = ort::session::Session::builder()
+            .and_then(|builder| builder.with_intra_threads(1))
+            .and_then(|builder| builder.with_inter_threads(1))
+            .and_then(|builder| builder.with_parallel_execution(false))
+            .and_then(|builder| builder.commit_from_file(model_path))
+            .map_err(|error| format!("Failed to load RawNIND model: {error}"))?;
+        log::info!(
+            "RawNIND editor session ready with one CPU inference thread; subsequent renders reuse it"
+        );
+        *session = Some((model_path.to_path_buf(), loaded));
+    }
+
+    Ok(session)
+}
 
 /// Recipe and configuration parameters for a restoration operation.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -559,9 +607,13 @@ pub fn develop_rawnind_in_memory(
         .whitelevel
         .as_bayer_array()
         .map(|level| level.clamp(0.0, u16::MAX as f32) as u16);
-    let mut session = ort::session::Session::builder()
-        .and_then(|builder| builder.commit_from_file(model_path))
-        .map_err(|error| format!("Failed to load RawNIND model: {error}"))?;
+    // Hold the shared session for the complete tiled run. This both reuses
+    // model initialization and makes overlapping RAW Develop requests wait
+    // rather than multiplying their CPU thread pools.
+    let mut session = rawnind_editor_session(model_path)?;
+    let (_, session) = session
+        .as_mut()
+        .expect("RawNIND editor session is initialized before use");
 
     run_rawnind_restoration_tiled(
         raw_data,
@@ -570,7 +622,7 @@ pub fn develop_rawnind_in_memory(
         raw_image.camera.cfa.name.as_str(),
         black_levels,
         white_levels,
-        &mut session,
+        session,
         RAWNIND_SOURCE_TILE_SIZE,
         64,
         1.0,

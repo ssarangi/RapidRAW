@@ -60,7 +60,7 @@ export default function RawDevelopPanel({
           />
         </div>
         <Slider
-          label=""
+          label={isAuto ? 'ISO-adaptive amount' : 'Amount'}
           min={0}
           max={100}
           step={1}
@@ -68,6 +68,7 @@ export default function RawDevelopPanel({
           disabled={isAuto}
           onChange={(event: any) => setField(key, Number(event.target.value))}
           onDragStateChange={onDragStateChange}
+          valueText={isAuto ? 'Auto' : undefined}
         />
       </div>
     );
