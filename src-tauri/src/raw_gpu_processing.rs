@@ -25,14 +25,14 @@ fn correct_hot_dead_pixels_kernel(
 ) {
     let index = ABSOLUTE_POS;
     if index >= input.len() {
-        return;
+        terminate!();
     }
 
     let row = index / width;
     let col = index % width;
-    let row_up = if row >= 2 { row - 2 } else { 0 };
+    let row_up = if row >= 2 { row - 2 } else { 0usize.into() };
     let row_down = if row + 2 < height { row + 2 } else { height - 1 };
-    let col_left = if col >= 2 { col - 2 } else { 0 };
+    let col_left = if col >= 2 { col - 2 } else { 0usize.into() };
     let col_right = if col + 2 < width { col + 2 } else { width - 1 };
 
     let a = input[row_up * width + col];
@@ -83,15 +83,15 @@ fn white_balance_and_color_matrix_kernel(
 ) {
     let pixel = ABSOLUTE_POS;
     if pixel >= pixels {
-        return;
+        terminate!();
     }
     let offset = pixel * 3;
     let r_unclamped = (input[offset] - black_r) * wb_r / denominator;
     let g_unclamped = (input[offset + 1] - black_g) * wb_g / denominator;
     let b_unclamped = (input[offset + 2] - black_b) * wb_b / denominator;
-    let r = if r_unclamped > 0.0 { r_unclamped } else { 0.0 };
-    let g = if g_unclamped > 0.0 { g_unclamped } else { 0.0 };
-    let b = if b_unclamped > 0.0 { b_unclamped } else { 0.0 };
+    let r = if r_unclamped > 0.0 { r_unclamped } else { 0.0f32.into() };
+    let g = if g_unclamped > 0.0 { g_unclamped } else { 0.0f32.into() };
+    let b = if b_unclamped > 0.0 { b_unclamped } else { 0.0f32.into() };
 
     output[offset] = m00 * r + m01 * g + m02 * b;
     output[offset + 1] = m10 * r + m11 * g + m12 * b;
@@ -129,31 +129,31 @@ fn amaze_green_kernel(
 ) {
     let index = ABSOLUTE_POS;
     if index >= input.len() {
-        return;
+        terminate!();
     }
     let row = index / width;
     let col = index % width;
     if bayer_color(row, col, c00, c01, c10, c11) == 1 {
         output[index] = input[index];
-        return;
+        terminate!();
     }
 
     let center = input[index];
-    let up1 = if row >= 1 { row - 1 } else { 0 };
-    let up2 = if row >= 2 { row - 2 } else { 0 };
-    let up3 = if row >= 3 { row - 3 } else { 0 };
-    let up4 = if row >= 4 { row - 4 } else { 0 };
-    let up5 = if row >= 5 { row - 5 } else { 0 };
+    let up1 = if row >= 1 { row - 1 } else { 0usize.into() };
+    let up2 = if row >= 2 { row - 2 } else { 0usize.into() };
+    let up3 = if row >= 3 { row - 3 } else { 0usize.into() };
+    let up4 = if row >= 4 { row - 4 } else { 0usize.into() };
+    let up5 = if row >= 5 { row - 5 } else { 0usize.into() };
     let down1 = row + 1;
     let down2 = row + 2;
     let down3 = row + 3;
     let down4 = row + 4;
     let down5 = row + 5;
-    let left1 = if col >= 1 { col - 1 } else { 0 };
-    let left2 = if col >= 2 { col - 2 } else { 0 };
-    let left3 = if col >= 3 { col - 3 } else { 0 };
-    let left4 = if col >= 4 { col - 4 } else { 0 };
-    let left5 = if col >= 5 { col - 5 } else { 0 };
+    let left1 = if col >= 1 { col - 1 } else { 0usize.into() };
+    let left2 = if col >= 2 { col - 2 } else { 0usize.into() };
+    let left3 = if col >= 3 { col - 3 } else { 0usize.into() };
+    let left4 = if col >= 4 { col - 4 } else { 0usize.into() };
+    let left5 = if col >= 5 { col - 5 } else { 0usize.into() };
     let right1 = col + 1;
     let right2 = col + 2;
     let right3 = col + 3;
@@ -218,31 +218,31 @@ fn igv_green_pass1_kernel(
 ) {
     let index = ABSOLUTE_POS;
     if index >= input.len() {
-        return;
+        terminate!();
     }
     let row = index / width;
     let col = index % width;
     if bayer_color(row, col, c00, c01, c10, c11) == 1 {
         output[index] = input[index];
-        return;
+        terminate!();
     }
 
     let center = input[index];
-    let up1 = if row >= 1 { row - 1 } else { 0 };
-    let up2 = if row >= 2 { row - 2 } else { 0 };
-    let up3 = if row >= 3 { row - 3 } else { 0 };
-    let up4 = if row >= 4 { row - 4 } else { 0 };
-    let up5 = if row >= 5 { row - 5 } else { 0 };
+    let up1 = if row >= 1 { row - 1 } else { 0usize.into() };
+    let up2 = if row >= 2 { row - 2 } else { 0usize.into() };
+    let up3 = if row >= 3 { row - 3 } else { 0usize.into() };
+    let up4 = if row >= 4 { row - 4 } else { 0usize.into() };
+    let up5 = if row >= 5 { row - 5 } else { 0usize.into() };
     let down1 = row + 1;
     let down2 = row + 2;
     let down3 = row + 3;
     let down4 = row + 4;
     let down5 = row + 5;
-    let left1 = if col >= 1 { col - 1 } else { 0 };
-    let left2 = if col >= 2 { col - 2 } else { 0 };
-    let left3 = if col >= 3 { col - 3 } else { 0 };
-    let left4 = if col >= 4 { col - 4 } else { 0 };
-    let left5 = if col >= 5 { col - 5 } else { 0 };
+    let left1 = if col >= 1 { col - 1 } else { 0usize.into() };
+    let left2 = if col >= 2 { col - 2 } else { 0usize.into() };
+    let left3 = if col >= 3 { col - 3 } else { 0usize.into() };
+    let left4 = if col >= 4 { col - 4 } else { 0usize.into() };
+    let left5 = if col >= 5 { col - 5 } else { 0usize.into() };
     let right1 = col + 1;
     let right2 = col + 2;
     let right3 = col + 3;
@@ -289,22 +289,22 @@ fn igv_green_refine_kernel(
 ) {
     let index = ABSOLUTE_POS;
     if index >= input.len() {
-        return;
+        terminate!();
     }
     let row = index / width;
     let col = index % width;
     if bayer_color(row, col, c00, c01, c10, c11) == 1 {
         output[index] = pass1[index];
-        return;
+        terminate!();
     }
-    let up = if row > 0 { row - 1 } else { 0 };
+    let up = if row > 0 { row - 1 } else { 0usize.into() };
     let down = if row + 1 < height { row + 1 } else { height - 1 };
-    let left = if col > 0 { col - 1 } else { 0 };
+    let left = if col > 0 { col - 1 } else { 0usize.into() };
     let right = if col + 1 < width { col + 1 } else { width - 1 };
-    let up_green = if bayer_color(up, col, c00, c01, c10, c11) == 1 { 1.0 } else { 0.0 };
-    let down_green = if bayer_color(down, col, c00, c01, c10, c11) == 1 { 1.0 } else { 0.0 };
-    let left_green = if bayer_color(row, left, c00, c01, c10, c11) == 1 { 1.0 } else { 0.0 };
-    let right_green = if bayer_color(row, right, c00, c01, c10, c11) == 1 { 1.0 } else { 0.0 };
+    let up_green = if bayer_color(up, col, c00, c01, c10, c11) == 1 { 1.0 } else { 0.0f32.into() };
+    let down_green = if bayer_color(down, col, c00, c01, c10, c11) == 1 { 1.0 } else { 0.0f32.into() };
+    let left_green = if bayer_color(row, left, c00, c01, c10, c11) == 1 { 1.0 } else { 0.0f32.into() };
+    let right_green = if bayer_color(row, right, c00, c01, c10, c11) == 1 { 1.0 } else { 0.0f32.into() };
     let sum = pass1[index]
         + input[up * width + col] * up_green
         + input[down * width + col] * down_green
@@ -326,21 +326,21 @@ fn lmmse_diff_estimate_kernel(
     c11: u32,
 ) {
     let index = ABSOLUTE_POS;
-    if index >= input.len() { return; }
+    if index >= input.len() { terminate!(); }
     let row = index / width;
     let col = index % width;
     if bayer_color(row, col, c00, c01, c10, c11) == 1 {
         horizontal[index] = 0.0;
         vertical[index] = 0.0;
-        return;
+        terminate!();
     }
     let center = input[index];
-    let left1 = if col >= 1 { col - 1 } else { 0 };
-    let left2 = if col >= 2 { col - 2 } else { 0 };
+    let left1 = if col >= 1 { col - 1 } else { 0usize.into() };
+    let left2 = if col >= 2 { col - 2 } else { 0usize.into() };
     let right1 = col + 1;
     let right2 = col + 2;
-    let up1 = if row >= 1 { row - 1 } else { 0 };
-    let up2 = if row >= 2 { row - 2 } else { 0 };
+    let up1 = if row >= 1 { row - 1 } else { 0usize.into() };
+    let up2 = if row >= 2 { row - 2 } else { 0usize.into() };
     let down1 = row + 1;
     let down2 = row + 2;
     horizontal[index] = 0.5 * (raw_sample(input, row, left1, width, height) + raw_sample(input, row, right1, width, height))
@@ -357,13 +357,13 @@ fn lmmse_smooth_horizontal_kernel(
     t0: f32, t1: f32, t2: f32, t3: f32, t4: f32,
 ) {
     let index = ABSOLUTE_POS;
-    if index >= input.len() { return; }
+    if index >= input.len() { terminate!(); }
     let row = index / width;
     let col = index % width;
-    let l2 = if col >= 2 { col - 2 } else { 0 };
-    let l4 = if col >= 4 { col - 4 } else { 0 };
-    let l6 = if col >= 6 { col - 6 } else { 0 };
-    let l8 = if col >= 8 { col - 8 } else { 0 };
+    let l2 = if col >= 2 { col - 2 } else { 0usize.into() };
+    let l4 = if col >= 4 { col - 4 } else { 0usize.into() };
+    let l6 = if col >= 6 { col - 6 } else { 0usize.into() };
+    let l8 = if col >= 8 { col - 8 } else { 0usize.into() };
     let r2 = col + 2;
     let r4 = col + 4;
     let r6 = col + 6;
@@ -381,13 +381,13 @@ fn lmmse_smooth_vertical_kernel(
     t0: f32, t1: f32, t2: f32, t3: f32, t4: f32,
 ) {
     let index = ABSOLUTE_POS;
-    if index >= input.len() { return; }
+    if index >= input.len() { terminate!(); }
     let row = index / width;
     let col = index % width;
-    let u2 = if row >= 2 { row - 2 } else { 0 };
-    let u4 = if row >= 4 { row - 4 } else { 0 };
-    let u6 = if row >= 6 { row - 6 } else { 0 };
-    let u8 = if row >= 8 { row - 8 } else { 0 };
+    let u2 = if row >= 2 { row - 2 } else { 0usize.into() };
+    let u4 = if row >= 4 { row - 4 } else { 0usize.into() };
+    let u6 = if row >= 6 { row - 6 } else { 0usize.into() };
+    let u8 = if row >= 8 { row - 8 } else { 0usize.into() };
     let d2 = row + 2;
     let d4 = row + 4;
     let d6 = row + 6;
@@ -405,16 +405,16 @@ fn lmmse_combine_kernel(
     width: usize, height: usize, c00: u32, c01: u32, c10: u32, c11: u32,
 ) {
     let index = ABSOLUTE_POS;
-    if index >= sensor.len() { return; }
+    if index >= sensor.len() { terminate!(); }
     let row = index / width;
     let col = index % width;
-    if bayer_color(row, col, c00, c01, c10, c11) == 1 { output[index] = sensor[index]; return; }
-    let left2 = if col >= 2 { col - 2 } else { 0 };
-    let left1 = if col >= 1 { col - 1 } else { 0 };
+    if bayer_color(row, col, c00, c01, c10, c11) == 1 { output[index] = sensor[index]; terminate!(); }
+    let left2 = if col >= 2 { col - 2 } else { 0usize.into() };
+    let left1 = if col >= 1 { col - 1 } else { 0usize.into() };
     let right1 = col + 1;
     let right2 = col + 2;
-    let up2 = if row >= 2 { row - 2 } else { 0 };
-    let up1 = if row >= 1 { row - 1 } else { 0 };
+    let up2 = if row >= 2 { row - 2 } else { 0usize.into() };
+    let up1 = if row >= 1 { row - 1 } else { 0usize.into() };
     let down1 = row + 1;
     let down2 = row + 2;
     let h0 = raw_sample(horizontal, row, left2, width, height);
@@ -431,8 +431,8 @@ fn lmmse_combine_kernel(
     let v_mean = (v0 + v1 + v2 + v3 + v4) / 5.0;
     let h_var = ((h0-h_mean)*(h0-h_mean) + (h1-h_mean)*(h1-h_mean) + (h2-h_mean)*(h2-h_mean) + (h3-h_mean)*(h3-h_mean) + (h4-h_mean)*(h4-h_mean)) / 5.0;
     let v_var = ((v0-v_mean)*(v0-v_mean) + (v1-v_mean)*(v1-v_mean) + (v2-v_mean)*(v2-v_mean) + (v3-v_mean)*(v3-v_mean) + (v4-v_mean)*(v4-v_mean)) / 5.0;
-    let wh = 1.0 / if h_var > 0.000001 { h_var } else { 0.000001 };
-    let wv = 1.0 / if v_var > 0.000001 { v_var } else { 0.000001 };
+    let wh = 1.0 / if h_var > 0.000001 { h_var } else { 0.000001f32.into() };
+    let wv = 1.0 / if v_var > 0.000001 { v_var } else { 0.000001f32.into() };
     output[index] = sensor[index] + (horizontal[index] * wh + vertical[index] * wv) / (wh + wv);
 }
 
@@ -450,14 +450,14 @@ fn initialize_color_diff_kernel(
 ) {
     let index = ABSOLUTE_POS;
     if index >= sensor.len() {
-        return;
+        terminate!();
     }
     let row = index / width;
     let col = index % width;
     output[index] = if bayer_color(row, col, c00, c01, c10, c11) == target {
         sensor[index] - green[index]
     } else {
-        0.0
+        0.0f32.into()
     };
 }
 
@@ -475,17 +475,17 @@ fn interpolate_color_diff_kernel(
 ) {
     let index = ABSOLUTE_POS;
     if index >= known.len() {
-        return;
+        terminate!();
     }
     let row = index / width;
     let col = index % width;
     if bayer_color(row, col, c00, c01, c10, c11) == target {
         output[index] = known[index];
-        return;
+        terminate!();
     }
-    let up = if row > 0 { row - 1 } else { 0 };
+    let up = if row > 0 { row - 1 } else { 0usize.into() };
     let down = if row + 1 < height { row + 1 } else { height - 1 };
-    let left = if col > 0 { col - 1 } else { 0 };
+    let left = if col > 0 { col - 1 } else { 0usize.into() };
     let right = if col + 1 < width { col + 1 } else { width - 1 };
     let nw_index = up * width + left;
     let n_index = up * width + col;
@@ -495,19 +495,19 @@ fn interpolate_color_diff_kernel(
     let sw_index = down * width + left;
     let s_index = down * width + col;
     let se_index = down * width + right;
-    let nw_known = if bayer_color(up, left, c00, c01, c10, c11) == target { 1.0 } else { 0.0 };
-    let n_known = if bayer_color(up, col, c00, c01, c10, c11) == target { 1.0 } else { 0.0 };
-    let ne_known = if bayer_color(up, right, c00, c01, c10, c11) == target { 1.0 } else { 0.0 };
-    let w_known = if bayer_color(row, left, c00, c01, c10, c11) == target { 1.0 } else { 0.0 };
-    let e_known = if bayer_color(row, right, c00, c01, c10, c11) == target { 1.0 } else { 0.0 };
-    let sw_known = if bayer_color(down, left, c00, c01, c10, c11) == target { 1.0 } else { 0.0 };
-    let s_known = if bayer_color(down, col, c00, c01, c10, c11) == target { 1.0 } else { 0.0 };
-    let se_known = if bayer_color(down, right, c00, c01, c10, c11) == target { 1.0 } else { 0.0 };
+    let nw_known = if bayer_color(up, left, c00, c01, c10, c11) == target { 1.0 } else { 0.0f32.into() };
+    let n_known = if bayer_color(up, col, c00, c01, c10, c11) == target { 1.0 } else { 0.0f32.into() };
+    let ne_known = if bayer_color(up, right, c00, c01, c10, c11) == target { 1.0 } else { 0.0f32.into() };
+    let w_known = if bayer_color(row, left, c00, c01, c10, c11) == target { 1.0 } else { 0.0f32.into() };
+    let e_known = if bayer_color(row, right, c00, c01, c10, c11) == target { 1.0 } else { 0.0f32.into() };
+    let sw_known = if bayer_color(down, left, c00, c01, c10, c11) == target { 1.0 } else { 0.0f32.into() };
+    let s_known = if bayer_color(down, col, c00, c01, c10, c11) == target { 1.0 } else { 0.0f32.into() };
+    let se_known = if bayer_color(down, right, c00, c01, c10, c11) == target { 1.0 } else { 0.0f32.into() };
     let sum = known[nw_index] * nw_known + known[n_index] * n_known + known[ne_index] * ne_known
         + known[w_index] * w_known + known[e_index] * e_known
         + known[sw_index] * sw_known + known[s_index] * s_known + known[se_index] * se_known;
     let count = nw_known + n_known + ne_known + w_known + e_known + sw_known + s_known + se_known;
-    output[index] = if count > 0.0 { sum / count } else { 0.0 };
+    output[index] = if count > 0.0 { sum / count } else { 0.0f32.into() };
 }
 
 #[cube(launch_unchecked)]
@@ -519,7 +519,7 @@ fn reconstruct_color_diff_kernel(
 ) {
     let index = ABSOLUTE_POS;
     if index >= green.len() {
-        return;
+        terminate!();
     }
     let offset = index * 3;
     output[offset] = green[index] + red_diff[index];
@@ -540,14 +540,14 @@ fn bilinear_demosaic_kernel(
 ) {
     let index = ABSOLUTE_POS;
     if index >= input.len() {
-        return;
+        terminate!();
     }
 
     let row = index / width;
     let col = index % width;
-    let up = if row > 0 { row - 1 } else { 0 };
+    let up = if row > 0 { row - 1 } else { 0usize.into() };
     let down = if row + 1 < height { row + 1 } else { height - 1 };
-    let left = if col > 0 { col - 1 } else { 0 };
+    let left = if col > 0 { col - 1 } else { 0usize.into() };
     let right = if col + 1 < width { col + 1 } else { width - 1 };
     let center = input[index];
     let cross = (
@@ -569,13 +569,13 @@ fn bilinear_demosaic_kernel(
         output[offset] = center;
         output[offset + 1] = cross;
         output[offset + 2] = diagonal;
-        return;
+        terminate!();
     }
     if color == 2 {
         output[offset] = diagonal;
         output[offset + 1] = cross;
         output[offset + 2] = center;
-        return;
+        terminate!();
     }
 
     let nw_color = bayer_color(up, left, c00, c01, c10, c11);
@@ -586,22 +586,22 @@ fn bilinear_demosaic_kernel(
     let ne = input[up * width + right];
     let sw = input[down * width + left];
     let se = input[down * width + right];
-    let red_sum = if nw_color == 0 { nw } else { 0.0 }
-        + if ne_color == 0 { ne } else { 0.0 }
-        + if sw_color == 0 { sw } else { 0.0 }
-        + if se_color == 0 { se } else { 0.0 };
-    let red_count = if nw_color == 0 { 1.0 } else { 0.0 }
-        + if ne_color == 0 { 1.0 } else { 0.0 }
-        + if sw_color == 0 { 1.0 } else { 0.0 }
-        + if se_color == 0 { 1.0 } else { 0.0 };
-    let blue_sum = if nw_color == 2 { nw } else { 0.0 }
-        + if ne_color == 2 { ne } else { 0.0 }
-        + if sw_color == 2 { sw } else { 0.0 }
-        + if se_color == 2 { se } else { 0.0 };
-    let blue_count = if nw_color == 2 { 1.0 } else { 0.0 }
-        + if ne_color == 2 { 1.0 } else { 0.0 }
-        + if sw_color == 2 { 1.0 } else { 0.0 }
-        + if se_color == 2 { 1.0 } else { 0.0 };
+    let red_sum = if nw_color == 0 { nw } else { 0.0f32.into() }
+        + if ne_color == 0 { ne } else { 0.0f32.into() }
+        + if sw_color == 0 { sw } else { 0.0f32.into() }
+        + if se_color == 0 { se } else { 0.0f32.into() };
+    let red_count = if nw_color == 0 { 1.0 } else { 0.0f32.into() }
+        + if ne_color == 0 { 1.0 } else { 0.0f32.into() }
+        + if sw_color == 0 { 1.0 } else { 0.0f32.into() }
+        + if se_color == 0 { 1.0 } else { 0.0f32.into() };
+    let blue_sum = if nw_color == 2 { nw } else { 0.0f32.into() }
+        + if ne_color == 2 { ne } else { 0.0f32.into() }
+        + if sw_color == 2 { sw } else { 0.0f32.into() }
+        + if se_color == 2 { se } else { 0.0f32.into() };
+    let blue_count = if nw_color == 2 { 1.0 } else { 0.0f32.into() }
+        + if ne_color == 2 { 1.0 } else { 0.0f32.into() }
+        + if sw_color == 2 { 1.0 } else { 0.0f32.into() }
+        + if se_color == 2 { 1.0 } else { 0.0f32.into() };
     output[offset] = if red_count > 0.0 { red_sum / red_count } else { center };
     output[offset + 1] = center;
     output[offset + 2] = if blue_count > 0.0 { blue_sum / blue_count } else { center };
@@ -611,7 +611,7 @@ fn bilinear_demosaic_kernel(
 fn rgb_to_ycbcr_kernel(input: &Array<f32>, y: &mut Array<f32>, cb: &mut Array<f32>, cr: &mut Array<f32>) {
     let index = ABSOLUTE_POS;
     if index >= y.len() {
-        return;
+        terminate!();
     }
     let offset = index * 3;
     let r = input[offset];
@@ -626,12 +626,12 @@ fn rgb_to_ycbcr_kernel(input: &Array<f32>, y: &mut Array<f32>, cb: &mut Array<f3
 fn atrous_horizontal_kernel(input: &Array<f32>, output: &mut Array<f32>, width: usize, gap: usize) {
     let index = ABSOLUTE_POS;
     if index >= input.len() {
-        return;
+        terminate!();
     }
     let row = index / width;
     let col = index % width;
-    let x0 = if col >= gap * 2 { col - gap * 2 } else { 0 };
-    let x1 = if col >= gap { col - gap } else { 0 };
+    let x0 = if col >= gap * 2 { col - gap * 2 } else { 0usize.into() };
+    let x1 = if col >= gap { col - gap } else { 0usize.into() };
     let x3 = if col + gap < width { col + gap } else { width - 1 };
     let x4 = if col + gap * 2 < width { col + gap * 2 } else { width - 1 };
     output[index] = (input[row * width + x0]
@@ -645,12 +645,12 @@ fn atrous_horizontal_kernel(input: &Array<f32>, output: &mut Array<f32>, width: 
 fn atrous_vertical_kernel(input: &Array<f32>, output: &mut Array<f32>, width: usize, height: usize, gap: usize) {
     let index = ABSOLUTE_POS;
     if index >= input.len() {
-        return;
+        terminate!();
     }
     let row = index / width;
     let col = index % width;
-    let y0 = if row >= gap * 2 { row - gap * 2 } else { 0 };
-    let y1 = if row >= gap { row - gap } else { 0 };
+    let y0 = if row >= gap * 2 { row - gap * 2 } else { 0usize.into() };
+    let y1 = if row >= gap { row - gap } else { 0usize.into() };
     let y3 = if row + gap < height { row + gap } else { height - 1 };
     let y4 = if row + gap * 2 < height { row + gap * 2 } else { height - 1 };
     output[index] = (input[y0 * width + col]
@@ -693,7 +693,7 @@ fn ycbcr_to_rgb_kernel(
 ) {
     let index = ABSOLUTE_POS;
     if index >= y_current.len() {
-        return;
+        terminate!();
     }
     let y = y_current[index] + y_detail[index];
     let cb = cb_current[index] + cb_detail[index];
@@ -702,9 +702,9 @@ fn ycbcr_to_rgb_kernel(
     let g = y - 0.344136 * cb - 0.714136 * cr;
     let b = y + 1.772 * cb;
     let offset = index * 3;
-    output[offset] = if r > 0.0 { r } else { 0.0 };
-    output[offset + 1] = if g > 0.0 { g } else { 0.0 };
-    output[offset + 2] = if b > 0.0 { b } else { 0.0 };
+    output[offset] = if r > 0.0 { r } else { 0.0f32.into() };
+    output[offset + 1] = if g > 0.0 { g } else { 0.0f32.into() };
+    output[offset + 2] = if b > 0.0 { b } else { 0.0f32.into() };
 }
 
 #[cube(launch_unchecked)]
@@ -719,13 +719,13 @@ fn gaussian_horizontal_7_kernel(
 ) {
     let index = ABSOLUTE_POS;
     if index >= input.len() {
-        return;
+        terminate!();
     }
     let row = index / width;
     let col = index % width;
-    let x0 = if col >= 3 { col - 3 } else { 0 };
-    let x1 = if col >= 2 { col - 2 } else { 0 };
-    let x2 = if col >= 1 { col - 1 } else { 0 };
+    let x0 = if col >= 3 { col - 3 } else { 0usize.into() };
+    let x1 = if col >= 2 { col - 2 } else { 0usize.into() };
+    let x2 = if col >= 1 { col - 1 } else { 0usize.into() };
     let x4 = if col + 1 < width { col + 1 } else { width - 1 };
     let x5 = if col + 2 < width { col + 2 } else { width - 1 };
     let x6 = if col + 3 < width { col + 3 } else { width - 1 };
@@ -751,13 +751,13 @@ fn gaussian_vertical_7_kernel(
 ) {
     let index = ABSOLUTE_POS;
     if index >= input.len() {
-        return;
+        terminate!();
     }
     let row = index / width;
     let col = index % width;
-    let y0 = if row >= 3 { row - 3 } else { 0 };
-    let y1 = if row >= 2 { row - 2 } else { 0 };
-    let y2 = if row >= 1 { row - 1 } else { 0 };
+    let y0 = if row >= 3 { row - 3 } else { 0usize.into() };
+    let y1 = if row >= 2 { row - 2 } else { 0usize.into() };
+    let y2 = if row >= 1 { row - 1 } else { 0usize.into() };
     let y4 = if row + 1 < height { row + 1 } else { height - 1 };
     let y5 = if row + 2 < height { row + 2 } else { height - 1 };
     let y6 = if row + 3 < height { row + 3 } else { height - 1 };
@@ -771,22 +771,34 @@ fn gaussian_vertical_7_kernel(
 }
 
 #[cube(launch_unchecked)]
-fn sharpen_blend_mask_kernel(input: &Array<f32>, output: &mut Array<f32>, width: usize, height: usize) {
+fn sharpen_blend_mask_kernel(
+    input: &Array<f32>,
+    output: &mut Array<f32>,
+    width: usize,
+    height: usize,
+    threshold: f32,
+) {
     let index = ABSOLUTE_POS;
     if index >= input.len() {
-        return;
+        terminate!();
     }
     let row = index / width;
     let col = index % width;
-    let left = if col > 0 { col - 1 } else { 0 };
+    let left = if col > 0 { col - 1 } else { 0usize.into() };
     let right = if col + 1 < width { col + 1 } else { width - 1 };
-    let up = if row > 0 { row - 1 } else { 0 };
+    let up = if row > 0 { row - 1 } else { 0usize.into() };
     let down = if row + 1 < height { row + 1 } else { height - 1 };
     let gx = input[row * width + right] - input[row * width + left];
     let gy = input[down * width + col] - input[up * width + col];
     let gradient = (gx * gx + gy * gy).sqrt();
-    let raw = gradient / 0.04;
-    let t = if raw < 0.0 { 0.0 } else if raw > 1.0 { 1.0 } else { raw };
+    // `gradient` is non-negative by construction. Keep this expression in
+    // CubeCL's expanded scalar domain rather than materializing an inferred
+    // host-side local, which would make shader compilation reject it.
+    let t = if gradient > threshold {
+        1.0f32.into()
+    } else {
+        gradient / threshold
+    };
     output[index] = t * t * (3.0 - 2.0 * t);
 }
 
@@ -813,15 +825,15 @@ fn ycbcr_planes_to_rgb_kernel(
 ) {
     let index = ABSOLUTE_POS;
     if index >= y.len() {
-        return;
+        terminate!();
     }
     let r = y[index] + 1.402 * cr[index];
     let g = y[index] - 0.344136 * cb[index] - 0.714136 * cr[index];
     let b = y[index] + 1.772 * cb[index];
     let offset = index * 3;
-    output[offset] = if r > 0.0 { r } else { 0.0 };
-    output[offset + 1] = if g > 0.0 { g } else { 0.0 };
-    output[offset + 2] = if b > 0.0 { b } else { 0.0 };
+    output[offset] = if r > 0.0 { r } else { 0.0f32.into() };
+    output[offset + 1] = if g > 0.0 { g } else { 0.0f32.into() };
+    output[offset + 2] = if b > 0.0 { b } else { 0.0f32.into() };
 }
 
 /// Performs CFA-periodic hot/dead pixel correction on the shared GPU.
@@ -1168,9 +1180,8 @@ pub fn lmmse_demosaic(
     let device = SHARED_WGPU_DEVICE.get()?;
     let [c00, c01, c10, c11] = sensor_cfa_pattern(sensor);
     let mut taps = [0.0f32; 5];
-    let mut tap_sum = 0.0f32;
     for i in 0..=4usize { taps[i] = (-((i * i) as f32) / 8.0).exp(); }
-    tap_sum = taps[0] + 2.0 * (taps[1] + taps[2] + taps[3] + taps[4]);
+    let tap_sum = taps[0] + 2.0 * (taps[1] + taps[2] + taps[3] + taps[4]);
     for tap in &mut taps { *tap /= tap_sum; }
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let client = cubecl::wgpu::WgpuRuntime::client(device);
@@ -1293,7 +1304,7 @@ pub fn bilinear_demosaic(
     .flatten()
 }
 
-fn launch_1d<R: Runtime>(client: &ComputeClient<R>, len: usize) -> (CubeCount, CubeDim) {
+fn launch_1d<R: Runtime>(_client: &ComputeClient<R>, len: usize) -> (CubeCount, CubeDim) {
     let cube_dim = CubeDim::new_1d(256);
     let cube_count = CubeCount::Static(
         len.div_ceil(cube_dim.num_elems() as usize) as u32,
@@ -1536,6 +1547,7 @@ pub fn unsharp_mask(
                 ArrayArg::from_raw_parts(blend.clone(), len),
                 width,
                 height,
+                0.04,
             );
             unsharp_combine_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
                 &client,

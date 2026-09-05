@@ -1151,6 +1151,7 @@ pub async fn load_image(
     configure_raw_develop_visual_models(&app_handle);
     let my_generation = state.load_image_generation.fetch_add(1, Ordering::SeqCst) + 1;
     let generation_tracker = state.load_image_generation.clone();
+    let generation_tracker_for_decode = generation_tracker.clone();
     let cancel_token = Some((generation_tracker.clone(), my_generation));
 
     {
@@ -1235,14 +1236,14 @@ pub async fn load_image(
 
         let (pristine_img, exif_data_loaded) = tokio::task::spawn_blocking(move || {
             let settings = settings_for_decode;
-            if generation_tracker.load(Ordering::SeqCst) != my_generation {
+            if generation_tracker_for_decode.load(Ordering::SeqCst) != my_generation {
                 return Err("Load cancelled".to_string());
             }
 
             let result: Result<(DynamicImage, HashMap<String, String>), String> =
                 (|| match read_file_mapped(Path::new(&path_clone)) {
                     Ok(mmap) => {
-                        if generation_tracker.load(Ordering::SeqCst) != my_generation {
+                        if generation_tracker_for_decode.load(Ordering::SeqCst) != my_generation {
                             return Err("Load cancelled".to_string());
                         }
 
@@ -1277,7 +1278,7 @@ pub async fn load_image(
                             format!("Fallback read failed for {}: {}", path_clone, io_err)
                         })?;
 
-                        if generation_tracker.load(Ordering::SeqCst) != my_generation {
+                        if generation_tracker_for_decode.load(Ordering::SeqCst) != my_generation {
                             return Err("Load cancelled".to_string());
                         }
 

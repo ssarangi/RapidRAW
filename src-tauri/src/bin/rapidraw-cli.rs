@@ -1284,8 +1284,9 @@ fn verify_visual_runtime(directory: &std::path::Path, model_id: &str) -> Result<
         }
         let manifest_json = fs::read_to_string(manifest)
             .map_err(|error| format!("BioCLIP taxonomy manifest cannot be read: {error}"))?;
-        let parts = serde_json::from_str::<serde_json::Value>(&manifest_json)
-            .map_err(|error| format!("BioCLIP taxonomy manifest is invalid JSON: {error}"))?
+        let manifest_value = serde_json::from_str::<serde_json::Value>(&manifest_json)
+            .map_err(|error| format!("BioCLIP taxonomy manifest is invalid JSON: {error}"))?;
+        let parts = manifest_value
             .get("embeddingParts")
             .and_then(serde_json::Value::as_array)
             .ok_or("BioCLIP taxonomy manifest has no embedding parts")?;
