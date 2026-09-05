@@ -289,7 +289,14 @@ pub fn get_or_init_gpu_context(
                 queue: queue.clone(),
                 backend: adapter_info.backend,
             },
-            cubecl::wgpu::RuntimeOptions::default(),
+            // RAW development is deliberately background work sharing the
+            // editor's device. Submit one kernel at a time instead of
+            // batching a long sequence, so interactive WGPU adjustment
+            // renders can get onto the queue between RAW passes.
+            cubecl::wgpu::RuntimeOptions {
+                tasks_max: 1,
+                ..Default::default()
+            },
         )
     }))
     .map_err(|_| {
