@@ -92,6 +92,12 @@ pub fn algorithm_name(algo: DemosaicAlgorithm) -> &'static str {
 }
 
 pub fn demosaic(sensor: &RawSensorData, algo: DemosaicAlgorithm) -> Vec<[f32; 3]> {
+    if algo == DemosaicAlgorithm::AMaZE {
+        if let Some(rgb) = crate::raw_gpu_processing::amaze_demosaic(sensor) {
+            return rgb;
+        }
+    }
+
     let green = match algo {
         DemosaicAlgorithm::Bilinear => {
             if let Some(rgb) = crate::raw_gpu_processing::bilinear_demosaic(sensor) {

@@ -109,6 +109,193 @@ fn bayer_color(row: usize, col: usize, c00: u32, c01: u32, c10: u32, c11: u32) -
     }
 }
 
+#[cube]
+fn raw_sample(input: &Array<f32>, row: usize, col: usize, width: usize, height: usize) -> f32 {
+    let y = if row < height { row } else { height - 1 };
+    let x = if col < width { col } else { width - 1 };
+    input[y * width + x]
+}
+
+#[cube(launch_unchecked)]
+fn amaze_green_kernel(
+    input: &Array<f32>,
+    output: &mut Array<f32>,
+    width: usize,
+    height: usize,
+    c00: u32,
+    c01: u32,
+    c10: u32,
+    c11: u32,
+) {
+    let index = ABSOLUTE_POS;
+    if index >= input.len() {
+        return;
+    }
+    let row = index / width;
+    let col = index % width;
+    if bayer_color(row, col, c00, c01, c10, c11) == 1 {
+        output[index] = input[index];
+        return;
+    }
+
+    let center = input[index];
+    let up1 = if row >= 1 { row - 1 } else { 0 };
+    let up2 = if row >= 2 { row - 2 } else { 0 };
+    let up3 = if row >= 3 { row - 3 } else { 0 };
+    let up4 = if row >= 4 { row - 4 } else { 0 };
+    let up5 = if row >= 5 { row - 5 } else { 0 };
+    let down1 = row + 1;
+    let down2 = row + 2;
+    let down3 = row + 3;
+    let down4 = row + 4;
+    let down5 = row + 5;
+    let left1 = if col >= 1 { col - 1 } else { 0 };
+    let left2 = if col >= 2 { col - 2 } else { 0 };
+    let left3 = if col >= 3 { col - 3 } else { 0 };
+    let left4 = if col >= 4 { col - 4 } else { 0 };
+    let left5 = if col >= 5 { col - 5 } else { 0 };
+    let right1 = col + 1;
+    let right2 = col + 2;
+    let right3 = col + 3;
+    let right4 = col + 4;
+    let right5 = col + 5;
+
+    let n = (23.0 * raw_sample(input, up1, col, width, height)
+        + 23.0 * raw_sample(input, up3, col, width, height)
+        + raw_sample(input, up5, col, width, height)
+        + raw_sample(input, down1, col, width, height)
+        + 40.0 * center
+        - 32.0 * raw_sample(input, up2, col, width, height)
+        - 8.0 * raw_sample(input, up4, col, width, height)) / 48.0;
+    let s = (23.0 * raw_sample(input, down1, col, width, height)
+        + 23.0 * raw_sample(input, down3, col, width, height)
+        + raw_sample(input, down5, col, width, height)
+        + raw_sample(input, up1, col, width, height)
+        + 40.0 * center
+        - 32.0 * raw_sample(input, down2, col, width, height)
+        - 8.0 * raw_sample(input, down4, col, width, height)) / 48.0;
+    let e = (23.0 * raw_sample(input, row, right1, width, height)
+        + 23.0 * raw_sample(input, row, right3, width, height)
+        + raw_sample(input, row, right5, width, height)
+        + raw_sample(input, row, left1, width, height)
+        + 40.0 * center
+        - 32.0 * raw_sample(input, row, right2, width, height)
+        - 8.0 * raw_sample(input, row, right4, width, height)) / 48.0;
+    let w = (23.0 * raw_sample(input, row, left1, width, height)
+        + 23.0 * raw_sample(input, row, left3, width, height)
+        + raw_sample(input, row, left5, width, height)
+        + raw_sample(input, row, right1, width, height)
+        + 40.0 * center
+        - 32.0 * raw_sample(input, row, left2, width, height)
+        - 8.0 * raw_sample(input, row, left4, width, height)) / 48.0;
+    let grad_n = 0.00001 + (raw_sample(input, up1, col, width, height) - raw_sample(input, up3, col, width, height)).abs()
+        + (center - raw_sample(input, up2, col, width, height)).abs();
+    let grad_s = 0.00001 + (raw_sample(input, down1, col, width, height) - raw_sample(input, down3, col, width, height)).abs()
+        + (center - raw_sample(input, down2, col, width, height)).abs();
+    let grad_e = 0.00001 + (raw_sample(input, row, right1, width, height) - raw_sample(input, row, right3, width, height)).abs()
+        + (center - raw_sample(input, row, right2, width, height)).abs();
+    let grad_w = 0.00001 + (raw_sample(input, row, left1, width, height) - raw_sample(input, row, left3, width, height)).abs()
+        + (center - raw_sample(input, row, left2, width, height)).abs();
+    let grad_v = grad_n + grad_s;
+    let grad_h = grad_e + grad_w;
+    output[index] = if grad_h < grad_v {
+        (grad_w * e + grad_e * w) / (grad_e + grad_w)
+    } else {
+        (grad_s * n + grad_n * s) / (grad_n + grad_s)
+    };
+}
+
+#[cube(launch_unchecked)]
+fn initialize_color_diff_kernel(
+    sensor: &Array<f32>,
+    green: &Array<f32>,
+    output: &mut Array<f32>,
+    width: usize,
+    c00: u32,
+    c01: u32,
+    c10: u32,
+    c11: u32,
+    target: u32,
+) {
+    let index = ABSOLUTE_POS;
+    if index >= sensor.len() {
+        return;
+    }
+    let row = index / width;
+    let col = index % width;
+    output[index] = if bayer_color(row, col, c00, c01, c10, c11) == target {
+        sensor[index] - green[index]
+    } else {
+        0.0
+    };
+}
+
+#[cube(launch_unchecked)]
+fn interpolate_color_diff_kernel(
+    known: &Array<f32>,
+    output: &mut Array<f32>,
+    width: usize,
+    height: usize,
+    c00: u32,
+    c01: u32,
+    c10: u32,
+    c11: u32,
+    target: u32,
+) {
+    let index = ABSOLUTE_POS;
+    if index >= known.len() {
+        return;
+    }
+    let row = index / width;
+    let col = index % width;
+    if bayer_color(row, col, c00, c01, c10, c11) == target {
+        output[index] = known[index];
+        return;
+    }
+    let up = if row > 0 { row - 1 } else { 0 };
+    let down = if row + 1 < height { row + 1 } else { height - 1 };
+    let left = if col > 0 { col - 1 } else { 0 };
+    let right = if col + 1 < width { col + 1 } else { width - 1 };
+    let nw_index = up * width + left;
+    let n_index = up * width + col;
+    let ne_index = up * width + right;
+    let w_index = row * width + left;
+    let e_index = row * width + right;
+    let sw_index = down * width + left;
+    let s_index = down * width + col;
+    let se_index = down * width + right;
+    let nw_known = if bayer_color(up, left, c00, c01, c10, c11) == target { 1.0 } else { 0.0 };
+    let n_known = if bayer_color(up, col, c00, c01, c10, c11) == target { 1.0 } else { 0.0 };
+    let ne_known = if bayer_color(up, right, c00, c01, c10, c11) == target { 1.0 } else { 0.0 };
+    let w_known = if bayer_color(row, left, c00, c01, c10, c11) == target { 1.0 } else { 0.0 };
+    let e_known = if bayer_color(row, right, c00, c01, c10, c11) == target { 1.0 } else { 0.0 };
+    let sw_known = if bayer_color(down, left, c00, c01, c10, c11) == target { 1.0 } else { 0.0 };
+    let s_known = if bayer_color(down, col, c00, c01, c10, c11) == target { 1.0 } else { 0.0 };
+    let se_known = if bayer_color(down, right, c00, c01, c10, c11) == target { 1.0 } else { 0.0 };
+    let sum = known[nw_index] * nw_known + known[n_index] * n_known + known[ne_index] * ne_known
+        + known[w_index] * w_known + known[e_index] * e_known
+        + known[sw_index] * sw_known + known[s_index] * s_known + known[se_index] * se_known;
+    let count = nw_known + n_known + ne_known + w_known + e_known + sw_known + s_known + se_known;
+    output[index] = if count > 0.0 { sum / count } else { 0.0 };
+}
+
+#[cube(launch_unchecked)]
+fn reconstruct_color_diff_kernel(
+    green: &Array<f32>,
+    red_diff: &Array<f32>,
+    blue_diff: &Array<f32>,
+    output: &mut Array<f32>,
+) {
+    let index = ABSOLUTE_POS;
+    if index >= green.len() {
+        return;
+    }
+    let offset = index * 3;
+    output[offset] = green[index] + red_diff[index];
+    output[offset + 1] = green[index];
+    output[offset + 2] = green[index] + blue_diff[index];
+}
+
 #[cube(launch_unchecked)]
 fn bilinear_demosaic_kernel(
     input: &Array<f32>,
@@ -536,6 +723,139 @@ fn cfa_color_code(color: rawler::cfa::CFAColor) -> u32 {
     }
 }
 
+fn sensor_cfa_pattern(sensor: &crate::custom_raw_pipeline::RawSensorData) -> [u32; 4] {
+    [
+        cfa_color_code((sensor.cfa_at)(0, 0)),
+        cfa_color_code((sensor.cfa_at)(0, 1)),
+        cfa_color_code((sensor.cfa_at)(1, 0)),
+        cfa_color_code((sensor.cfa_at)(1, 1)),
+    ]
+}
+
+/// GPU implementation of the AMaZE-compatible directional pipeline used by
+/// the standard low-ISO RAW Develop mode.
+pub fn amaze_demosaic(
+    sensor: &crate::custom_raw_pipeline::RawSensorData,
+) -> Option<Vec<[f32; 3]>> {
+    const MIN_GPU_PIXELS: usize = 1_048_576;
+
+    if sensor.data.len() < MIN_GPU_PIXELS
+        || sensor.data.len() != sensor.width.saturating_mul(sensor.height)
+    {
+        return None;
+    }
+    let device = SHARED_WGPU_DEVICE.get()?;
+    let [c00, c01, c10, c11] = sensor_cfa_pattern(sensor);
+
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let client = cubecl::wgpu::WgpuRuntime::client(device);
+        let len = sensor.data.len();
+        let (cube_count, cube_dim) = launch_1d(&client, len);
+        let input = client.create_from_slice(bytemuck::cast_slice(&sensor.data));
+        let green = client.empty(len * std::mem::size_of::<f32>());
+        let red_known = client.empty(len * std::mem::size_of::<f32>());
+        let blue_known = client.empty(len * std::mem::size_of::<f32>());
+        let red_diff = client.empty(len * std::mem::size_of::<f32>());
+        let blue_diff = client.empty(len * std::mem::size_of::<f32>());
+        let output = client.empty(len * 3 * std::mem::size_of::<f32>());
+
+        unsafe {
+            amaze_green_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client,
+                cube_count.clone(),
+                cube_dim.clone(),
+                ArrayArg::from_raw_parts(input.clone(), len),
+                ArrayArg::from_raw_parts(green.clone(), len),
+                sensor.width,
+                sensor.height,
+                c00,
+                c01,
+                c10,
+                c11,
+            );
+            initialize_color_diff_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client,
+                cube_count.clone(),
+                cube_dim.clone(),
+                ArrayArg::from_raw_parts(input.clone(), len),
+                ArrayArg::from_raw_parts(green.clone(), len),
+                ArrayArg::from_raw_parts(red_known.clone(), len),
+                sensor.width,
+                c00,
+                c01,
+                c10,
+                c11,
+                0,
+            );
+            initialize_color_diff_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client,
+                cube_count.clone(),
+                cube_dim.clone(),
+                ArrayArg::from_raw_parts(input, len),
+                ArrayArg::from_raw_parts(green.clone(), len),
+                ArrayArg::from_raw_parts(blue_known.clone(), len),
+                sensor.width,
+                c00,
+                c01,
+                c10,
+                c11,
+                2,
+            );
+            interpolate_color_diff_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client,
+                cube_count.clone(),
+                cube_dim.clone(),
+                ArrayArg::from_raw_parts(red_known, len),
+                ArrayArg::from_raw_parts(red_diff.clone(), len),
+                sensor.width,
+                sensor.height,
+                c00,
+                c01,
+                c10,
+                c11,
+                0,
+            );
+            interpolate_color_diff_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client,
+                cube_count.clone(),
+                cube_dim.clone(),
+                ArrayArg::from_raw_parts(blue_known, len),
+                ArrayArg::from_raw_parts(blue_diff.clone(), len),
+                sensor.width,
+                sensor.height,
+                c00,
+                c01,
+                c10,
+                c11,
+                2,
+            );
+            reconstruct_color_diff_kernel::launch_unchecked::<cubecl::wgpu::WgpuRuntime>(
+                &client,
+                cube_count,
+                cube_dim,
+                ArrayArg::from_raw_parts(green, len),
+                ArrayArg::from_raw_parts(red_diff, len),
+                ArrayArg::from_raw_parts(blue_diff, len),
+                ArrayArg::from_raw_parts(output.clone(), len * 3),
+            );
+        }
+
+        let bytes = client.read_one(output).ok()?;
+        let demosaiced = f32::from_bytes(&bytes);
+        if demosaiced.len() != len * 3 {
+            return None;
+        }
+        Some(
+            demosaiced
+                .chunks_exact(3)
+                .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+                .collect(),
+        )
+    }))
+    .ok()
+    .flatten()
+}
+
 /// GPU implementation of the explicit Bilinear RAW Develop choice.
 pub fn bilinear_demosaic(
     sensor: &crate::custom_raw_pipeline::RawSensorData,
@@ -548,10 +868,7 @@ pub fn bilinear_demosaic(
         return None;
     }
     let device = SHARED_WGPU_DEVICE.get()?;
-    let c00 = cfa_color_code((sensor.cfa_at)(0, 0));
-    let c01 = cfa_color_code((sensor.cfa_at)(0, 1));
-    let c10 = cfa_color_code((sensor.cfa_at)(1, 0));
-    let c11 = cfa_color_code((sensor.cfa_at)(1, 1));
+    let [c00, c01, c10, c11] = sensor_cfa_pattern(sensor);
 
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let client = cubecl::wgpu::WgpuRuntime::client(device);
